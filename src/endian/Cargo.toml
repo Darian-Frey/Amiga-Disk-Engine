@@ -1,0 +1,14 @@
+[package]
+name = "ade-endian"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "ADE: big-endian conversion — the single byte-order seam (C-001)"
+
+[dependencies]
+
+[lints]
+workspace = true

@@ -1,0 +1,15 @@
+[package]
+name = "ade-track"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "ADE: MFM track codec — encode/decode, sync words"
+
+[dependencies]
+ade-block = { workspace = true }
+ade-endian = { workspace = true }
+[lints]
+workspace = true

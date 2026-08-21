@@ -1,6 +1,8 @@
 # Build
 
-> **Stub.** Per the project-scaffold standard, BUILD.md is filled in when the first build succeeds. ADE has no code yet; this file records the *intended* environment so the eventual build recipe has a home. **D-001** (language/stack) and **D-002** (reimplement rather than wrap) were Accepted on 2026-08-21, so the toolchain below is now settled rather than conditional — see [DECISIONS.md](DECISIONS.md). Exact versions and commands land here when the first build succeeds.
+> **No longer a stub.** The Rust workspace builds, tests, and lints as of 2026-08-21, so the commands below are real rather than intended. The Qt6 GUI does not exist yet (Phase 5), so its half remains prospective. Toolchain settled by **D-001** and **D-002** — see [DECISIONS.md](DECISIONS.md).
+>
+> Verified against Rust 1.95.0 on Linux x86-64. The workspace pins `edition = "2024"` and `rust-version = "1.85"`.
 
 ## Supported platforms
 
@@ -32,13 +34,48 @@ Exact versions and per-platform install commands: TBD until the first build.
 
 ## Build commands (placeholder)
 
+The workspace builds and tests today, though the engine is still a scaffold:
+
 ```bash
-# Not yet runnable — no code. Expected shape:
-#   cargo build --release        # core crates + CLI + C-ABI bridge
-#   cargo test                   # unit + integration
-#   cargo fuzz run <target>      # F-001 acceptance
-#   cmake --build build          # Qt6 GUI (Phase 5)
+cargo build --workspace          # all crates + the `ade` binary
+cargo test  --workspace          # unit tests
+cargo run   -p ade-cli           # prints version; no commands yet
 ```
+
+The full check set, which CI runs on every push:
+
+```bash
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace --all-targets
+RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
+python3 tools/check-layering.py   # D-003: no cross-layer dependencies
+```
+
+Still to come:
+
+```bash
+cargo fuzz run <target>          # F-001 acceptance, with the first parser
+cmake --build build              # Qt6 GUI (Phase 5)
+```
+
+## Lints as invariants
+
+The workspace lint set in the root `Cargo.toml` is load-bearing, not
+cosmetic. Relaxing any of it is a decision rather than a convenience:
+
+- `unsafe_code = "forbid"` — nothing in the core needs it. The C-ABI bridge
+  will, and gets a scoped exemption when it exists (D-001, D-006).
+- `unwrap_used`, `expect_used`, `panic`, `indexing_slicing`,
+  `arithmetic_side_effects` — all denied. Each is a route from hostile input
+  to a crash, which F-001 forbids.
+- `clippy.toml` disallows `u32::from_be_bytes` and its siblings everywhere
+  except `ade-endian`, so C-001's "one byte-order module" is enforced by the
+  build rather than by review.
+
+`integer_division` is deliberately **not** enabled: its advice is to prefer
+floats, which would be a defect in a disk tool, and the panic it guards
+against is already covered by `arithmetic_side_effects`.
 
 ## Cross-compilation
 

@@ -1,0 +1,21 @@
+[package]
+name = "ade-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "ADE: the core library API — the single seam the CLI and GUI consume"
+
+[dependencies]
+ade-block = { workspace = true }
+ade-catalogue = { workspace = true }
+ade-container = { workspace = true }
+ade-endian = { workspace = true }
+ade-filesystem = { workspace = true }
+ade-flux = { workspace = true }
+ade-object = { workspace = true }
+ade-track = { workspace = true }
+[lints]
+workspace = true

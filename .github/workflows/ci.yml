@@ -1,0 +1,50 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  check:
+    name: Format, lint, test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install toolchain
+        run: rustup component add rustfmt clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Formatting
+        run: cargo fmt --all -- --check
+
+      # The lint set is not cosmetic: `unsafe_code` is forbidden (D-006), raw
+      # byte-order conversions outside ade-endian are rejected (C-001), and the
+      # panic-adjacent lints enforce "no crash on hostile input" (F-001).
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Tests
+        run: cargo test --workspace --all-targets
+
+      - name: Docs build without warnings
+        run: cargo doc --workspace --no-deps
+        env:
+          RUSTDOCFLAGS: -D warnings
+
+  layering:
+    name: Layering (D-003)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # No module may span two pipeline layers. Adding a cross-layer dependency
+      # must be a deliberate edit to the policy file, not an unnoticed line in a
+      # Cargo.toml.
+      - name: Check the crate dependency graph
+        run: python3 tools/check-layering.py

@@ -1,0 +1,14 @@
+[package]
+name = "ade-block"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "ADE: 512-byte block abstraction, geometry, bounds-checked access"
+
+[dependencies]
+ade-endian = { workspace = true }
+[lints]
+workspace = true

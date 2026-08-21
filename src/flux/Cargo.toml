@@ -1,0 +1,15 @@
+[package]
+name = "ade-flux"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "ADE: flux layer — SCP, extended-ADF, optional IPF-read, hardware"
+
+[dependencies]
+ade-track = { workspace = true }
+ade-block = { workspace = true }
+[lints]
+workspace = true

@@ -1,7 +1,7 @@
 > **Status:** Active
 > **Provenance:** Claude (primary auditor / initial scaffolding, 2026-08-21)
 > **Last reviewed:** 2026-08-21
-> **Why this status:** Planning phase. Documentation set and directory skeleton in place; no code yet. The blocking stack decisions were resolved on 2026-08-21 (D-001, D-002) and the licence is settled (D-011), so Phase 1 is unblocked. Fixture provenance (D-010) remains open.
+> **Why this status:** Early implementation. The stack decisions are settled (D-001, D-002) and the licence chosen (D-011). The workspace builds, tests, and lints, but the engine is a scaffold: no image is parsed yet. Fixture provenance (D-010) remains open and gates Phase 1 validation.
 
 # Amiga Disk Engine (ADE)
 
@@ -18,18 +18,25 @@ ADE targets the gap no current tool fills. The capable Amiga engines (amitools, 
 
 ## Quick start
 
-> There is nothing to run yet — see **Status** below. Cloning gets you the documentation set and the layered skeleton.
-
 ```bash
 git clone https://github.com/Darian-Frey/Amiga-Disk-Engine
 cd Amiga-Disk-Engine
+cargo test --workspace
+cargo run -p ade-cli
 ```
 
-Build commands will appear here once the first build succeeds; the toolchain is settled (Rust + Cargo for the core, CLI, and C-ABI bridge; CMake + Qt6 for the GUI from Phase 5) and is recorded in [BUILD.md](Docs/BUILD.md).
+The workspace builds and tests, but **the engine does nothing useful yet** — `ade` prints its version and says so. What exists is the skeleton, the layer seams, and the machinery that keeps them honest. See **Status** below and [BUILD.md](Docs/BUILD.md).
 
 ## Status
 
-**Planning stage — there is no runnable build yet.** The repository holds the documentation set and the directory skeleton.
+**Early implementation — nothing parses a real image yet.** What exists:
+
+- `ade-endian` — the C-001 byte-order seam, bounds-checked and overflow-safe.
+- `ade-block` — geometry, `BlockIndex`, and the `BlockSource` trait, with AV-004 enforced by the type system rather than by discipline: `read_block` takes a `ValidBlock`, which only `Geometry::validate` can construct.
+- `ade-filesystem::dostype` — dostype decoding by documented flag bits.
+- Seven further layer crates as documented stubs, wired into the dependency graph so the architecture is real before the code is.
+
+Next is the first vertical slice — `ade info <image>`, reporting geometry, dostype, and bootblock checksum validity — which cuts through container → block → endian → filesystem and so exercises every seam early rather than at integration time.
 
 The two decisions that gated all implementation were settled on 2026-08-21:
 
@@ -70,7 +77,9 @@ Amiga-Disk-Engine/
 ├── LICENSE            Apache-2.0 (D-011).
 ├── NOTICE             Attribution; records that ADE has no third-party code.
 ├── Docs/              Documentation set (see index below).
-├── src/               Core engine, one directory per pipeline layer.
+├── Cargo.toml         Workspace manifest; the lint set encodes the invariants.
+├── clippy.toml        C-001 enforcement: byte-order conversion is ade-endian's alone.
+├── src/               Core engine, one crate per pipeline layer.
 │   ├── endian/        Big-endian ↔ host conversion. The only place it happens (C-001).
 │   ├── flux/          SCP, extended-ADF, optional IPF-read, hardware isolation.
 │   ├── track/         MFM encode/decode, sync words, gaps.
@@ -87,14 +96,23 @@ Amiga-Disk-Engine/
 │   ├── fuzz/          Fuzz harnesses and malformed-input corpus.
 │   ├── unit/          Per-layer tests.
 │   └── integration/   Cross-layer and end-to-end tests.
-└── tools/             Development and corpus-maintenance scripts.
+└── tools/             Development scripts, incl. the D-003 layering check.
 ```
 
-The directories are currently empty of build files — the skeleton was laid down before D-001 was settled, so it commits only to the layered architecture (D-003). With the stack now chosen, `src/<layer>/` becomes a Cargo workspace of `ade-*` crates: an additive change, no renames.
+Each `src/<layer>/` directory is a crate (`ade-endian`, `ade-block`, …), and the crate dependency graph *is* the architecture: layers depend downward on abstractions only. `ade-block` defines the `BlockSource` seam; `ade-container` and `ade-track` implement it; so `ade-block` depends on neither. `ade-core` is the one crate permitted to know every layer, and the front-ends see only `ade-core`.
+
+Two invariants are enforced by the build rather than by review:
+
+- **C-001** (one byte-order module) — `clippy.toml` disallows `u32::from_be_bytes` and its siblings everywhere except `ade-endian`.
+- **D-003** (no module spans two layers) — [`tools/check-layering.py`](tools/check-layering.py) declares each crate's permitted dependencies and fails CI on any deviation, so widening the graph is a deliberate, reviewable edit.
 
 ## Building
 
-No build yet. The toolchain is settled (D-001): a Rust core with a Qt6 GUI over a C-ABI bridge — the "Pontus pattern". Linux (x86-64) is the primary target; Windows and macOS come later. ADFlib is *not* a build dependency; it is needed only to run the differential test suite. Exact commands and versions land in [BUILD.md](Docs/BUILD.md) when the first build succeeds.
+A Rust core with a Qt6 GUI over a C-ABI bridge — the "Pontus pattern" (D-001). Linux (x86-64) is the primary target; Windows and macOS come later. The GUI does not exist yet, so only the Rust half builds today; `cargo build --workspace` is enough.
+
+ADFlib is *not* a build dependency. Under D-002 it is a black-box differential-test oracle, needed only to run that suite, and the suite skips rather than fails when it is absent.
+
+Full commands, the lint set and why each lint is there, in [BUILD.md](Docs/BUILD.md).
 
 ## Documentation
 

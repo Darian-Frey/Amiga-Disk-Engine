@@ -2,13 +2,14 @@
 
 ## Project
 
-Amiga Disk Engine (ADE) — a forensic-grade, cross-platform toolkit for reading, validating, cataloguing, and writing Amiga floppy and hard-disk images. Successor to the Atari Disk Engine, carrying its lessons (chiefly: no god-class, protected formats designed-for early, untrusted-input stance). Planning stage — documentation-first, no code yet.
+Amiga Disk Engine (ADE) — a forensic-grade, cross-platform toolkit for reading, validating, cataloguing, and writing Amiga floppy and hard-disk images. Successor to the Atari Disk Engine, carrying its lessons (chiefly: no god-class, protected formats designed-for early, untrusted-input stance). Early implementation: documentation-first, with a Rust workspace that builds and lints but does not yet parse an image.
 
 ## Current state
 
 - **Docs:** full scaffold present in `Docs/` (FEATURES, ROADMAP, ARCHITECTURE, DECISIONS, SPEC, ATTACK_VECTORS, BUILD stub, BUGS, IMPROVEMENTS, CHANGELOG, this file) plus an index `Docs/README.md`. Consistent, cross-referenced. The repository landing page is the root `README.md`.
-- **Tree:** directory skeleton laid out per the layered pipeline (`src/<layer>/`, `cli/`, `gui/`, `tests/`, `tools/`). Laid down before D-001 was settled, so it carries no build files yet; converting `src/<layer>/` to a Cargo workspace of `ade-*` crates is additive and unblocked.
-- **Code:** none.
+- **Tree:** Cargo workspace, one crate per pipeline layer under `src/<layer>/`, plus `cli/` (`ade` binary). CI runs fmt, clippy, tests, docs, and the layering check.
+- **Code:** scaffold only. Real: `ade-endian` (C-001, complete for the widths so far) and `ade-block` (geometry, `BlockSource` seam, `ValidBlock` bounds proof). Partial: `ade-filesystem::dostype`. The other layer crates are documented stubs. No parsing of real images yet.
+- **Enforcement worth knowing about:** C-001 is a `clippy.toml` tripwire (raw `from_be_bytes` fails the build outside `ade-endian`); D-003 is `tools/check-layering.py` (a cross-layer dependency fails CI); AV-004 is type-level — `BlockSource::read_block` takes a `ValidBlock`, constructible only via `Geometry::validate`. Do not route around these; widen the policy deliberately or not at all.
 - **Stack:** settled 2026-08-21. **D-001** = Rust core + C-ABI bridge + Qt6 GUI (Phase 5). **D-002** = reimplement OFS/FFS/RDB in Rust; ADFlib is a black-box differential oracle only — never linked, source never read (that would forfeit the licence freedom). Implementation is unblocked.
 - **Open decisions, neither blocking:** **D-009** (xDMS — wrap/port/reimplement; Phase 2; turns on xDMS's unestablished licence; lean is a port to safe Rust). **D-010** (test-fixture provenance — TOSEC images are copyrighted and cannot simply be committed to a repo intended to go public; lean is freely-distributable + synthetic fixtures, with a fetch script for the wider corpus).
 - **Licence:** **Apache-2.0** (D-011), with `LICENSE` and `NOTICE` at the root; D-008 discharged. The repository is public. Keep `NOTICE` accurate if D-009 ever introduces third-party code, and remember D-010 still constrains what may be committed to `tests/fixtures/` — a `.gitignore` tripwire ignores disk-image extensions there until it lands.

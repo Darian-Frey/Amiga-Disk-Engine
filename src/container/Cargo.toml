@@ -1,0 +1,15 @@
+[package]
+name = "ade-container"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "ADE: container front-end (ADF/ADZ/HDF/HDZ/DMS) normalising into the block layer"
+
+[dependencies]
+ade-block = { workspace = true }
+ade-endian = { workspace = true }
+[lints]
+workspace = true

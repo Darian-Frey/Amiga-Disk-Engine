@@ -1,0 +1,15 @@
+[package]
+name = "ade-filesystem"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "ADE: OFS/FFS mount, dostypes, directory traversal, RDB partitions"
+
+[dependencies]
+ade-block = { workspace = true }
+ade-endian = { workspace = true }
+[lints]
+workspace = true

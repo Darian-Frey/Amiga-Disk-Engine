@@ -1,0 +1,20 @@
+# C-001 — all on-disk data is 68k big-endian; the host is little-endian, and
+# every conversion routes through the `ade-endian` crate. These lints make that
+# invariant enforceable rather than merely documented: `ade-endian` itself opts
+# out with a targeted #[allow], so any other crate reaching for a raw byte-order
+# conversion fails the build.
+disallowed-methods = [
+    { path = "u16::from_be_bytes", reason = "C-001: use ade-endian" },
+    { path = "u32::from_be_bytes", reason = "C-001: use ade-endian" },
+    { path = "u64::from_be_bytes", reason = "C-001: use ade-endian" },
+    { path = "i16::from_be_bytes", reason = "C-001: use ade-endian" },
+    { path = "i32::from_be_bytes", reason = "C-001: use ade-endian" },
+    { path = "u16::to_be_bytes",   reason = "C-001: use ade-endian" },
+    { path = "u32::to_be_bytes",   reason = "C-001: use ade-endian" },
+    { path = "u64::to_be_bytes",   reason = "C-001: use ade-endian" },
+    { path = "i16::to_be_bytes",   reason = "C-001: use ade-endian" },
+    { path = "i32::to_be_bytes",   reason = "C-001: use ade-endian" },
+    { path = "u16::from_be", reason = "C-001: use ade-endian" },
+    { path = "u32::from_be", reason = "C-001: use ade-endian" },
+    { path = "u64::from_be", reason = "C-001: use ade-endian" },
+]

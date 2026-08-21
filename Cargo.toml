@@ -1,0 +1,75 @@
+[workspace]
+resolver = "3"
+members = [
+    # Core engine — one crate per pipeline layer (D-003).
+    "src/endian",
+    "src/block",
+    "src/container",
+    "src/track",
+    "src/flux",
+    "src/filesystem",
+    "src/object",
+    "src/catalogue",
+    "src/api",
+    # Front-ends.
+    "cli",
+]
+
+[workspace.package]
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.85"
+authors = ["Darian-Frey"]
+license = "Apache-2.0"
+repository = "https://github.com/Darian-Frey/Amiga-Disk-Engine"
+description = "Forensic-grade toolkit for Amiga floppy and hard-disk images"
+
+[workspace.dependencies]
+ade-endian     = { path = "src/endian",     version = "0.0.0" }
+ade-block      = { path = "src/block",      version = "0.0.0" }
+ade-container  = { path = "src/container",  version = "0.0.0" }
+ade-track      = { path = "src/track",      version = "0.0.0" }
+ade-flux       = { path = "src/flux",       version = "0.0.0" }
+ade-filesystem = { path = "src/filesystem", version = "0.0.0" }
+ade-object     = { path = "src/object",     version = "0.0.0" }
+ade-catalogue  = { path = "src/catalogue",  version = "0.0.0" }
+ade-core       = { path = "src/api",        version = "0.0.0" }
+
+# Lints applied to every crate via `[lints] workspace = true`.
+#
+# These are the architectural invariants made machine-checkable. Relaxing one
+# is a decision, not a convenience — see DECISIONS.md.
+[workspace.lints.rust]
+# D-006: no parse path may crash. Nothing in the core needs `unsafe`; the
+# C-ABI bridge will, and gets its own exemption when it exists (Phase 5).
+unsafe_code = "forbid"
+missing_docs = "warn"
+unreachable_pub = "warn"
+
+[workspace.lints.clippy]
+# D-006 / F-001: no panicking on data-dependent paths. Every one of these is a
+# way to turn hostile input into a crash. Tests override them locally.
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+indexing_slicing = "deny"
+arithmetic_side_effects = "deny"
+# `integer_division` is deliberately NOT enabled. Its advice ("consider using
+# floats") is wrong for a disk tool — block arithmetic is integral by nature and
+# floats would be a defect. The panic risk it partly covers, division by zero,
+# is already caught by `arithmetic_side_effects`. Enabling it would scatter
+# `#[allow]` through every layer and dull the signal of the lints that matter.
+# Unbounded allocation from an attacker-controlled length (AV-005).
+large_stack_arrays = "deny"
+
+pedantic = { level = "warn", priority = -1 }
+missing_errors_doc = "allow"
+module_name_repetitions = "allow"
+# The project vocabulary is full of camel-case proper nouns — WHDLoad,
+# OpenRetro, ManifeST, Greaseweazle, DiskSalv — which are names, not code.
+# Backticking them would be wrong, so the lint is off rather than suppressed
+# at each mention.
+doc_markdown = "allow"
+
+[profile.release]
+overflow-checks = true   # keep wrapping arithmetic from silently corrupting offsets

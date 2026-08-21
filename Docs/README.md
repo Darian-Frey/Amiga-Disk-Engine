@@ -1,7 +1,7 @@
 > **Status:** Active
 > **Provenance:** Claude (primary auditor / initial scaffolding, 2026-08-21)
 > **Last reviewed:** 2026-08-21
-> **Why this status:** Documentation-first scaffold in place and internally consistent; no code yet. The blocking stack decisions (D-001, D-002) were Accepted on 2026-08-21 and the licence settled (D-011). D-009 and D-010 remain open; neither blocks Phase 1.
+> **Why this status:** Documentation set complete and internally consistent, and now tracking a workspace that builds. The stack decisions (D-001, D-002) were Accepted on 2026-08-21 and the licence settled (D-011). D-009 and D-010 remain open; D-010 gates Phase 1 validation.
 
 # ADE documentation
 
