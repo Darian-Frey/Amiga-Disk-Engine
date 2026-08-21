@@ -1,0 +1,248 @@
+# Decisions
+
+Append-only log of significant design decisions. Each entry: D-NNN with Decided/Recorded dates (ISO 8601), status, context, options, decision, consequences, and reversal conditions. Never delete; supersede with a status flag.
+
+Status vocabulary: Proposed | Accepted | Superseded by D-NNN | Deprecated.
+
+---
+
+### D-001 Language / stack
+**Decided:** 2026-08-21
+**Recorded:** 2026-08-21
+**Status:** Accepted
+**Authors:** Darian-Frey (decision); Claude (analysis)
+**Related:** F-002, F-004, D-002, D-003, D-006
+
+**Context.** The core, CLI, and GUI need a language/stack. Two precedents exist in the ecosystem: the Atari Disk Engine (Qt/C++) and Pontus (Rust core + Qt6 GUI via a C-ABI bridge).
+
+**Options.**
+- **A. Rust core + Qt6 GUI via C-ABI bridge (Pontus pattern).** Chosen. Memory-safety aids the untrusted-input mandate (D-006); avoids the C++ god-class gravity that hurt the ST engine; reuses the Pontus bridge.
+- **B. Qt/C++ throughout (Atari Disk Engine precedent).** Rejected. Familiar and simplest for GUI integration, but risks inheriting the same architectural drift, and leaves every bounds check on untrusted input as a discipline rather than a guarantee.
+
+**Decision.** Option A. Rust core exposing a C-ABI bridge; Qt6 GUI over that bridge from Phase 5.
+
+Three arguments carried it beyond the original framing:
+
+1. **The crate boundary enforces D-003 mechanically.** In C++, "no module spans two layers" is a review convention that nothing prevents an `#include` from violating — which is how the ST god-class accreted. A Cargo workspace makes each pipeline layer a crate, so a cross-layer dependency must be declared where it is visible.
+2. **Memory safety and D-006 are the same decision.** AV-004 (out-of-range block pointers → wild reads) is structurally unavailable in safe Rust rather than being a discipline sustained indefinitely. D-006 is rated never-reversible; the stack should match that ambition.
+3. **The binding risk was overstated.** CAPS is a closed binary with a plain C API (`bindgen` territory), and Greaseweazle is not a C library at all — it is a USB/serial protocol plus a Python host tool, so a protocol client must be written in either language.
+
+**Consequences.** Fixes BUILD.md's toolchain (Rust + Qt6 + a C-ABI bridge). `src/<layer>/` becomes a Cargo workspace of `ade-*` crates — additive to the existing skeleton, no renames. Fuzzing (F-001) runs through `cargo-fuzz`/libFuzzer. Raises the cost of any FFI dependency, which materially shaped D-002. The concurrency model for F-014 (previously "TBD with the stack") can now be settled against Rust's model.
+
+**Reversal conditions.** Reverse to B only if corpus-throughput measurements on real workloads (F-014) show the bridge or the Rust core to be the bottleneck by a wide margin. The flux/IPF binding half of the original reversal condition is withdrawn as unfounded — see argument 3 above.
+
+---
+
+### D-002 ADFlib — wrap vs reimplement
+**Decided:** 2026-08-21
+**Recorded:** 2026-08-21
+**Status:** Accepted
+**Authors:** Darian-Frey (decision); Claude (analysis)
+**Related:** F-001, F-003, D-001, D-006, D-008, D-009, D-010
+
+**Scope note.** As originally recorded this entry covered both ADFlib and xDMS. The two are independent choices with different deadlines — ADFlib gates Phase 1, xDMS is not needed until Phase 3 — so bundling them held Phase 1 hostage to the harder, less urgent question. Scope was narrowed to ADFlib before acceptance; xDMS moved to **D-009**.
+
+**Context.** ADFlib is a mature C library covering OFS/FFS/RDB — the exact surface of Phase 1 — against reimplementing that handling behind ADE's own trait seams. D-001 (Rust core) was settled first and changed the arithmetic materially.
+
+**Options.**
+- **A. Wrap ADFlib via FFI.** Rejected. Fast route to a correct read-only tool over battle-tested code, but see the decision below: from Rust the cost is higher and the benefit is negative.
+- **B. Pure reimplementation.** Superseded by D. Clean owned codebase and licence freedom, but discards ADFlib's accumulated correctness with nothing put in its place.
+- **C. Hybrid — wrap first, reimplement layer-by-layer behind stable seams.** Rejected. Reaches a working tool quickly, but leaves the safety guarantee absent for precisely the period it is being relied upon, and is not licence-neutral: the first public release would be GPL regardless of what is later replaced.
+- **D. Reimplement, with ADFlib as a black-box test oracle.** Chosen. Option B plus differential testing against ADFlib run as a separate binary.
+
+**Decision.** Option D. Reimplement OFS/FFS/RDB handling in Rust behind ADE's own trait seams, with **no FFI dependency on ADFlib in any shipping path**. ADFlib is invoked as a separate binary in the test harness only, its output diffed against ADE's across the fixture corpus.
+
+Format knowledge is taken from public documentation — Clévy's ADF FAQ, the Linux AFFS driver documentation, RKRM: Devices Appendix C — and **not** from reading ADFlib's GPL source. Running a GPL binary and comparing its output creates no derived work; reading its source to reimplement would muddy provenance and spend the licence freedom that is half the point of this decision.
+
+Rationale, in short:
+
+1. **It is the only option under which F-001 is satisfiable.** A segfault inside wrapped C is not a `Result`, is not catchable by `catch_unwind`, and takes the fuzz harness down with it. "Zero panics/segfaults across the corpus" cannot be claimed for code ADE does not own — and F-001 names adftools, ADFlib's own front-end, as the baseline to clear.
+2. **Under D-001 the hybrid's speed advantage largely evaporates.** From Rust, wrapping costs `bindgen`, a `-sys` crate, `repr(C)` mirrors, and `unsafe` at every call site; reimplementation gets the defensive bounds-checking F-001 demands for free.
+3. **Wrapping shapes ADE's seams around another library's API**, working against D-003.
+4. **Licence freedom is preserved**, discharging D-008 immediately.
+
+**Consequences.** Slower to a first working tool. ADE owns all of SPEC.md rather than inheriting it. The licence becomes a free choice — D-008's reversal condition fires on this entry's acceptance. Differential testing becomes a Phase 1 dependency rather than a nicety, which makes fixture provenance (**D-010**) load-bearing sooner than the roadmap assumed.
+
+**Accepted cost.** ADFlib encodes roughly twenty-five years of edge-case handling for real-world disks that appears in no specification, and reimplementation forgoes it by default. Differential testing recovers much of it *as failing tests rather than as inherited folklore*, which is the better outcome — but only in proportion to corpus size, so the value of this decision is coupled to D-010.
+
+**Reversal conditions.** Reverse to wrapping (A or C) if reimplementation misses Phase 1 acceptance by a wide margin on real fixtures — specifically, if differential testing shows systematic divergence that the public documentation cannot explain. Note that reversing forfeits the licence freedom already banked under D-008, so it is a genuine setback and not a cheap fallback.
+
+---
+
+### D-003 Layered, trait-seamed architecture; no god-class
+**Decided:** 2026-08-21
+**Recorded:** 2026-08-21
+**Status:** Accepted
+**Authors:** Claude (primary auditor)
+**Related:** F-002, ARCHITECTURE.md
+
+**Context.** The Atari Disk Engine grew a central god-class that still owes a refactor. That is the single most expensive lesson to carry forward.
+
+**Options.**
+- **A. Layered pipeline with a trait/interface seam per layer.** Chosen.
+- **B. Pragmatic single-module core, refactor later.** Rejected — this is precisely how the ST god-class formed.
+
+**Decision.** Option A. Flux → track → block → filesystem → object model → catalogue, each a separately-testable module; no module spans more than one layer.
+
+**Consequences.** More upfront interface design; enables the incremental reimplementation path (D-002 option C) and independent testing.
+
+**Reversal conditions.** Never within v1. This is the headline architectural commitment.
+
+---
+
+### D-004 Read before write
+**Decided:** 2026-08-21
+**Recorded:** 2026-08-21
+**Status:** Accepted
+**Authors:** Claude (primary auditor)
+**Related:** F-001, F-010, ROADMAP.md
+
+**Context.** Write/format paths are where a disk tool does irreversible damage. Reading is safe and validates understanding of a format.
+
+**Options.**
+- **A. Ship read-only extraction before any write/create path.** Chosen.
+- **B. Read and write together per format.** Rejected — couples risk and slows a safe first release.
+
+**Decision.** Option A. Every write path ships only after its read path is proven on fixtures.
+
+**Consequences.** Phase 1 is read-only; write appears from Phase 4/5. Users get a safe tool sooner.
+
+**Reversal conditions.** Never within v1.
+
+---
+
+### D-005 Raw-MFM-capable internal model from day one
+**Decided:** 2026-08-21
+**Recorded:** 2026-08-21
+**Status:** Accepted
+**Authors:** Claude (primary auditor)
+**Related:** F-007, F-008, ARCHITECTURE.md, SPEC.md §Flux
+
+**Context.** On the Atari side, STX/Pasti (protected formats) were the hard part and suffered from being bolted on late. The Amiga analogue is extended-ADF / SCP / IPF. The trap is assuming "plain ADF" and retrofitting track data.
+
+**Options.**
+- **A. Internal model can represent a raw MFM track from the start**, even while Phase 1 only populates decoded sectors. Chosen.
+- **B. Decoded-sectors-only model, extend later.** Rejected — reproduces the ST bolt-on problem.
+
+**Decision.** Option A.
+
+**Consequences.** Slightly heavier model early; flux support in Phase 4 slots into an existing shape rather than forcing a rewrite.
+
+**Reversal conditions.** Never.
+
+---
+
+### D-006 Forensic / untrusted-input stance
+**Decided:** 2026-08-21
+**Recorded:** 2026-08-21
+**Status:** Accepted
+**Authors:** Claude (primary auditor)
+**Related:** F-001, F-010, ATTACK_VECTORS.md (AV-001…AV-005)
+
+**Context.** Disk images are an untrusted-input attack surface: bootblock viruses, hash-chain loops, out-of-range pointers, decompression bombs. The ST engine learned this reactively.
+
+**Options.**
+- **A. Adopt a forensic stance up front** — bounds-check everything, never execute guest code, fuzz the parsers, maintain an attack-vector register. Chosen.
+- **B. Handle robustness issues as they arise.** Rejected — reactive hardening leaves windows open and is costlier.
+
+**Decision.** Option A.
+
+**Consequences.** F-001 and the ATTACK_VECTORS register are load-bearing from Phase 1; fuzzing is part of the Phase-1 acceptance bar.
+
+**Reversal conditions.** Never.
+
+---
+
+### D-007 SCP as the open flux target; IPF read-only and optional
+**Decided:** 2026-08-21
+**Recorded:** 2026-08-21
+**Status:** Accepted
+**Authors:** Claude (primary auditor)
+**Related:** F-003, F-006, F-007, C-003 (SPEC.md)
+
+**Context.** IPF creation is closed (SPS-only) and the CAPS read library is restrictively licensed. SCP is the open, documented flux container, supported by the open Greaseweazle/FluxEngine toolchain.
+
+**Options.**
+- **A. Target SCP (and extended-ADF) for the open write path; treat IPF as optional read-only behind a licence-gated flag.** Chosen.
+- **B. Build the flux path around IPF.** Rejected — cannot legally/openly create IPF, and the read library's licence is restrictive.
+
+**Decision.** Option A.
+
+**Consequences.** ADE cannot emit IPF (C-003); write-back and hardware writing go via SCP/extended-ADF. IPF-read is a compile-time optional feature.
+
+**Reversal conditions.** Revisit if SPS opens IPF creation, or an open IPF writer appears.
+
+---
+
+### D-008 LICENSE deferred pending D-002
+**Decided:** 2026-08-21
+**Recorded:** 2026-08-21
+**Status:** Accepted
+**Authors:** Claude (primary auditor)
+**Related:** D-002, README.md §License
+
+**Context.** `LICENSE` is a Tier-1 document under the project-scaffold standard; a Tier-1 omission must be recorded as a decision. ADE's licence is genuinely undetermined because it is coupled to D-002: wrapping ADFlib (GPL) via FFI would propagate GPL, whereas a pure reimplementation leaves the choice open. Choosing a licence now would pre-empt D-002.
+
+**Options.**
+- **A. Defer the licence choice until D-002 is Accepted**, and add `LICENSE` before the first public commit. Chosen.
+- **B. Pick a permissive licence now.** Rejected — may be invalidated by a GPL dependency under D-002.
+- **C. Pick GPL now.** Rejected — pre-commits to the wrapping path before D-002 is decided.
+
+**Decision.** Option A. No `LICENSE` file until D-002 lands; this entry is the audit trail for the Tier-1 omission.
+
+**Consequences.** The repository must not be made public until a licence is added. `CLAIMS.md` and `VOCABULARY.md` are separately omitted as legitimate Tier-3 non-applicability (non-research; sibling contract not yet defined) and need no exemption entry.
+
+**Update 2026-08-21.** D-002 was Accepted on 2026-08-21 as Option D (reimplementation, no ADFlib linkage), so no GPL obligation is inherited and the licence is now a free choice. **This entry's trigger has fired**: the deferral is discharged and licence selection is the outstanding action, not a pending one. The repository remains not-public until `LICENSE` exists. D-009 (xDMS) could in principle re-couple the licence, but only from Phase 3 and only if that decision lands on wrapping rather than porting — it is not a reason to keep deferring.
+
+**Reversal conditions.** Resolve and add `LICENSE` the moment D-002 is Accepted, or immediately before any public commit — whichever comes first. *(First condition met 2026-08-21.)*
+
+---
+
+### D-009 xDMS — wrap vs port vs reimplement
+**Decided:** — (open)
+**Recorded:** 2026-08-21
+**Status:** Proposed
+**Authors:** Claude (primary auditor)
+**Related:** F-003, F-016, D-002, D-006, D-008, AV-005, C-004 (SPEC.md)
+
+**Context.** Split out of D-002, which originally bundled ADFlib and xDMS. DMS (DiskMasher) is a proprietary format fully reverse-engineered by xDMS across all compression modes including encryption. It is not needed until **Phase 3**, so this decision does not gate implementation and is deliberately left open.
+
+The considerations differ from D-002 in two ways. First, DMS is the decompression-bomb surface (AV-005) — malformed input and password/encryption paths are exactly where resource exhaustion bites — so safety matters more here than anywhere else in the container front-end. Second, **xDMS's licence is not yet established**; D-002's GPL reasoning was specific to ADFlib and does not transfer. That must be confirmed before this entry can be decided, because it determines which options are even available.
+
+**Options.**
+- **A. Wrap xDMS via FFI.** Fastest, but carries D-002's objection in the place it matters most: a crash or unbounded allocation inside wrapped C is uncatchable from Rust, and AV-005 is precisely that failure mode.
+- **B. Port xDMS to safe Rust.** Owned code, no FFI, safety across the bomb surface, and the decompressors are translated rather than rediscovered. Requires a licence permitting derivation, and requires attribution.
+- **C. Reimplement from the format description, with xDMS as a black-box oracle** (the D-002 posture). Cleanest provenance, but DMS's multiple compression modes are fiddly and far less well documented than OFS/FFS — this re-solves genuinely hard reverse-engineering rather than well-specified structures.
+
+**Decision.** Open, deferred to Phase 2. Lean towards **B if xDMS's licence permits a port**, since it is the only option that gets safety over AV-005 without redoing the reverse-engineering. Fall back to C if the licence forbids derivation.
+
+Note the asymmetry with D-002: there, ADFlib's source is *not* to be read, because GPL provenance would cost the licence freedom. Here, if xDMS proves permissively licensed, reading and translating the source is legitimate and is the whole basis of option B.
+
+**Consequences.** Determines whether DMS handling is owned Rust or an FFI dependency, and whether the licence chosen under D-008 needs revisiting from Phase 3. Bounded by C-004 regardless: some DMS images are known-bad and will not round-trip, and ADE must fail loudly rather than emit a silently-bad ADF.
+
+**Reversal conditions.** N/A while Proposed. Once decided, reverse if the ported/reimplemented decompressor cannot reproduce xDMS's output byte-for-byte on the clean fixture set.
+
+---
+
+### D-010 Test-fixture provenance
+**Decided:** — (open)
+**Recorded:** 2026-08-21
+**Status:** Proposed
+**Authors:** Claude (primary auditor)
+**Related:** F-001, D-002, D-006, D-008, AV-001, AV-004, ROADMAP Phase 0
+
+**Context.** Phase 0 calls for a curated TOSEC Amiga fixture set to be "checked in and labelled known-good / known-bad", and `tests/fixtures/` exists for it. But TOSEC Amiga images are overwhelmingly commercial software under copyright, and D-008 intends this repository to become public. Committing them would be unlawful distribution and a plausible takedown target. No decision currently records this, and the interaction with D-008 is direct: **the licence is not the only thing gating publication.**
+
+D-002 raised the stakes. With ADFlib reduced to a black-box oracle, differential testing over a corpus is now the primary mechanism for recovering the edge-case knowledge that reimplementation forgoes — so fixture breadth is load-bearing for correctness, not merely for coverage.
+
+**Options.**
+- **A. Commit everything.** Rejected on sight; recorded only to note it was considered.
+- **B. Commit checksums plus a fetch script.** Contributors acquire TOSEC themselves; CI needs an out-of-band corpus. Keeps the repo clean but makes the test suite non-hermetic and unrunnable on a fresh clone.
+- **C. Private sibling repository for real fixtures.** Hermetic for those with access; opaque to outside contributors, and awkward for CI on a public repo.
+- **D. Committed fixtures restricted to freely-distributable disks, plus hand-authored synthetic images.** Fred Fish / AmigaLibDisk / permissively-licensed demo disks for the happy path, with deliberately-corrupt synthetic images for the malformed corpus. Supplemented by B for the wider TOSEC differential run.
+
+**Decision.** Open. Lean towards **D, with B layered on top**. The malformed corpus wants to be synthetic in any case — AV-001 (hash-chain loops) and AV-004 (out-of-range pointers) require structures no genuine disk will produce, so they must be crafted regardless. That leaves only the happy-path fixtures needing real disks, and freely-distributable Amiga disks are plentiful enough to cover OFS/FFS/INTL/dircache. The broad TOSEC differential run against the D-002 oracle then happens against a locally-fetched corpus that never enters the repository.
+
+**Consequences.** Determines what may be committed to `tests/fixtures/`, whether the test suite is hermetic on a fresh clone, and — jointly with D-008 — when the repository can be made public. Phase 0's "fixture set is checked in" deliverable needs rewording to match whatever is decided here.
+
+**Reversal conditions.** N/A while Proposed. Once decided, revisit if the freely-distributable set proves too narrow to cover the dostype matrix, which would force greater reliance on option B.

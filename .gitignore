@@ -1,0 +1,49 @@
+# --- Rust (D-001) ---
+/target/
+**/target/
+**/*.rs.bk
+*.pdb
+
+# Cargo.lock IS committed: ADE ships binaries (CLI, bridge), so reproducible
+# builds matter more than downstream version flexibility.
+
+# --- Qt6 / CMake GUI (Phase 5) ---
+/build/
+gui/build/
+CMakeCache.txt
+CMakeFiles/
+*.moc
+moc_*.cpp
+ui_*.h
+qrc_*.cpp
+
+# --- Fuzzing (F-001) ---
+fuzz/artifacts/
+fuzz/coverage/
+tests/fuzz/artifacts/
+
+# --- Test fixtures: D-010 guard ---
+# Fixture provenance is UNDECIDED (D-010). Most TOSEC Amiga images are
+# copyrighted commercial software and must not be committed to a public
+# repository. These patterns are a tripwire, not a policy — once D-010 lands,
+# whitelist the permitted fixtures explicitly with negation rules below.
+tests/fixtures/**/*.adf
+tests/fixtures/**/*.adz
+tests/fixtures/**/*.hdf
+tests/fixtures/**/*.hdz
+tests/fixtures/**/*.dms
+tests/fixtures/**/*.scp
+tests/fixtures/**/*.ipf
+tests/fixtures/**/*.raw
+# Keep directory structure and any manifests/checksums.
+!tests/fixtures/**/.gitkeep
+!tests/fixtures/**/*.md
+!tests/fixtures/**/*.toml
+!tests/fixtures/**/*.sha256
+
+# --- Editors / OS ---
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store
