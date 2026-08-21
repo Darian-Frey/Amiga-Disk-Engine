@@ -1,7 +1,7 @@
 > **Status:** Active
 > **Provenance:** Claude (primary auditor / initial scaffolding, 2026-08-21)
 > **Last reviewed:** 2026-08-21
-> **Why this status:** Documentation-first scaffold in place and internally consistent; no code yet. The two blocking stack decisions (D-001, D-002) were Accepted on 2026-08-21; D-009 and D-010 were opened in their wake and neither blocks Phase 1.
+> **Why this status:** Documentation-first scaffold in place and internally consistent; no code yet. The blocking stack decisions (D-001, D-002) were Accepted on 2026-08-21 and the licence settled (D-011). D-009 and D-010 remain open; neither blocks Phase 1.
 
 # ADE documentation
 
@@ -14,7 +14,7 @@ Index of the Amiga Disk Engine documentation set. The project overview, formats,
 | [FEATURES.md](FEATURES.md) | Capability list F-001…F-018, with priorities, effort, phase, and acceptance criteria |
 | [ROADMAP.md](ROADMAP.md) | Phased plan, Phase 0…5, referencing feature IDs |
 | [ARCHITECTURE.md](ARCHITECTURE.md) | Layered pipeline, module responsibilities, invariants, cross-cutting concerns |
-| [DECISIONS.md](DECISIONS.md) | Append-only design-decision log D-001…D-010, with reversal conditions |
+| [DECISIONS.md](DECISIONS.md) | Append-only design-decision log D-001…D-011, with reversal conditions |
 | [SPEC.md](SPEC.md) | Authoritative disk and filesystem format reference; format constraints C-001…C-005 |
 | [ATTACK_VECTORS.md](ATTACK_VECTORS.md) | Failure modes for untrusted disk-image input, AV-001…AV-005 |
 | [BUILD.md](BUILD.md) | Environment, toolchain, build commands (stub until the first build succeeds) |
@@ -40,4 +40,4 @@ Append-only identifier registers (`F-`, `D-`, `C-`, `AV-`, `BUG-`, `IMP-`); entr
 
 - **`CLAIMS.md`** — omitted. ADE is a systems and forensic tool making no empirical or theoretical research assertions (legitimate Tier-3 non-applicability; no exemption entry required).
 - **`VOCABULARY.md`** — deferred until the ManifeST catalogue-integration contract (F-013) is defined.
-- **`LICENSE`** — deferred under **D-008** pending D-002, which is the audit trail for the Tier-1 omission. D-002 was Accepted on 2026-08-21 as reimplementation, inheriting no GPL obligation, so **the deferral is discharged and the choice is now free and outstanding**. Required before the first public commit.
+- **`LICENSE`** — **no longer omitted.** Deferred under **D-008** pending D-002; resolved on 2026-08-21 as Apache-2.0 (**D-011**) and added before the first public commit, with an accompanying `NOTICE`. D-008 stays in the register as the audit trail for the period in which no licence existed.

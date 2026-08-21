@@ -1,7 +1,7 @@
 > **Status:** Active
 > **Provenance:** Claude (primary auditor / initial scaffolding, 2026-08-21)
 > **Last reviewed:** 2026-08-21
-> **Why this status:** Planning phase. Documentation set and directory skeleton in place; no code yet. The two blocking stack decisions were resolved on 2026-08-21 (D-001, D-002), so Phase 1 is unblocked; `LICENSE` and fixture provenance (D-010) remain outstanding.
+> **Why this status:** Planning phase. Documentation set and directory skeleton in place; no code yet. The blocking stack decisions were resolved on 2026-08-21 (D-001, D-002) and the licence is settled (D-011), so Phase 1 is unblocked. Fixture provenance (D-010) remains open.
 
 # Amiga Disk Engine (ADE)
 
@@ -25,7 +25,7 @@ The two decisions that gated all implementation were settled on 2026-08-21:
 - **D-001 — stack.** Rust core exposing a C-ABI bridge, with a Qt6 GUI over it from Phase 5. Memory safety and the untrusted-input mandate (D-006) are the same decision, and a Cargo workspace makes the "no module spans two layers" invariant a matter of the dependency graph rather than of review.
 - **D-002 — ADFlib.** Reimplement OFS/FFS/RDB in Rust rather than wrap the C library, using ADFlib as a **black-box differential-test oracle** — run as a separate binary, never linked, source not read. A segfault inside wrapped C is uncatchable from Rust, so wrapping would make F-001's "zero segfaults across the fuzz corpus" unclaimable. Licence freedom is preserved as a side effect.
 
-Still open: the licence (now a free choice, and required before this repository goes public), **D-009** (xDMS's role, Phase 2, non-blocking) and **D-010** (what fixtures may lawfully be committed). See [DECISIONS.md](Docs/DECISIONS.md) and [ROADMAP.md](Docs/ROADMAP.md).
+The licence followed from D-002 and is settled: **Apache-2.0** (D-011). Still open: **D-009** (xDMS's role, Phase 2, non-blocking) and **D-010** (what fixtures may lawfully be committed — see the note under Licence). See [DECISIONS.md](Docs/DECISIONS.md) and [ROADMAP.md](Docs/ROADMAP.md).
 
 ## Formats
 
@@ -104,6 +104,10 @@ ADE is a disk and filesystem tool, not an emulator. It does not emulate the Amig
 
 ## Licence
 
-Not yet chosen, but no longer constrained. The choice was coupled to D-002 — wrapping ADFlib would have propagated GPL — and D-002 landed on reimplementation, so no obligation is inherited and the licence is a free decision. **D-008**'s deferral is therefore discharged: selecting a licence is now the outstanding action rather than a pending one.
+**Apache-2.0** — see [LICENSE](LICENSE) and [NOTICE](NOTICE).
 
-**A `LICENSE` file must be added before the first public commit**, and it is not the only gate — see D-010 on fixture provenance.
+The choice was coupled to D-002: wrapping ADFlib would have propagated GPL. D-002 landed on reimplementation, so no obligation is inherited and the licence was a free decision — Apache-2.0 was chosen for its explicit patent grant (ADE implements reverse-engineered and in places proprietary formats), its standing with institutional adopters, and the `NOTICE` convention for attribution. Recorded as **D-011**; **D-008**, which deferred the choice, is discharged.
+
+`NOTICE` records that ADE contains no third-party code, and that ADFlib is a black-box test oracle rather than a dependency.
+
+Two licence surfaces sit outside this: the optional CAPS library for IPF-read remains restrictively licensed and compile-time-gated (C-003), and D-009 may reopen the question at Phase 3. Separately, **D-010 remains an open constraint on what may be committed** — most TOSEC Amiga images are copyrighted, so `tests/fixtures/` is gated by a `.gitignore` tripwire until that decision lands.

@@ -194,7 +194,9 @@ Rationale, in short:
 
 **Update 2026-08-21.** D-002 was Accepted on 2026-08-21 as Option D (reimplementation, no ADFlib linkage), so no GPL obligation is inherited and the licence is now a free choice. **This entry's trigger has fired**: the deferral is discharged and licence selection is the outstanding action, not a pending one. The repository remains not-public until `LICENSE` exists. D-009 (xDMS) could in principle re-couple the licence, but only from Phase 3 and only if that decision lands on wrapping rather than porting — it is not a reason to keep deferring.
 
-**Reversal conditions.** Resolve and add `LICENSE` the moment D-002 is Accepted, or immediately before any public commit — whichever comes first. *(First condition met 2026-08-21.)*
+**Resolved 2026-08-21.** `LICENSE` (Apache-2.0) added before the first public commit; both trigger conditions were met on the same day. This entry is **discharged** — the licence choice itself is recorded as **D-011**, which supersedes this entry's forward-looking obligation. D-008 remains in the register as the audit trail for the period in which no `LICENSE` existed.
+
+**Reversal conditions.** Resolve and add `LICENSE` the moment D-002 is Accepted, or immediately before any public commit — whichever comes first. *(Both met 2026-08-21; see D-011.)*
 
 ---
 
@@ -246,3 +248,33 @@ D-002 raised the stakes. With ADFlib reduced to a black-box oracle, differential
 **Consequences.** Determines what may be committed to `tests/fixtures/`, whether the test suite is hermetic on a fresh clone, and — jointly with D-008 — when the repository can be made public. Phase 0's "fixture set is checked in" deliverable needs rewording to match whatever is decided here.
 
 **Reversal conditions.** N/A while Proposed. Once decided, revisit if the freely-distributable set proves too narrow to cover the dostype matrix, which would force greater reliance on option B.
+
+---
+
+### D-011 Licence — Apache-2.0
+**Decided:** 2026-08-21
+**Recorded:** 2026-08-21
+**Status:** Accepted
+**Authors:** Darian-Frey (decision); Claude (analysis)
+**Related:** D-002, D-008, D-009, C-003 (SPEC.md)
+
+**Context.** D-008 deferred the licence because D-002 might have inherited GPL by linking ADFlib. D-002 landed on reimplementation, so nothing is inherited and the choice was free. It had to be made before the first public commit: the GitHub repository is public, and absent a `LICENSE` the default is all-rights-reserved — no lawful use, fork, modification, or contribution, which is an untenable footing for a preservation tool whose value depends on adoption.
+
+**Options.**
+- **A. Apache-2.0.** Chosen.
+- **B. MIT.** Rejected. Shortest and most familiar, but no patent grant and no attribution scaffolding — both of which carry more weight here than in a typical project.
+- **C. MPL-2.0.** Rejected. File-level weak copyleft is a reasonable middle ground, but the concern it addresses (a closed fork of the engine) is not the operative risk for a forensic tool whose value is in adoption and scriptability.
+- **D. GPL-3.0.** Rejected. It is the Amiga ecosystem norm and ADFlib's own licence, but adopting it voluntarily would spend the freedom D-002 was partly chosen to win, and would bar permissively-licensed preservation tools from embedding ADE's core.
+
+**Decision.** Option A, Apache-2.0. Three reasons specific to ADE:
+
+1. **The explicit patent grant.** ADE implements formats that are reverse-engineered and in places proprietary (DMS, RDB, and potential IPF interop under C-003). A licence that settles patent posture explicitly is worth the extra length here.
+2. **Institutional adopters.** The target users include archives, museums, and university collections, whose legal review is routinely more comfortable with Apache-2.0 than with bare MIT.
+3. **The NOTICE convention** gives attribution a defined home — relevant if D-009 lands on a port of xDMS, which would require it.
+
+A `NOTICE` file accompanies the licence. It currently records that ADE contains **no** third-party code, and states explicitly that ADFlib is a black-box test oracle rather than a dependency, so the provenance discipline of D-002 is legible from the distribution itself and not only from this register.
+
+**Consequences.** Discharges D-008. Source files carry the standard Apache header once code exists. Third-party attribution goes in `NOTICE`. Note two licence surfaces that remain outside this decision: the optional CAPS library for IPF-read stays restrictively licensed and compile-time-gated (C-003), and D-009 could reintroduce a licence question at Phase 3 if it lands on wrapping rather than porting.
+
+**Reversal conditions.** Relicensing after public release requires the consent of all contributors, so this is effectively one-way once external contributions land. Before that point, revisit only if D-009 forces a GPL dependency that cannot be avoided — which would be a reason to reopen D-009, not to relicense ADE.
+

@@ -12,10 +12,10 @@ Background context (why ADE exists, the documentation landscape survey, and the 
 - [x] Documentation scaffold (this set) to the project-scaffold standard.
 - [x] Resolve **D-001** (language/stack) — Accepted 2026-08-21 as Rust core + Qt6 over a C-ABI bridge.
 - [x] Resolve **D-002** (ADFlib: wrap vs reimplement) — Accepted 2026-08-21 as reimplementation with ADFlib as a black-box test oracle. Scope narrowed to ADFlib; xDMS split out to **D-009** (Phase 2, non-blocking).
-- [ ] Choose a licence and add `LICENSE` — **unblocked**, D-008's trigger fired when D-002 was Accepted. Required before the first public commit.
+- [x] Choose a licence and add `LICENSE` — Apache-2.0, decided 2026-08-21 (**D-011**), added with a `NOTICE` before the first public commit. Discharges D-008.
 - [ ] Resolve **D-010** (test-fixture provenance): decide what may lawfully be committed to `tests/fixtures/`. Now load-bearing, because D-002 makes differential testing the primary route to the edge-case coverage reimplementation forgoes.
 - [ ] Acquire the fixture set per D-010: clean DD, clean HD, OFS, FFS, INTL, dircache, multi-partition HDF, plus known-bad (`errdms`/protected) nasties, and hand-authored malformed images for AV-001 / AV-004.
-**Acceptance:** D-001 and D-002 Accepted in [DECISIONS.md](DECISIONS.md) *(done 2026-08-21)*; `LICENSE` present; D-010 decided and the fixture set available and labelled known-good / known-bad.
+**Acceptance:** D-001 and D-002 Accepted in [DECISIONS.md](DECISIONS.md) *(done 2026-08-21)*; `LICENSE` present *(done 2026-08-21, D-011)*; D-010 decided and the fixture set available and labelled known-good / known-bad.
 
 ## Phase 1 — Read-only ADF core (happy path)
 **Goal:** Parse and extract from plain 880 KB DD ADF images, defensively, through the chosen stack.

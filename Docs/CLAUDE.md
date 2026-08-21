@@ -11,14 +11,13 @@ Amiga Disk Engine (ADE) — a forensic-grade, cross-platform toolkit for reading
 - **Code:** none.
 - **Stack:** settled 2026-08-21. **D-001** = Rust core + C-ABI bridge + Qt6 GUI (Phase 5). **D-002** = reimplement OFS/FFS/RDB in Rust; ADFlib is a black-box differential oracle only — never linked, source never read (that would forfeit the licence freedom). Implementation is unblocked.
 - **Open decisions, neither blocking:** **D-009** (xDMS — wrap/port/reimplement; Phase 2; turns on xDMS's unestablished licence; lean is a port to safe Rust). **D-010** (test-fixture provenance — TOSEC images are copyrighted and cannot simply be committed to a repo intended to go public; lean is freely-distributable + synthetic fixtures, with a fetch script for the wider corpus).
-- **Licence:** still absent, but no longer deferred — D-008's trigger fired when D-002 was Accepted, so the choice is free and outstanding. Repo must not go public until `LICENSE` is added, and D-010 is a second publication gate.
+- **Licence:** **Apache-2.0** (D-011), with `LICENSE` and `NOTICE` at the root; D-008 discharged. The repository is public. Keep `NOTICE` accurate if D-009 ever introduces third-party code, and remember D-010 still constrains what may be committed to `tests/fixtures/` — a `.gitignore` tripwire ignores disk-image extensions there until it lands.
 
 ## Active task / next milestone
 
-1. Choose a licence and add `LICENSE` (D-008 — unblocked, outstanding).
-2. Resolve **D-010**, then acquire the fixture set it permits (clean DD/HD, OFS/FFS/INTL/dircache, multi-partition HDF, known-bad `errdms`/protected, plus hand-authored malformed images for AV-001/AV-004).
-3. Stand up the Cargo workspace over the existing `src/<layer>/` skeleton.
-4. Begin **Phase 1** (F-001, F-002, F-003-ADF, F-010): read-only ADF parse validated against one OFS DD, one FFS DD, one multi-partition HDF fixture, with the fuzz corpus passing (zero crashes) and the ADFlib differential suite agreeing on clean fixtures.
+1. Resolve **D-010**, then acquire the fixture set it permits (clean DD/HD, OFS/FFS/INTL/dircache, multi-partition HDF, known-bad `errdms`/protected, plus hand-authored malformed images for AV-001/AV-004).
+2. Stand up the Cargo workspace over the existing `src/<layer>/` skeleton.
+3. Begin **Phase 1** (F-001, F-002, F-003-ADF, F-010): read-only ADF parse validated against one OFS DD, one FFS DD, one multi-partition HDF fixture, with the fuzz corpus passing (zero crashes) and the ADFlib differential suite agreeing on clean fixtures.
 
 ## Architectural invariants
 

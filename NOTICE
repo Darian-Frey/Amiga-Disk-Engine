@@ -1,0 +1,23 @@
+Amiga Disk Engine (ADE)
+Copyright 2026 Darian-Frey
+
+This product includes software developed by the Amiga Disk Engine project.
+
+Licensed under the Apache License, Version 2.0. See LICENSE.
+
+--------------------------------------------------------------------------
+Third-party code
+--------------------------------------------------------------------------
+
+ADE contains no third-party code.
+
+Its OFS/FFS/RDB handling is an independent implementation written from
+public format documentation — Laurent Clévy's ".ADF format FAQ", the Linux
+kernel AFFS driver documentation, and RKRM: Devices Appendix C. ADFlib is
+used only as a black-box differential-test oracle: invoked as a separate
+binary by the test harness, never linked, and its source deliberately not
+read (see DECISIONS.md, D-002). No ADFlib code or GPL obligation is
+inherited.
+
+Should a future decision introduce third-party code — D-009 contemplates a
+possible port of xDMS — the attribution belongs here.

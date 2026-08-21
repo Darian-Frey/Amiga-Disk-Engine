@@ -13,10 +13,13 @@ Format follows [Keep a Changelog](https://keepachangelog.com). Reference F-, D-,
 - **D-009** — new decision entry: xDMS's role (wrap / port / reimplement). Split out of D-002; deferred to Phase 2; turns on xDMS's licence, which is not yet established.
 - **D-010** — new decision entry: test-fixture provenance. TOSEC Amiga images are copyrighted and cannot simply be committed to a repository intended to become public; records the gap and the options.
 
+- **D-011** — new decision entry: licence is **Apache-2.0**. `LICENSE` and `NOTICE` added at the repository root before the first public commit. NOTICE records that ADE contains no third-party code and that ADFlib is a test oracle, not a dependency.
+- `.gitignore`, including a **D-010 tripwire** — disk-image extensions under `tests/fixtures/` are ignored until fixture provenance is decided, so copyrighted TOSEC images cannot be committed by accident.
+
 ### Changed
 - **D-001 → Accepted** (Option A): Rust core exposing a C-ABI bridge, Qt6 GUI over it from Phase 5. The flux/IPF-binding half of the original reversal condition was withdrawn as unfounded.
 - **D-002 → Accepted**, scope narrowed to ADFlib alone, decided as a new Option D: reimplement OFS/FFS/RDB in Rust with ADFlib as a **black-box differential-test oracle** — never linked, source never read. Rejects the previously-leaned hybrid, whose safety gap would have made F-001 unclaimable.
-- **D-008** — deferral discharged. D-002 inherits no GPL obligation, so the licence is now a free and outstanding choice rather than a pending one.
+- **D-008** — deferral **discharged** and closed out: D-002 inherited no GPL obligation, and the resulting free choice was made the same day (see D-011). The entry stays in the register as the audit trail for the period without a licence.
 - ARCHITECTURE, BUILD, SPEC, ROADMAP, FEATURES, ATTACK_VECTORS (AV-005), CLAUDE, and both READMEs updated for the settled stack. BUILD.md now distinguishes build dependencies from test-only ones; SPEC.md records that ADFlib's source is deliberately excluded from its reference list.
 
 ### Notes
