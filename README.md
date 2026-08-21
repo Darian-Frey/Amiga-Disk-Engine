@@ -16,6 +16,17 @@ ADE targets the gap no current tool fills. The capable Amiga engines (amitools, 
 - **Forensic health reporting.** Bad sectors, weak bits, checksum failures, bitmap validity, and OFS/FFS recoverability surfaced explicitly — never failed silently — with auto-identification against TOSEC / WHDLoad / OpenRetro. (F-010, F-013)
 - **Corpus scale.** Bulk verify, convert, catalogue, and report across collections numbering in the thousands, with machine-readable output. (F-014)
 
+## Quick start
+
+> There is nothing to run yet — see **Status** below. Cloning gets you the documentation set and the layered skeleton.
+
+```bash
+git clone https://github.com/Darian-Frey/Amiga-Disk-Engine
+cd Amiga-Disk-Engine
+```
+
+Build commands will appear here once the first build succeeds; the toolchain is settled (Rust + Cargo for the core, CLI, and C-ABI bridge; CMake + Qt6 for the GUI from Phase 5) and is recorded in [BUILD.md](Docs/BUILD.md).
+
 ## Status
 
 **Planning stage — there is no runnable build yet.** The repository holds the documentation set and the directory skeleton.
@@ -54,8 +65,10 @@ Full detail in [ARCHITECTURE.md](Docs/ARCHITECTURE.md).
 ## Repository layout
 
 ```
-amiga-disk-engine/
+Amiga-Disk-Engine/
 ├── README.md          This file — project landing page.
+├── LICENSE            Apache-2.0 (D-011).
+├── NOTICE             Attribution; records that ADE has no third-party code.
 ├── Docs/              Documentation set (see index below).
 ├── src/               Core engine, one directory per pipeline layer.
 │   ├── endian/        Big-endian ↔ host conversion. The only place it happens (C-001).
