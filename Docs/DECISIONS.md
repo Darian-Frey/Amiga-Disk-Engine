@@ -298,3 +298,30 @@ A `NOTICE` file accompanies the licence. It currently records that ADE contains 
 
 **Reversal conditions.** Relicensing after public release requires the consent of all contributors, so this is effectively one-way once external contributions land. Before that point, revisit only if D-009 forces a GPL dependency that cannot be avoided — which would be a reason to reopen D-009, not to relicense ADE.
 
+---
+
+### D-012 Protection bits are metadata, not access control
+**Decided:** 2026-08-22
+**Recorded:** 2026-08-22
+**Status:** Accepted
+**Authors:** Claude (analysis); recorded for review
+**Related:** D-002, D-006, F-010, F-012
+
+**Context.** Amiga directory entries carry protection flags whose owner bits are *inverted*: bit 3 set means "not readable". The first differential run against ADFlib (D-002's oracle) disagreed on exactly two files out of 2896, and both had the same cause — `Raffles.adf:s/startup-sequence` is flagged unreadable, so `unadf` reported `adfFileOpen : access denied` and wrote a **zero-byte file**, while ADE recovered all 144 bytes: a perfectly coherent AmigaDOS startup script.
+
+**Options.**
+- **A. Honour the protection bits**, as ADFlib does, refusing to read a file the disk marks unreadable. Rejected.
+- **B. Treat the bits as metadata**: report them, never enforce them. Chosen.
+
+**Decision.** Option B. Protection flags are recorded, displayed, and reported — never obeyed.
+
+A permission bit set on a floppy in 1989 is a statement about how AmigaDOS *would have* behaved, not an instruction to a preservation tool running thirty-seven years later. There is no user to protect and no security boundary to hold: the bit is data about the disk, and refusing to recover content because of it is the tool failing at its purpose. It would also make F-012 (undelete and salvage) incoherent — salvaging a deleted file means ignoring what the filesystem says about accessibility by definition.
+
+Reporting still matters. A file flagged unreadable is a fact worth surfacing in the health report (F-010), and ADE renders the full `hsparwed` string.
+
+**Consequences.** ADE extracts content ADFlib will not, which is why the oracle will always show a small residual disagreement rather than converging on 100%. That residue is expected and should not be "fixed" by matching ADFlib. The differential test's threshold accommodates it deliberately.
+
+Rare in practice: a 143-disk sample found no read-protected files and 46 delete-protected ones, so this affects a fraction of a percent — but the fraction it affects is exactly the content a forensic tool exists to reach.
+
+**Reversal conditions.** If ADE ever gains a write path that could damage a source image, protection bits should gate *writes* — that is a different question from reads and would need its own entry. Read behaviour should not change.
+

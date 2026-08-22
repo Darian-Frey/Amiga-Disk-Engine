@@ -609,6 +609,22 @@ Extra-cylinder images are exact: 81, 82 and 83 cylinders land precisely on `cyli
 
 So the ADF size test is **`size % 11264 == 0` with a plausible cylinder count**, not `size == 901120`. The 901,121-byte image is a byte of trailing junk on an otherwise canonical image; the 90,112-byte one is a truncation. Both should be diagnosed and reported, not silently accepted or rejected — a truncated image is exactly the condition a forensic tool exists to name.
 
+### The reference implementation is not a safety benchmark
+
+Running ADFlib's `unadf` over all 4288 images, each capped at 512 MB and 10 s:
+
+| | |
+|---|---|
+| extracted normally | 3210 |
+| declined to mount | 1063 |
+| **crashed (SIGSEGV / SIGABRT)** | **15** |
+
+Uncapped, `Bomb Busters_Disk1.adf` drove it to **29 GB** and the kernel OOM killer took down the whole session. That disk is unremarkable: 901,120 bytes, `DOS\0`, valid bootblock checksum, a volume named `BOMBER` that ADE mounts and lists without complaint in 2.8 MB of memory.
+
+ADE crashed on none of the 4288.
+
+This is the concrete form of what F-001 set as its bar and what D-002 predicted: a fault inside wrapped C is not a `Result` and cannot be caught. It is also why the differential oracle runs under hard resource caps — see D-002 and AV-005.
+
 ## Format constraints (C-NNN)
 
 Stable, append-only IDs; referenced from [ARCHITECTURE.md](ARCHITECTURE.md), [DECISIONS.md](DECISIONS.md), and [ATTACK_VECTORS.md](ATTACK_VECTORS.md).

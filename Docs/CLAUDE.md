@@ -12,7 +12,7 @@ Amiga Disk Engine (ADE) — a forensic-grade, cross-platform toolkit for reading
 - **Enforcement worth knowing about:** C-001 is a `clippy.toml` tripwire (raw `from_be_bytes` fails the build outside `ade-endian`); D-003 is `tools/check-layering.py` (a cross-layer dependency fails CI); AV-004 is type-level — `BlockSource::read_block` takes a `ValidBlock`, constructible only via `Geometry::validate`. Do not route around these; widen the policy deliberately or not at all.
 - **Stack:** settled 2026-08-21. **D-001** = Rust core + C-ABI bridge + Qt6 GUI (Phase 5). **D-002** = reimplement OFS/FFS/RDB in Rust; ADFlib is a black-box differential oracle only — never linked, source never read (that would forfeit the licence freedom). Implementation is unblocked.
 - **Fixtures:** **D-010** Accepted 2026-08-22 — **no disk image is ever committed**, in any form. Fixtures are generated in code at test time; `tests/fixtures/` holds a manifest and docs only. A 4288-image TOSEC corpus lives in `disks/`, gitignored, for differential testing against the D-002 oracle; tests must skip cleanly when it is absent. `.gitignore` ignores disk-image extensions repository-wide with no whitelist — committing one requires a DECISIONS entry, not a negation line.
-- **Open decision, non-blocking:** **D-009** (xDMS — wrap/port/reimplement; Phase 2; turns on xDMS's unestablished licence; lean is a port to safe Rust).
+- **Open decision, non-blocking:** **D-009** (xDMS — wrap/port/reimplement; Phase 2). Its blocking unknown is now **resolved**: xDMS is **Public Domain** ("you can spread it, modify it and use it in any way you like", `/usr/share/doc/xdms/copyright`), so the leaning option — port to safe Rust — is available. The entry can be Accepted whenever wanted.
 - **Licence:** **Apache-2.0** (D-011), with `LICENSE` and `NOTICE` at the root; D-008 discharged. The repository is public. Keep `NOTICE` accurate if D-009 ever introduces third-party code, and remember D-010 still constrains what may be committed to `tests/fixtures/` — a `.gitignore` tripwire ignores disk-image extensions there until it lands.
 
 ## Active task / next milestone
@@ -20,8 +20,12 @@ Amiga Disk Engine (ADE) — a forensic-grade, cross-platform toolkit for reading
 Phase 0 is complete (2026-08-22). Phase 1 is unblocked and nothing is waiting on a decision.
 
 1. ~~First slice `ade info`~~ — **done 2026-08-22**. Runs over all 4288 corpus images with zero crashes.
-2. Next: mount and traverse. Rootblock hash table → directory blocks → file header → extension → data blocks → extraction. **Directory traversal carries a visited-set from the first commit** (AV-001): hard links to directories make cycles legal, not merely hostile.
-3. Then the fuzz harness (F-001) — the acceptance bar is a fuzz corpus, not well-formed real images.
+2. ~~Mount and traverse~~ — **done 2026-08-22**. `ade ls` and `ade extract` work; 11,087 files extracted from a 400-image sample with zero read errors. AV-001 is discharged: every chain carries a visited set.
+3. Next: the **fuzz harness** (F-001). Block level, not whole images. The last outstanding Phase 1 acceptance bar.
+   Note AV-005 is not theoretical: ADFlib allocates 29 GB on a plain uncompressed ADF in the corpus, so unbounded allocation belongs to the ADF parse path, not just decompression.
+   **Never run the oracle uncapped.** `unadf` OOM-killed a whole session once already; the test wraps it in `ulimit -v` and `timeout`.
+4. Then the health report proper (F-010) — aggregate the faults `ade info` already finds.
+5. ~~IMP-001~~ — **applied 2026-08-22**. `--format=json` on `info` and `ls`. The JSON field names and fault codes are now a **stability commitment** (F-015): rename them only with a decision entry. Text output is explicitly not parseable and may be reworded freely.
 3. Fuzz at the **block** level, not whole images — a rootblock parser takes 512 bytes, so seeding with 880 KB images wastes the budget on bytes nothing reads.
 4. Report bootblock and filesystem as **two independent facts** (C-008). A `DOS` prefix does not imply a mountable volume — 19% of real ones are not — and its absence does not imply an unmountable one.
 

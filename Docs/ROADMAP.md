@@ -32,12 +32,22 @@ Background context (why ADE exists, the documentation landscape survey, and the 
 - [ ] Mount OFS and FFS volumes: rootblock, bitmap, hash-table directory traversal, file header → extension → data blocks, extraction.
 - [x] Single byte-order module (C-001); bounds-checked block access via `ValidBlock` (AV-004).
 - [x] Content sniffing as an evidence cascade, not a magic lookup (F-003, C-008): verified against 4288 real images, correctly classifying 4270 canonical ADFs, 11 extended-ADFs, 5 extra-cylinder images and 2 size anomalies.
-- [ ] Directory-loop detection (AV-001) — needed once traversal lands.
-- [ ] Mount and traverse: rootblock hash table, directory blocks, file header → extension → data blocks, extraction.
+- [x] Directory-loop detection (AV-001) — a visited set of block numbers on every chain walked: hash chains, file extension chains, and the tree walk. Not a depth limit, which cannot distinguish a deep tree from a two-block loop.
+- [x] Mount and traverse: rootblock hash table, directory blocks, same-hash chains, path lookup with the volume's own case folding, and file reading through the reversed `data_blocks[]` table plus extension blocks, for both OFS and FFS.
+- [x] `ade ls` and `ade extract`.
+- [x] Differential testing against ADFlib (D-002's oracle) — 2894 of 2896 files byte-identical; the two differences are D-012, where ADE recovers content ADFlib refuses.
+- [ ] Fuzz harness at the block level (F-001) — the acceptance bar, still outstanding.
+- [ ] Health report proper (F-010): aggregate the faults `ade info` already finds.
 - [ ] Spike validated against three fixtures: one OFS DD, one FFS DD, one multi-partition HDF.
-**Acceptance:** Round-trip-read extraction matches a reference tool on the clean fixtures; the fuzz corpus runs with zero crashes (F-001).
+**Acceptance:** Round-trip-read extraction matches a reference tool on the clean fixtures *(met 2026-08-22: 99.93% byte-identical against ADFlib, the residue being D-012)*; the fuzz corpus runs with zero crashes (F-001) *(outstanding — no fuzz harness yet)*.
 
-*Progress 2026-08-22:* `ade info` runs over all 4288 corpus images with **zero crashes, hangs or unhandled errors** — 2608 clean, 626 with faults, 1054 with no AmigaDOS volume. That is not yet the F-001 bar, which requires a fuzz corpus rather than well-formed real images, but it is the first evidence the defensive stance holds on real input.
+*Progress 2026-08-22:* `ade info` runs over all 4288 corpus images with **zero crashes, hangs or unhandled errors** — 2608 clean, 626 with faults, 1054 with no AmigaDOS volume.
+
+Traversal and extraction then went over a 400-image sample: **295 volumes mounted, 11,087 files extracted, 180.5 MB, zero read errors**. Extracted content carries the magic numbers it should — Amiga hunk executables, PowerPacker, IFF — which is independent evidence the block ordering and OFS/FFS payload handling are right, since a reader that had those wrong would produce garbage.
+
+Eight files of 11,087 came up short of their declared size. Each was checked against an independent Python decode and found to be **genuine on-disk inconsistency**, not a reader fault: the OFS data blocks' own `data_size` fields sum to less than the header's `byte_size`. ADE now reports the shortfall rather than padding.
+
+Neither run is the F-001 bar, which requires a fuzz corpus rather than well-formed real images.
 
 ## Phase 2 — Filesystem breadth
 **Goal:** Cover the full non-flux filesystem surface, including hard-disk images, plus forensic recovery.

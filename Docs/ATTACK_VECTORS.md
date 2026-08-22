@@ -30,7 +30,11 @@ Severity: Critical (must hold) | Major (regression on release blocks) | Minor (t
 **Severity:** Major
 **Description.** DMS encryption/password paths and malformed gzip (ADZ/HDZ) can trigger resource exhaustion or crashes in the decompressor.
 **Detection.** Not implemented (would require capped output sizes and fuzzing the DMS/gzip front-ends; `errdms` fixtures as known-bad inputs).
-**Related decisions.** D-006, D-009. **Related constraints.** C-004 (SPEC.md).
+**Related decisions.** D-002, D-006, D-009. **Related constraints.** C-004 (SPEC.md).
+
+> **Observed in the reference implementation, 2026-08-22.** This vector is not hypothetical, and it is not confined to compressed formats. Running ADFlib's `unadf` over the 4288-image corpus produced **15 crashes**, and on `Bomb Busters_Disk1.adf` — an ordinary uncompressed 901,120-byte game disk — it allocated **29 GB** before the kernel OOM killer terminated it *and the surrounding session*. ADE reads the same disk in 2.8 MB and reports its volume cleanly.
+>
+> Two consequences. First, unbounded allocation belongs to the plain-ADF parse path too, not just to decompression — the fuzz harness must cover both. Second, every invocation of the D-002 oracle now runs under `ulimit -v` and `timeout`, because a test that can take down the developer's machine is not a test.
 **History.** Identified 2026-08-21 during initial scaffolding.
 
 ## Data integrity on write

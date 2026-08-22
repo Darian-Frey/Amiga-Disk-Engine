@@ -6,8 +6,12 @@
 //! coordination is permitted (D-003).
 
 pub mod inspect;
+pub mod json;
 
-pub use inspect::{Inspection, InspectionError, VolumeInfo, inspect_bytes, inspect_path};
+pub use inspect::{
+    Fault, Image, Inspection, InspectionError, VolumeInfo, entry_to_json, inspect_bytes,
+    inspect_path,
+};
 
 /// The layer crates, re-exported so that front-ends depend on this crate alone.
 pub mod layers {

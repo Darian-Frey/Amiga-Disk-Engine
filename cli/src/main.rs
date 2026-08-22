@@ -2,7 +2,19 @@
 //!
 //! Deliberately thin: every capability lives behind [`ade_core`] so the CLI and
 //! the GUI share one engine (F-002). Nothing here parses a disk; this file
-//! decides what to print and with which exit code.
+//! decides what to print, in which format, and with which exit code.
+//!
+//! # Output formats (F-015)
+//!
+//! `--format=text` (default) is for people and may be reworded freely.
+//! `--format=json` is the scriptable surface and is a **commitment**: field
+//! names and fault codes do not change once released. `ls` emits JSON Lines,
+//! one object per entry, so a large directory streams; `info` emits a single
+//! object.
+//!
+//! Text output is explicitly *not* parseable — Amiga filenames routinely
+//! contain spaces, so no column layout can be split reliably. That was IMP-001,
+//! and the fix is this flag rather than a cleverer layout.
 //!
 //! # Exit codes (F-015)
 //!
@@ -21,16 +33,15 @@
 //! 4 is separate from both 0 and 1 deliberately. Reporting "clean" for an image
 //! whose filesystem could not be read would be misleading, and calling it a
 //! fault would be wrong — 1054 of 4288 real images have no rootblock where one
-//! should be, and many are simply not AmigaDOS disks. A batch run (F-014) needs
-//! to bucket clean, faulty, not-AmigaDOS and unreadable separately, so the
-//! exit codes distinguish them.
+//! should be, and many are simply not AmigaDOS disks.
 
 use std::{
+    io::{ErrorKind, Write},
     path::{Path, PathBuf},
     process::ExitCode,
 };
 
-use ade_core::{Inspection, inspect_path};
+use ade_core::{Image, Inspection, entry_to_json, inspect_path};
 
 /// No faults found.
 const EXIT_CLEAN: u8 = 0;
@@ -43,24 +54,98 @@ const EXIT_UNREADABLE: u8 = 3;
 /// The image was read, but holds no AmigaDOS volume.
 const EXIT_NO_VOLUME: u8 = 4;
 
+/// Write one line to stdout, reporting whether the stream is still open.
+///
+/// A closed pipe is how `| head` ends a command: ordinary, not an error. But
+/// `println!` **panics** on it, which for a tool designed to be piped is
+/// unacceptable — and restoring the default `SIGPIPE` disposition needs a
+/// `libc` call behind `unsafe`, which the workspace forbids (D-001). So every
+/// line of output goes through here, and a closed pipe simply stops the loop.
+fn emit(out: &mut impl Write, line: &str) -> bool {
+    match writeln!(out, "{line}") {
+        Ok(()) => true,
+        // Broken pipe or anything else: stop writing. There is nowhere left to
+        // report the failure to.
+        Err(e) => {
+            debug_assert!(
+                e.kind() == ErrorKind::BrokenPipe,
+                "unexpected stdout failure: {e}"
+            );
+            false
+        }
+    }
+}
+
+/// How to render.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Format {
+    /// For people. Layout may change; do not parse it.
+    Text,
+    /// For machines. Field names and fault codes are stable.
+    Json,
+}
+
+/// The command line, after parsing.
+struct Args {
+    command: String,
+    positional: Vec<String>,
+    format: Format,
+}
+
+fn parse_args(raw: Vec<String>) -> Result<Args, String> {
+    let mut positional: Vec<String> = Vec::new();
+    let mut format = Format::Text;
+    for arg in raw {
+        match arg.as_str() {
+            "--format=json" | "--json" => format = Format::Json,
+            "--format=text" => format = Format::Text,
+            other if other.starts_with("--format=") => {
+                return Err(format!(
+                    "unknown format: {}",
+                    other.trim_start_matches("--format=")
+                ));
+            }
+            "--version" | "-V" | "--help" | "-h" => positional.push(arg),
+            other if other.starts_with("--") => return Err(format!("unknown option: {other}")),
+            _ => positional.push(arg),
+        }
+    }
+    let command = if positional.is_empty() {
+        String::new()
+    } else {
+        positional.remove(0)
+    };
+    Ok(Args {
+        command,
+        positional,
+        format,
+    })
+}
+
 fn main() -> ExitCode {
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    match args.first().map(String::as_str) {
-        Some("info") if args.len() == 2 => match args.get(1) {
-            Some(p) => info(&PathBuf::from(p)),
-            None => ExitCode::from(EXIT_USAGE),
-        },
-        Some("--version" | "-V") => {
+    let args = match parse_args(std::env::args().skip(1).collect()) {
+        Ok(a) => a,
+        Err(e) => {
+            eprintln!("ade: {e}");
+            usage();
+            return ExitCode::from(EXIT_USAGE);
+        }
+    };
+    let p = |n: usize| args.positional.get(n).map_or("", String::as_str);
+
+    match (args.command.as_str(), args.positional.len()) {
+        ("info", 1) => info(Path::new(p(0)), args.format),
+        ("ls", 1) => list(Path::new(p(0)), None, args.format),
+        ("ls", 2) => list(Path::new(p(0)), Some(p(1)), args.format),
+        ("extract", 2) => extract(Path::new(p(0)), p(1), None),
+        ("extract", 3) => extract(Path::new(p(0)), p(1), Some(PathBuf::from(p(2)))),
+        ("--version" | "-V", 0) => {
             println!("ade {}", ade_core::version());
             ExitCode::from(EXIT_CLEAN)
         }
-        Some("--help" | "-h") | None => {
+        ("--help" | "-h", 0) => {
             usage();
-            ExitCode::from(if args.is_empty() {
-                EXIT_USAGE
-            } else {
-                EXIT_CLEAN
-            })
+            ExitCode::from(EXIT_CLEAN)
         }
         _ => {
             usage();
@@ -73,14 +158,20 @@ fn usage() {
     println!("ade {} — Amiga Disk Engine", ade_core::version());
     println!();
     println!("USAGE:");
-    println!("    ade info <image>     inspect a disk image");
+    println!("    ade info <image>                   inspect a disk image");
+    println!("    ade ls <image> [path]              list a directory");
+    println!("    ade extract <image> <path> [dest]  extract a file");
     println!("    ade --version");
+    println!();
+    println!("OPTIONS:");
+    println!("    --format=text   human-readable (default); layout is not stable");
+    println!("    --format=json   machine-readable; field names and fault codes are stable");
     println!();
     println!("EXIT CODES:");
     println!("    0  clean   1  faults   2  usage   3  unreadable   4  no volume");
 }
 
-fn info(path: &Path) -> ExitCode {
+fn info(path: &Path, format: Format) -> ExitCode {
     let inspection = match inspect_path(path) {
         Ok(i) => i,
         Err(e) => {
@@ -88,148 +179,273 @@ fn info(path: &Path) -> ExitCode {
             return ExitCode::from(EXIT_UNREADABLE);
         }
     };
-    let faults = report(path, &inspection);
-    // No volume outranks faults: it is the more fundamental fact, and the
-    // faults are printed either way.
+    let mut out = std::io::stdout().lock();
+    match format {
+        Format::Json => {
+            emit(&mut out, &inspection.to_json().to_json());
+        }
+        Format::Text => report_text(&mut out, path, &inspection),
+    }
+    let _ = out.flush();
+
     ExitCode::from(if inspection.volume.is_none() {
         EXIT_NO_VOLUME
-    } else if faults {
-        EXIT_FAULTS
-    } else {
+    } else if inspection.faults().is_empty() {
         EXIT_CLEAN
+    } else {
+        EXIT_FAULTS
     })
 }
 
-/// Print the report. Returns whether anything was found worth flagging.
+/// The human rendering.
 ///
-/// Container and volume are reported as two independent facts, never collapsed
-/// into one verdict (C-008) — a `DOS` prefix does not imply a mountable volume
-/// and its absence does not preclude one.
-fn report(path: &Path, i: &Inspection) -> bool {
-    let mut faults = Vec::new();
-    println!("{}", path.display());
-    report_container(i);
-    report_bootblock(i, &mut faults);
-    report_volume(i, &mut faults);
-
-    if faults.is_empty() {
-        println!("  faults      none");
-        false
-    } else {
-        println!("  faults");
-        for f in &faults {
-            println!("    ! {f}");
-        }
-        true
-    }
-}
-
-fn report_container(i: &Inspection) {
-    println!("  container   {}", i.detection.kind);
-    println!("  size        {} bytes", i.size);
+/// Faults come from the engine, so the two output formats cannot drift apart
+/// about what is wrong with an image.
+fn report_text(out: &mut impl Write, path: &Path, i: &Inspection) {
+    let mut lines: Vec<String> = vec![
+        format!("{}", path.display()),
+        format!("  container   {}", i.detection.kind),
+        format!("  size        {} bytes", i.size),
+    ];
     if let Some(g) = i.geometry {
-        println!(
+        lines.push(format!(
             "  geometry    {} cylinders x {} heads x {} sectors x {} bytes = {} blocks",
             g.cylinders(),
             g.heads(),
             g.sectors(),
             g.block_size(),
             g.total_blocks()
-        );
+        ));
     }
-    println!("  evidence");
+    lines.push("  evidence".to_owned());
     for e in &i.detection.evidence {
-        println!("    - {e}");
+        lines.push(format!("    - {e}"));
+    }
+
+    if let Some(bb) = &i.bootblock {
+        lines.push("  bootblock".to_owned());
+        match &bb.dostype {
+            Ok(d) => lines.push(format!("    dostype     {d}")),
+            Err(e) => lines.push(format!("    dostype     none — {e}")),
+        }
+        if bb.checksum_valid {
+            lines.push("    checksum    valid".to_owned());
+        } else {
+            lines.push(format!(
+                "    checksum    invalid (stored {:#010x}) — normal for a non-bootable disk",
+                bb.stored_checksum
+            ));
+        }
+        lines.push(format!(
+            "    boot code   {}",
+            if bb.has_boot_code {
+                "present (never executed)"
+            } else {
+                "none"
+            }
+        ));
+        if !bb.is_dos() {
+            lines.push(format!(
+                "    prefix      {:?} — not DOS",
+                bb.prefix_display()
+            ));
+        }
+    } else {
+        lines.push("  bootblock   absent — image too short".to_owned());
+    }
+
+    if let Some(v) = &i.volume {
+        let r = &v.rootblock;
+        lines.push("  volume".to_owned());
+        lines.push(format!("    name        {:?}", r.name_lossy()));
+        lines.push(format!(
+            "    rootblock   block {} (computed)",
+            v.rootblock_at
+        ));
+        lines.push(format!(
+            "    checksum    {}",
+            if r.checksum_valid { "valid" } else { "INVALID" }
+        ));
+        lines.push(format!(
+            "    bitmap      {}",
+            if r.bitmap_flag_valid() {
+                "flagged valid"
+            } else {
+                "flagged INVALID"
+            }
+        ));
+        lines.push(format!("    created     {}", r.created));
+        lines.push(format!("    modified    {}", r.volume_altered));
+    } else {
+        lines.push("  volume      none".to_owned());
+        if let Some(why) = &i.volume_absent {
+            lines.push(format!("              {why}"));
+        }
+    }
+
+    let faults = i.faults();
+    if faults.is_empty() {
+        lines.push("  faults      none".to_owned());
+    } else {
+        lines.push("  faults".to_owned());
+        for f in &faults {
+            lines.push(format!("    ! [{}] {f}", f.code));
+        }
+    }
+
+    for line in &lines {
+        if !emit(out, line) {
+            return;
+        }
     }
 }
 
-fn report_bootblock(i: &Inspection, faults: &mut Vec<String>) {
-    let Some(bb) = &i.bootblock else {
-        println!("  bootblock   absent — image too short");
-        return;
+/// List a directory.
+///
+/// Faults found while walking are reported but do not stop the listing — a
+/// directory with one broken hash chain still has usable entries in its other
+/// slots.
+fn list(path: &Path, dir: Option<&str>, format: Format) -> ExitCode {
+    let image = match Image::open(path) {
+        Ok(i) => i,
+        Err(e) => {
+            eprintln!("ade: {}: {e}", path.display());
+            return ExitCode::from(EXIT_UNREADABLE);
+        }
     };
-    println!("  bootblock");
-    match &bb.dostype {
-        Ok(d) => println!("    dostype     {d}"),
-        Err(e) => println!("    dostype     none — {e}"),
+    let volume = match image.volume() {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("ade: {}: {e}", path.display());
+            return ExitCode::from(EXIT_NO_VOLUME);
+        }
+    };
+
+    let start = match dir {
+        Some(p) => match volume.lookup(p) {
+            Ok(e) if e.kind.is_directory() => e.block,
+            Ok(e) => {
+                eprintln!("ade: {}: not a directory", e.name_lossy());
+                return ExitCode::from(EXIT_FAULTS);
+            }
+            Err(e) => {
+                eprintln!("ade: {e}");
+                return ExitCode::from(EXIT_FAULTS);
+            }
+        },
+        None => volume.root(),
+    };
+
+    let listing = match volume.list(start) {
+        Ok(l) => l,
+        Err(e) => {
+            eprintln!("ade: {e}");
+            return ExitCode::from(EXIT_FAULTS);
+        }
+    };
+    let clean = listing.is_clean();
+    let mut entries = listing.entries;
+    entries.sort_by_key(|e| e.name_lossy().to_lowercase());
+
+    let mut out = std::io::stdout().lock();
+    match format {
+        Format::Json => {
+            for e in &entries {
+                let json = entry_to_json(e, &volume.path_components(e)).to_json();
+                if !emit(&mut out, &json) {
+                    break;
+                }
+            }
+        }
+        Format::Text => {
+            for e in &entries {
+                let size = if e.kind.is_file() {
+                    format!("{:>9}", e.byte_size)
+                } else {
+                    format!("{:>9}", e.kind.to_string())
+                };
+                let mut line = format!(
+                    "{size}  {}  {}  {}",
+                    e.protection.to_amigados_string(),
+                    e.altered,
+                    e.name_lossy()
+                );
+                if !e.comment.is_empty() {
+                    use std::fmt::Write as _;
+                    let _ = write!(line, "   ; {}", e.comment_lossy());
+                }
+                if !emit(&mut out, &line) {
+                    break;
+                }
+            }
+            emit(&mut out, &format!("{} entries", entries.len()));
+        }
     }
-    if bb.checksum_valid {
-        println!("    checksum    valid");
-    } else {
-        // Not a fault: only bootable disks need one, and 26% of real images
-        // lack it (C-008).
-        println!(
-            "    checksum    invalid (stored {:#010x}) — normal for a non-bootable disk",
-            bb.stored_checksum
+    let _ = out.flush();
+
+    // Cycles go to stderr, so they never contaminate JSON on stdout. They are
+    // the AV-001 case: on a real disk they mean either a hard link to a
+    // directory, or corruption.
+    for c in listing.cycles.iter().chain(&listing.faults) {
+        eprintln!("  ! {c}");
+    }
+    ExitCode::from(if clean { EXIT_CLEAN } else { EXIT_FAULTS })
+}
+
+/// Extract one file to disk, or to stdout when no destination is given.
+fn extract(path: &Path, inner: &str, dest: Option<PathBuf>) -> ExitCode {
+    let image = match Image::open(path) {
+        Ok(i) => i,
+        Err(e) => {
+            eprintln!("ade: {}: {e}", path.display());
+            return ExitCode::from(EXIT_UNREADABLE);
+        }
+    };
+    let volume = match image.volume() {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("ade: {}: {e}", path.display());
+            return ExitCode::from(EXIT_NO_VOLUME);
+        }
+    };
+    let entry = match volume.lookup(inner) {
+        Ok(e) => e,
+        Err(e) => {
+            eprintln!("ade: {e}");
+            return ExitCode::from(EXIT_FAULTS);
+        }
+    };
+    let data = match volume.read_file(&entry) {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("ade: {inner}: {e}");
+            return ExitCode::from(EXIT_FAULTS);
+        }
+    };
+    if !data.is_complete() {
+        eprintln!(
+            "ade: {inner}: recovered {} of {} declared bytes — {} short",
+            data.bytes.len(),
+            data.declared_size,
+            data.short_by
         );
     }
-    println!(
-        "    boot code   {}",
-        if bb.has_boot_code {
-            "present (never executed)"
-        } else {
-            "none"
-        }
-    );
-    if !bb.is_dos() {
-        println!("    prefix      {:?} — not DOS", bb.prefix_display());
-    }
-    if let Ok(d) = &bb.dostype
-        && d.unrecognised_flags() != 0
-    {
-        faults.push(format!(
-            "dostype carries undocumented bits {:#04x}",
-            d.unrecognised_flags()
-        ));
-    }
-}
+    let incomplete = !data.is_complete();
+    let data = data.into_bytes();
 
-fn report_volume(i: &Inspection, faults: &mut Vec<String>) {
-    let Some(v) = &i.volume else {
-        println!("  volume      none");
-        if let Some(why) = &i.volume_absent {
-            println!("              {why}");
+    if let Some(out) = dest {
+        if let Err(e) = std::fs::write(&out, &data) {
+            eprintln!("ade: {}: {e}", out.display());
+            return ExitCode::from(EXIT_UNREADABLE);
         }
-        return;
-    };
-    let r = &v.rootblock;
-    println!("  volume");
-    println!("    name        {:?}", r.name_lossy());
-    println!("    rootblock   block {} (computed)", v.rootblock_at);
-    println!(
-        "    checksum    {}",
-        if r.checksum_valid { "valid" } else { "INVALID" }
-    );
-    println!(
-        "    bitmap      {}",
-        if r.bitmap_flag_valid() {
-            "flagged valid"
-        } else {
-            "flagged INVALID"
+        eprintln!("{} bytes -> {}", data.len(), out.display());
+    } else {
+        let mut stdout = std::io::stdout().lock();
+        // A closed pipe here is ordinary: `ade extract ... | head -c 100`.
+        if stdout.write_all(&data).is_err() {
+            return ExitCode::from(EXIT_CLEAN);
         }
-    );
-    println!("    created     {}", r.created);
-    println!("    modified    {}", r.volume_altered);
-
-    if !r.checksum_valid {
-        faults.push("rootblock checksum does not match".to_owned());
+        let _ = stdout.flush();
     }
-    if !r.bitmap_flag_valid() {
-        faults.push("bitmap-valid flag is clear — the bitmap may be stale".to_owned());
-    }
-    if r.name_length_overflows() {
-        faults.push(format!(
-            "volume name length claims {} bytes in a 30-byte field",
-            r.declared_name_len
-        ));
-    }
-    for (label, stamp) in [
-        ("created", r.created),
-        ("modified", r.volume_altered),
-        ("root altered", r.root_altered),
-    ] {
-        for fault in stamp.faults() {
-            faults.push(format!("{label} datestamp: {fault}"));
-        }
-    }
+    ExitCode::from(if incomplete { EXIT_FAULTS } else { EXIT_CLEAN })
 }

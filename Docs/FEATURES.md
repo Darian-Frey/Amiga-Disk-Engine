@@ -140,7 +140,9 @@ Priorities are MoSCoW (Must / Should / Could / Won't). Effort is rough and pre-s
 **Effort:** M · **Phase:** 1+
 **Acceptance:**
 - A documented, versioned CLI and library binding suitable for automation, with stable exit codes and structured output.
-**Status:** Not started
+**Status:** In progress — exit codes and JSON output landed 2026-08-22 (IMP-001)
+**What exists:** five documented exit codes distinguishing clean / faults / usage / unreadable / no-volume; `--format=json` on `info` and `ls`, the latter as JSON Lines; typed faults with stable kebab-case codes. Output is pure ASCII, so Latin-1 Amiga names round-trip losslessly. Verified across 4288 images: 68,961 JSON Lines, all valid.
+**Still to come:** a library binding, and a version policy for the JSON schema itself.
 **Notes:** Friendly tools aren't scriptable; the scriptable one (amitools) is slow. Depends on F-002.
 
 ### F-016 Format-conversion matrix

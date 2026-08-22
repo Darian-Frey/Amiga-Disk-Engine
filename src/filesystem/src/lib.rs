@@ -11,4 +11,7 @@
 pub mod bootblock;
 pub mod datestamp;
 pub mod dostype;
+pub mod entry;
+pub mod hash;
 pub mod rootblock;
+pub mod volume;

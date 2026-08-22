@@ -17,7 +17,16 @@ use std::{fs, io, path::Path};
 
 use ade_block::{Geometry, GeometryError, read_at};
 use ade_container::{Detection, Kind, RawImage, sniff};
-use ade_filesystem::{bootblock::Bootblock, rootblock::Rootblock};
+use ade_filesystem::{
+    bootblock::Bootblock,
+    datestamp::DateFault,
+    dostype::FileSystem,
+    entry::Entry,
+    rootblock::Rootblock,
+    volume::{FsError, Volume},
+};
+
+use crate::json::Value;
 
 /// Bytes of an image that sniffing needs — the first two blocks, plus enough
 /// to scan sixteen blocks for an RDB.
@@ -168,6 +177,285 @@ fn read_volume(bytes: Vec<u8>, geometry: Geometry) -> (Option<VolumeInfo>, Optio
             )),
         ),
         Err(e) => (None, Some(format!("cannot parse {at}: {e}"))),
+    }
+}
+
+/// A problem found in an image.
+///
+/// Carries a **stable code** as well as a message. The message is for people
+/// and may be reworded; the code is part of the scriptable surface (F-015) and
+/// is not to be changed once released, because batch runs will match on it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Fault {
+    /// Stable machine-readable identifier, kebab-case.
+    pub code: &'static str,
+    /// Human-readable description.
+    pub message: String,
+}
+
+impl Fault {
+    fn new(code: &'static str, message: impl Into<String>) -> Self {
+        Self {
+            code,
+            message: message.into(),
+        }
+    }
+}
+
+impl std::fmt::Display for Fault {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl Inspection {
+    /// Everything wrong with this image.
+    ///
+    /// Computed here rather than in a front-end, so the human and JSON outputs
+    /// cannot drift apart and a future GUI inherits the same list.
+    ///
+    /// Deliberately **not** included: an invalid bootblock checksum, a foreign
+    /// bootblock prefix, and the absence of a volume. Each is normal on real
+    /// disks — 26% of a 4288-image survey fail the checksum, 7% have a foreign
+    /// prefix, and 25% hold no AmigaDOS volume — so treating them as faults
+    /// would drown the real findings (C-008).
+    #[must_use]
+    pub fn faults(&self) -> Vec<Fault> {
+        let mut faults = Vec::new();
+
+        if let Some(bb) = &self.bootblock
+            && let Ok(d) = &bb.dostype
+            && d.unrecognised_flags() != 0
+        {
+            faults.push(Fault::new(
+                "dostype-unknown-bits",
+                format!(
+                    "dostype carries undocumented bits {:#04x}",
+                    d.unrecognised_flags()
+                ),
+            ));
+        }
+
+        let Some(v) = &self.volume else {
+            return faults;
+        };
+        let r = &v.rootblock;
+        if !r.checksum_valid {
+            faults.push(Fault::new(
+                "rootblock-checksum",
+                "rootblock checksum does not match",
+            ));
+        }
+        if !r.bitmap_flag_valid() {
+            faults.push(Fault::new(
+                "bitmap-flag-clear",
+                "bitmap-valid flag is clear — the bitmap may be stale",
+            ));
+        }
+        if r.name_length_overflows() {
+            faults.push(Fault::new(
+                "name-length-overflow",
+                format!(
+                    "volume name length claims {} bytes in a 30-byte field",
+                    r.declared_name_len
+                ),
+            ));
+        }
+        for (label, stamp) in [
+            ("created", r.created),
+            ("modified", r.volume_altered),
+            ("root-altered", r.root_altered),
+        ] {
+            for fault in stamp.faults() {
+                let code = match fault {
+                    DateFault::DayZero => "datestamp-day-zero",
+                    DateFault::MinutesOutOfRange => "datestamp-minutes-range",
+                    DateFault::TicksOutOfRange => "datestamp-ticks-range",
+                };
+                faults.push(Fault::new(code, format!("{label} datestamp: {fault}")));
+            }
+        }
+        faults
+    }
+
+    /// The whole inspection as a JSON value (F-015).
+    #[must_use]
+    pub fn to_json(&self) -> Value {
+        let geometry = self.geometry.map(|g| {
+            Value::Obj(vec![
+                ("cylinders", Value::Num(u64::from(g.cylinders()))),
+                ("heads", Value::Num(u64::from(g.heads()))),
+                ("sectors", Value::Num(u64::from(g.sectors()))),
+                ("block_size", Value::Num(u64::from(g.block_size()))),
+                ("total_blocks", Value::Num(g.total_blocks())),
+            ])
+        });
+
+        let bootblock = self.bootblock.as_ref().map(|bb| {
+            Value::Obj(vec![
+                ("prefix", Value::str(bb.prefix_display())),
+                ("is_dos", Value::Bool(bb.is_dos())),
+                (
+                    "dostype",
+                    bb.dostype.as_ref().map_or(Value::Null, |d| {
+                        Value::Obj(vec![
+                            ("raw", Value::Num(u64::from(d.raw()))),
+                            ("flags", Value::Num(u64::from(d.flags()))),
+                            ("label", Value::str(d.to_string())),
+                            (
+                                "filesystem",
+                                Value::str(match d.filesystem() {
+                                    FileSystem::Ofs => "ofs",
+                                    FileSystem::Ffs => "ffs",
+                                }),
+                            ),
+                            ("international", Value::Bool(d.is_international())),
+                            ("dircache", Value::Bool(d.has_dircache())),
+                            (
+                                "unrecognised_flags",
+                                Value::Num(u64::from(d.unrecognised_flags())),
+                            ),
+                        ])
+                    }),
+                ),
+                ("checksum_valid", Value::Bool(bb.checksum_valid)),
+                ("has_boot_code", Value::Bool(bb.has_boot_code)),
+                (
+                    "stored_rootblock",
+                    Value::Num(u64::from(bb.stored_rootblock)),
+                ),
+            ])
+        });
+
+        let volume = self.volume.as_ref().map(|v| {
+            let r = &v.rootblock;
+            Value::Obj(vec![
+                ("name", Value::latin1(&r.name)),
+                ("rootblock", Value::Num(v.rootblock_at)),
+                ("checksum_valid", Value::Bool(r.checksum_valid)),
+                ("bitmap_flag_valid", Value::Bool(r.bitmap_flag_valid())),
+                ("hash_table_size", Value::Num(u64::from(r.hash_table_size))),
+                ("created", Value::str(r.created.to_string())),
+                ("modified", Value::str(r.volume_altered.to_string())),
+                ("root_altered", Value::str(r.root_altered.to_string())),
+            ])
+        });
+
+        Value::Obj(vec![
+            ("container", Value::str(self.detection.kind.to_string())),
+            ("size", Value::Num(self.size)),
+            (
+                "evidence",
+                Value::Arr(
+                    self.detection
+                        .evidence
+                        .iter()
+                        .map(|e| Value::str(e.to_string()))
+                        .collect(),
+                ),
+            ),
+            ("geometry", Value::opt(geometry, |g| g)),
+            ("bootblock", Value::opt(bootblock, |b| b)),
+            ("volume", Value::opt(volume, |v| v)),
+            (
+                "volume_absent",
+                Value::opt(self.volume_absent.as_ref(), Value::str),
+            ),
+            (
+                "faults",
+                Value::Arr(
+                    self.faults()
+                        .into_iter()
+                        .map(|f| {
+                            Value::Obj(vec![
+                                ("code", Value::str(f.code)),
+                                ("message", Value::str(f.message)),
+                            ])
+                        })
+                        .collect(),
+                ),
+            ),
+        ])
+    }
+}
+
+/// A directory entry as a JSON value (F-015).
+#[must_use]
+pub fn entry_to_json(entry: &Entry, path: &[Vec<u8>]) -> Value {
+    Value::Obj(vec![
+        ("name", Value::latin1(&entry.name)),
+        ("path", Value::latin1(&path.join(&b'/'))),
+        ("kind", Value::str(entry.kind.to_string())),
+        (
+            "size",
+            if entry.kind.is_file() {
+                Value::Num(u64::from(entry.byte_size))
+            } else {
+                Value::Null
+            },
+        ),
+        ("block", Value::Num(u64::from(entry.block))),
+        ("parent", Value::Num(u64::from(entry.parent))),
+        (
+            "protection",
+            Value::str(entry.protection.to_amigados_string()),
+        ),
+        ("protection_bits", Value::Num(u64::from(entry.protection.0))),
+        ("altered", Value::str(entry.altered.to_string())),
+        (
+            "comment",
+            if entry.comment.is_empty() {
+                Value::Null
+            } else {
+                Value::latin1(&entry.comment)
+            },
+        ),
+        ("checksum_valid", Value::Bool(entry.checksum_valid)),
+    ])
+}
+
+/// An image opened for browsing.
+///
+/// Owns the bytes so a [`Volume`] can borrow from it; the two-step open keeps
+/// the borrow explicit rather than hiding it behind a self-referential type.
+pub struct Image {
+    raw: RawImage,
+}
+
+impl Image {
+    /// Open an image file for browsing.
+    ///
+    /// # Errors
+    /// [`InspectionError::Io`] if the file cannot be read, or
+    /// [`InspectionError::Geometry`] if its size matches no usable geometry.
+    pub fn open(path: &Path) -> Result<Self, InspectionError> {
+        Self::from_bytes(fs::read(path)?)
+    }
+
+    /// Open bytes already in memory.
+    ///
+    /// # Errors
+    /// [`InspectionError::Geometry`] if the size matches no usable geometry.
+    pub fn from_bytes(bytes: Vec<u8>) -> Result<Self, InspectionError> {
+        let size = bytes.len() as u64;
+        let head = bytes.get(..HEAD_BYTES.min(bytes.len())).unwrap_or(&[]);
+        let Kind::Adf { cylinders, sectors } = sniff(head, size).kind else {
+            return Err(InspectionError::Geometry(GeometryError::ZeroDimension));
+        };
+        let geometry = Geometry::new(cylinders, 2, sectors, 512, Geometry::FLOPPY_RESERVED)
+            .map_err(InspectionError::Geometry)?;
+        let raw = RawImage::new(bytes, geometry)
+            .map_err(|_| InspectionError::Geometry(GeometryError::ReservedExceedsVolume))?;
+        Ok(Self { raw })
+    }
+
+    /// Mount the volume this image holds.
+    ///
+    /// # Errors
+    /// Whatever [`Volume::mount`] reports — most often that there is no
+    /// rootblock where one should be.
+    pub fn volume(&self) -> Result<Volume<'_>, FsError> {
+        Volume::mount(&self.raw)
     }
 }
 

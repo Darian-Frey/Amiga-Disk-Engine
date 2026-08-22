@@ -101,6 +101,18 @@ pub fn non_dos_bootblock(img: &mut [u8], magic: &[u8; 4]) {
     put_u32(img, 4, ck);
 }
 
+/// Point a directory's first hash slot at another directory, forming a cycle
+/// in the *tree* rather than in a hash chain (AV-001).
+///
+/// This is the shape a legitimate hard link to a directory produces. AmigaDOS
+/// permits those, so a tree walk can revisit a directory on a structurally
+/// valid disk — the reason traversal needs a visited set rather than a depth
+/// limit.
+pub fn directory_cycle(img: &mut [u8], dir: u32, target: u32) {
+    put_u32(img, dir as usize * BSIZE + 24, target);
+    rechecksum(img, dir);
+}
+
 /// Truncate the image to `blocks` blocks.
 ///
 /// One survey image is 90,112 bytes — eight cylinders of what should be eighty.

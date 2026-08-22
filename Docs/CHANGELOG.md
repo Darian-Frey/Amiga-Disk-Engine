@@ -31,6 +31,8 @@ Format follows [Keep a Changelog](https://keepachangelog.com). Reference F-, D-,
 - `Geometry::reserved()`, `Geometry::FLOPPY_RESERVED`, and `GeometryError::ReservedExceedsVolume`.
 
 ### Fixed
+- **`ade ls --format=json … | head` no longer panics.** `println!` panics on a closed pipe, which for a tool built to be piped is unacceptable. All output now goes through an `emit` helper treating a closed pipe as the ordinary end of a command — `SIGPIPE` cannot be restored directly because that needs `unsafe`, which the workspace forbids.
+- **The oracle test can no longer take down the host.** Its first run allocated 29 GB *inside `unadf`* on `Bomb Busters_Disk1.adf` and the kernel OOM killer terminated the session. Every invocation now runs under `ulimit -v` and `timeout`, applied via `sh` because `Command::pre_exec` needs `unsafe`, which the workspace forbids — the D-001 posture doing its job in a place I did not expect it.
 - **BUG-001** (high) — `Dostype::is_international()` was the naive bit test and wrong for `DOS\4`/`DOS\5`, which are international with the INTL bit clear. Investigation found a second error the report had missed: `DOS\6`/`DOS\7` are the bit combinations the classic encoding left unused *because* dircache implies international, which is why LNFS claimed them — so they are dostypes, not bit patterns, and the old `has_dircache()` wrongly reported them as dircache volumes. Replaced bit predicates with a whole-byte `Mode` resolution. Verified against 4288 TOSEC images: 20 would have hashed wrongly before the fix.
 - **BUG-002** (low) — `Geometry::midpoint()` used `total_blocks / 2`; renamed to `root_block()` and reimplemented as the documented `(numReserved + highKey) / 2` (ADF FAQ §4.2). `Geometry` carries `reserved`; `new()` takes it and rejects `reserved >= total_blocks`. Fixed ahead of its deferral because the API change was cheapest before anything depended on it.
 
@@ -48,6 +50,22 @@ Format follows [Keep a Changelog](https://keepachangelog.com). Reference F-, D-,
 - **`ade-core::inspect`** — wires the layers; the single seam the CLI consumes.
 - **CLI exit codes** (F-015): 0 clean, 1 faults, 2 usage, 3 unreadable, **4 no AmigaDOS volume**. 4 is separate deliberately — 1054 of 4288 real images have no rootblock where one should be, and reporting those as "clean" would mislead while calling them faulty would be wrong.
 - Verified against the full corpus: 4288 images, **zero crashes**, container detection matching the independent census exactly. Findings included 248 stale bitmap-valid flags (AV-003 in the wild), 3 rootblock checksum failures and 3 dostypes carrying undocumented bits — each matching the earlier Python analysis.
+
+- **Mount and traverse.** `ade-filesystem::volume::Volume` mounts from any `BlockSource`, lists directories through the hash table and its same-hash chains, resolves paths using the volume's own case folding, reads files through the reversed `data_blocks[]` table and extension blocks for both OFS and FFS, and walks the whole tree.
+- **`ade-filesystem::entry`** — directory entries for every documented secondary type, including both hard-link forms and soft links, with protection flags whose owner bits are correctly inverted relative to group and other.
+- **`ade-filesystem::hash`** — the directory hash and both case-folding variants, with a test that pins the `& 0x7ff` inside the loop rather than merely exercising the function.
+- **`ade ls` and `ade extract`** commands.
+- **AV-001 discharged in code.** Every chain walked carries a visited set of block numbers — hash chains, file extension chains, and the tree walk. A depth limit would not do: it cannot distinguish a legitimately deep tree from a two-block cycle. Tested against a self-loop, a two-block cycle, and a directory cycle of the kind a legitimate hard link produces.
+- **`FileContents`** replaces a bare `Vec<u8>` from `read_file`, carrying the declared size and any shortfall, so a short read cannot pass unnoticed. ADE reports the gap rather than padding to the declared length: inventing bytes would be worse than admitting a gap.
+- **IMP-001** logged — `ade ls` output is not machine-parseable, which F-015's "structured output" promise requires. Logged rather than fixed, per Maintenance Rule 8.
+
+- **The D-002 oracle is live.** `unadf` and `xdms` installed; a differential test compares ADE's extraction against ADFlib byte-for-byte. Result over 80 disks: **2896 files compared, 2894 byte-identical (99.93%), zero unmatched paths.**
+- **`Volume::entry_at` and `Volume::path_components`** — read the entry at a block, and walk the parent chain to a path. The walk carries a visited set, because a corrupt parent pointer loops as readily as a hash chain (AV-001).
+- **D-012** — protection bits are metadata, not access control. Both oracle disagreements had one cause: ADFlib refuses to read files flagged unreadable and writes zero bytes; ADE recovers them. `Raffles.adf:s/startup-sequence` is flagged unreadable and yields 144 bytes of coherent AmigaDOS script. A 1989 permission bit is data about the disk, not an instruction to a preservation tool.
+
+- **`--format=json`** on `ade info` and `ade ls` (IMP-001, F-015). `ls` emits JSON Lines so large directories stream; `info` emits one object with evidence and faults as arrays. Output is pure ASCII — Latin-1 names become `\uXXXX` escapes and round-trip losslessly, because a filename is bytes on a disk rather than text.
+- **`ade_core::json`** — a small JSON writer, so the workspace keeps zero dependencies. ADE emits JSON and never parses it, so the whole escaping surface is one function.
+- **`Inspection::faults()`** with a typed `Fault` carrying a **stable code** beside its message. Fault computation moved out of the CLI, so the human and JSON outputs cannot disagree about what is wrong with an image, and a future GUI inherits the same list.
 
 ### Changed
 - **SPEC §Corpus observations** — new section recording a survey of 4288 TOSEC Amiga ADF images, explicitly labelled measurement rather than specification. Magic distribution, the 300 non-`DOS` images across 144 distinct bootloaders, bootblock-checksum and rootblock validity rates, and the non-canonical size distribution.
