@@ -14,7 +14,7 @@ jobs:
     name: Format, lint, test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install toolchain
         run: rustup component add rustfmt clippy
@@ -42,7 +42,7 @@ jobs:
     name: Layering (D-003)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       # No module may span two pipeline layers. Adding a cross-layer dependency
       # must be a deliberate edit to the policy file, not an unnoticed line in a
       # Cargo.toml.
