@@ -11,14 +11,20 @@ Amiga Disk Engine (ADE) — a forensic-grade, cross-platform toolkit for reading
 - **Code:** scaffold only. Real: `ade-endian` (C-001, complete for the widths so far) and `ade-block` (geometry, `BlockSource` seam, `ValidBlock` bounds proof). Partial: `ade-filesystem::dostype`. The other layer crates are documented stubs. No parsing of real images yet.
 - **Enforcement worth knowing about:** C-001 is a `clippy.toml` tripwire (raw `from_be_bytes` fails the build outside `ade-endian`); D-003 is `tools/check-layering.py` (a cross-layer dependency fails CI); AV-004 is type-level — `BlockSource::read_block` takes a `ValidBlock`, constructible only via `Geometry::validate`. Do not route around these; widen the policy deliberately or not at all.
 - **Stack:** settled 2026-08-21. **D-001** = Rust core + C-ABI bridge + Qt6 GUI (Phase 5). **D-002** = reimplement OFS/FFS/RDB in Rust; ADFlib is a black-box differential oracle only — never linked, source never read (that would forfeit the licence freedom). Implementation is unblocked.
-- **Open decisions, neither blocking:** **D-009** (xDMS — wrap/port/reimplement; Phase 2; turns on xDMS's unestablished licence; lean is a port to safe Rust). **D-010** (test-fixture provenance — TOSEC images are copyrighted and cannot simply be committed to a repo intended to go public; lean is freely-distributable + synthetic fixtures, with a fetch script for the wider corpus).
+- **Fixtures:** **D-010** Accepted 2026-08-22 — **no disk image is ever committed**, in any form. Fixtures are generated in code at test time; `tests/fixtures/` holds a manifest and docs only. A 4288-image TOSEC corpus lives in `disks/`, gitignored, for differential testing against the D-002 oracle; tests must skip cleanly when it is absent. `.gitignore` ignores disk-image extensions repository-wide with no whitelist — committing one requires a DECISIONS entry, not a negation line.
+- **Open decision, non-blocking:** **D-009** (xDMS — wrap/port/reimplement; Phase 2; turns on xDMS's unestablished licence; lean is a port to safe Rust).
 - **Licence:** **Apache-2.0** (D-011), with `LICENSE` and `NOTICE` at the root; D-008 discharged. The repository is public. Keep `NOTICE` accurate if D-009 ever introduces third-party code, and remember D-010 still constrains what may be committed to `tests/fixtures/` — a `.gitignore` tripwire ignores disk-image extensions there until it lands.
 
 ## Active task / next milestone
 
-1. Resolve **D-010**, then acquire the fixture set it permits (clean DD/HD, OFS/FFS/INTL/dircache, multi-partition HDF, known-bad `errdms`/protected, plus hand-authored malformed images for AV-001/AV-004).
-2. Stand up the Cargo workspace over the existing `src/<layer>/` skeleton.
-3. Begin **Phase 1** (F-001, F-002, F-003-ADF, F-010): read-only ADF parse validated against one OFS DD, one FFS DD, one multi-partition HDF fixture, with the fuzz corpus passing (zero crashes) and the ADFlib differential suite agreeing on clean fixtures.
+Phase 0 is complete (2026-08-22). Phase 1 is unblocked and nothing is waiting on a decision.
+
+1. First slice: **`ade info <image>`** — geometry, dostype, bootblock checksum. Chosen as a vertical cut through container → block → endian → filesystem so every seam is exercised now rather than at integration time.
+2. Then Phase 1 proper (F-001, F-002, F-003-ADF, F-010): read-only ADF parse, extraction, health report.
+3. Fuzz at the **block** level, not whole images — a rootblock parser takes 512 bytes, so seeding with 880 KB images wastes the budget on bytes nothing reads.
+4. Report bootblock and filesystem as **two independent facts** (C-008). A `DOS` prefix does not imply a mountable volume — 19% of real ones are not — and its absence does not imply an unmountable one.
+
+Fixtures are ready: `ade-fixtures` builds any volume the tests need and `corrupt` supplies the malformed cases. Real images are in `disks/`, gitignored; corpus tests must skip cleanly without them.
 
 ## Architectural invariants
 

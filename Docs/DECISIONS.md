@@ -227,10 +227,10 @@ Note the asymmetry with D-002: there, ADFlib's source is *not* to be read, becau
 ---
 
 ### D-010 Test-fixture provenance
-**Decided:** — (open)
+**Decided:** 2026-08-22
 **Recorded:** 2026-08-21
-**Status:** Proposed
-**Authors:** Claude (primary auditor)
+**Status:** Accepted
+**Authors:** Darian-Frey (decision); Claude (analysis)
 **Related:** F-001, D-002, D-006, D-008, AV-001, AV-004, ROADMAP Phase 0
 
 **Context.** Phase 0 calls for a curated TOSEC Amiga fixture set to be "checked in and labelled known-good / known-bad", and `tests/fixtures/` exists for it. But TOSEC Amiga images are overwhelmingly commercial software under copyright, and D-008 intends this repository to become public. Committing them would be unlawful distribution and a plausible takedown target. No decision currently records this, and the interaction with D-008 is direct: **the licence is not the only thing gating publication.**
@@ -241,15 +241,31 @@ D-002 raised the stakes. With ADFlib reduced to a black-box oracle, differential
 - **A. Commit everything.** Rejected on sight; recorded only to note it was considered.
 - **B. Commit checksums plus a fetch script.** Contributors acquire TOSEC themselves; CI needs an out-of-band corpus. Keeps the repo clean but makes the test suite non-hermetic and unrunnable on a fresh clone.
 - **C. Private sibling repository for real fixtures.** Hermetic for those with access; opaque to outside contributors, and awkward for CI on a public repo.
-- **D. Committed fixtures restricted to freely-distributable disks, plus hand-authored synthetic images.** Fred Fish / AmigaLibDisk / permissively-licensed demo disks for the happy path, with deliberately-corrupt synthetic images for the malformed corpus. Supplemented by B for the wider TOSEC differential run.
+- **D. Committed fixtures restricted to freely-distributable disks, plus hand-authored synthetic images.** Superseded by E. Fred Fish / AmigaLibDisk / permissively-licensed demo disks for the happy path, with crafted images for the malformed corpus. The original lean; its weakness is that "hand-authored" was assumed to mean committed binaries.
+- **E. Generate fixtures in code; commit no image data at all.** Chosen. A fixture generator constructs images deterministically at test time; the repository holds the generator, a block-level fuzz seed corpus, and a name-plus-hash manifest for the local differential corpus.
 
-**Decision.** Open. Lean towards **D, with B layered on top**. The malformed corpus wants to be synthetic in any case — AV-001 (hash-chain loops) and AV-004 (out-of-range pointers) require structures no genuine disk will produce, so they must be crafted regardless. That leaves only the happy-path fixtures needing real disks, and freely-distributable Amiga disks are plentiful enough to cover OFS/FFS/INTL/dircache. The broad TOSEC differential run against the D-002 oracle then happens against a locally-fetched corpus that never enters the repository.
+**Decision.** Option E. **No disk image is committed to this repository, in any form, ever.** `tests/fixtures/` holds a manifest and documentation; the images themselves are built at test time by a generator kept under version control as source.
+
+The refinement from D to E came from acquiring the corpus (4288 TOSEC images, 2026-08-22) and seeing what it could and could not do.
+
+1. **A generator is readable where a binary is opaque.** `hash_chain_loop()` states in code what structure it builds and why; an 880 KB blob states nothing, diffs meaninglessly, and can only be trusted by whoever produced it.
+2. **It covers what no corpus will supply.** The 4288-image survey contains no `DOS\4`, `DOS\6` or `DOS\7`. A generator emits all eight dostypes trivially — including the LNFS pair that no realistic collection will hand us. Since `DOS\5` was the case that exposed BUG-001, the untested dostypes are exactly where the next defect is likely to sit.
+3. **AV-001 and AV-004 were always going to be code.** Hash-chain loops and out-of-range block pointers do not occur on genuine disks; they must be constructed. Committing them as binaries would have been storing the generator's output instead of the generator.
+4. **The copyright question disappears** rather than being managed. There is no whitelist to maintain, no per-disk licence verification to keep current, and no standing obligation. A disk image in the repository becomes a mistake by definition.
+
+**On the generator/parser agreement risk.** A generator written by the same hand as the parser can encode the same misreading of the spec, and both will agree. This is real and is *not* addressed by option E on its own — it is addressed by D-002's black-box oracle over the local corpus, which tests the parser against reality rather than against our understanding. The two mechanisms cover different failure modes: generated fixtures cover *specified* behaviour and hostile input, the corpus covers *actual* behaviour. Neither substitutes for the other, and the value of this decision depends on both being run.
+
+**Consequences.** `tests/fixtures/` contains no image data; the repository stays small and every fixture is reviewable as source. The test suite is hermetic and offline on a fresh clone. Differential tests against the local corpus skip cleanly when `disks/` is absent.
+
+The cost, stated plainly: **CI never exercises a real Amiga disk.** It verifies that the specification is implemented, not that reality matches the specification — and the survey already showed those differ, with 19% of `DOS`-magic images carrying no rootblock and only 74% a valid bootblock checksum. Running the corpus locally therefore has to be a habit rather than an optional extra, and a finding that only the corpus can catch will not be caught by a pull request.
+
+**Implementation note.** Fuzzing (F-001) should target the **block** level rather than whole images: a rootblock parser takes 512-byte inputs and the container sniffer takes short headers, so seeding with 880 KB images would spend almost the entire fuzz budget on bytes no parser reads. This also keeps the committed seed corpus genuinely small.
+
+**Manifest.** `tests/fixtures/corpus.manifest` records TOSEC canonical name plus SHA-256 for images used in differential tests. Names and hashes are metadata, not content, so nothing copyrighted is distributed, and anyone holding their own TOSEC set can reproduce a specific finding exactly.
 
 **Update 2026-08-22.** A working corpus of **4288 TOSEC Amiga ADF images** now exists locally in `disks/`, excluded from version control by `.gitignore` (which ignores disk-image extensions repository-wide, not merely that directory). That settles the *differential-testing* half of this decision in practice: the wide corpus lives outside git, which is option B's posture without the fetch script. What remains open is the *committed-fixture* half — whether anything at all may live in `tests/fixtures/` so the suite is runnable on a fresh clone. The survey in SPEC §Corpus observations is the first return on having it, and it has already produced C-008 and confirmed BUG-001 against 20 real images.
 
-**Consequences.** Determines what may be committed to `tests/fixtures/`, whether the test suite is hermetic on a fresh clone, and — jointly with D-008 — when the repository can be made public. Phase 0's "fixture set is checked in" deliverable needs rewording to match whatever is decided here.
-
-**Reversal conditions.** N/A while Proposed. Once decided, revisit if the freely-distributable set proves too narrow to cover the dostype matrix, which would force greater reliance on option B.
+**Reversal conditions.** Revisit only if some format proves genuinely infeasible to synthesise — a real protected-disk MFM track is the plausible candidate, at Phase 4. Even then the answer is more likely a generator that emits flux than a committed binary. Reversal means committing image data, so it requires establishing distribution rights for each file and accepting a permanent obligation to keep that verification current; it is not a convenience to be reached for when a fixture is awkward to build.
 
 ---
 

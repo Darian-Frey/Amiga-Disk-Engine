@@ -1,0 +1,15 @@
+[package]
+name = "ade-fixtures"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "ADE: deterministic Amiga disk-image fixture generator (test support, D-010)"
+publish = false
+
+[dependencies]
+
+[lints]
+workspace = true

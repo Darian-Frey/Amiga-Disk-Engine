@@ -7,11 +7,15 @@
 # Cargo.lock IS committed: ADE ships binaries (CLI, bridge), so reproducible
 # builds matter more than downstream version flexibility.
 
-# --- disk images: never committed (D-010) ---
+# --- disk images: never committed (D-010, Accepted 2026-08-22) ---
 # TOSEC Amiga images are copyrighted commercial software and this is a public
 # repository. Ignored by extension everywhere, not by location, so a stray copy
-# outside disks/ is caught too. When D-010 permits specific fixtures, negate
-# them explicitly — committing a disk image should be a deliberate act.
+# outside disks/ is caught too.
+#
+# D-010 committed ADE to generating fixtures rather than storing them, so there
+# is no whitelist and these rules have no exceptions. A disk image in this
+# repository is a mistake by definition. Reversing that needs a DECISIONS entry,
+# not a negation line.
 *.adf
 *.adz
 *.hdf
@@ -36,24 +40,10 @@ fuzz/artifacts/
 fuzz/coverage/
 tests/fuzz/artifacts/
 
-# --- Test fixtures: D-010 guard ---
-# Fixture provenance is UNDECIDED (D-010). Most TOSEC Amiga images are
-# copyrighted commercial software and must not be committed to a public
-# repository. These patterns are a tripwire, not a policy — once D-010 lands,
-# whitelist the permitted fixtures explicitly with negation rules below.
-tests/fixtures/**/*.adf
-tests/fixtures/**/*.adz
-tests/fixtures/**/*.hdf
-tests/fixtures/**/*.hdz
-tests/fixtures/**/*.dms
-tests/fixtures/**/*.scp
-tests/fixtures/**/*.ipf
+# --- Test fixtures (D-010) ---
+# Covered by the repository-wide extension rules above; only `.raw` is extra.
+# tests/fixtures/ holds a manifest and documentation, never image data.
 tests/fixtures/**/*.raw
-# Keep directory structure and any manifests/checksums.
-!tests/fixtures/**/.gitkeep
-!tests/fixtures/**/*.md
-!tests/fixtures/**/*.toml
-!tests/fixtures/**/*.sha256
 
 # --- Editors / OS ---
 .vscode/

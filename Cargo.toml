@@ -13,6 +13,8 @@ members = [
     "src/api",
     # Front-ends.
     "cli",
+    # Test support.
+    "tools/fixtures",
 ]
 
 [workspace.package]
@@ -34,6 +36,7 @@ ade-filesystem = { path = "src/filesystem", version = "0.0.0" }
 ade-object     = { path = "src/object",     version = "0.0.0" }
 ade-catalogue  = { path = "src/catalogue",  version = "0.0.0" }
 ade-core       = { path = "src/api",        version = "0.0.0" }
+ade-fixtures   = { path = "tools/fixtures", version = "0.0.0" }
 
 # Lints applied to every crate via `[lints] workspace = true`.
 #

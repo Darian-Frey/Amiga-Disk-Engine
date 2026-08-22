@@ -6,16 +6,21 @@ Background context (why ADE exists, the documentation landscape survey, and the 
 
 ## Phase 0 — Scaffold & decisions
 **Goal:** Stand up the plan-first documentation set and resolve the two stack decisions that gate all code.
-**Status:** In progress
+**Status:** Complete 2026-08-22
 **Features delivered:** —
 **Deliverables:**
 - [x] Documentation scaffold (this set) to the project-scaffold standard.
 - [x] Resolve **D-001** (language/stack) — Accepted 2026-08-21 as Rust core + Qt6 over a C-ABI bridge.
 - [x] Resolve **D-002** (ADFlib: wrap vs reimplement) — Accepted 2026-08-21 as reimplementation with ADFlib as a black-box test oracle. Scope narrowed to ADFlib; xDMS split out to **D-009** (Phase 2, non-blocking).
 - [x] Choose a licence and add `LICENSE` — Apache-2.0, decided 2026-08-21 (**D-011**), added with a `NOTICE` before the first public commit. Discharges D-008.
-- [ ] Resolve **D-010** (test-fixture provenance): decide what may lawfully be committed to `tests/fixtures/`. Now load-bearing, because D-002 makes differential testing the primary route to the edge-case coverage reimplementation forgoes.
-- [ ] Acquire the fixture set per D-010: clean DD, clean HD, OFS, FFS, INTL, dircache, multi-partition HDF, plus known-bad (`errdms`/protected) nasties, and hand-authored malformed images for AV-001 / AV-004.
-**Acceptance:** D-001 and D-002 Accepted in [DECISIONS.md](DECISIONS.md) *(done 2026-08-21)*; `LICENSE` present *(done 2026-08-21, D-011)*; D-010 decided and the fixture set available and labelled known-good / known-bad.
+- [x] Resolve **D-010** (test-fixture provenance) — Accepted 2026-08-22 as Option E: generate fixtures in code, commit no image data at all. `tests/fixtures/` holds a manifest and documentation only.
+- [x] Acquire the differential corpus — 4288 TOSEC Amiga ADF images held locally in `disks/`, outside version control. Already returned C-008, the extended-ADF layout, and confirmation of BUG-001 against 20 real images.
+- [x] Build the fixture generator — `ade-fixtures` (2026-08-22). Volumes of any geometry including the 81–83-cylinder cases; all eight dostypes; OFS and FFS data layout; hash-table insertion with same-hash chaining; accurate bitmap; both checksum algorithms. `corrupt` supplies AV-001 (self-cycle and two-block cycle), AV-003, AV-004, non-`DOS` bootblocks, truncation and trailing junk. Depends on no other ADE crate, deliberately.
+- [x] Validate the generator against reality — its checksum implementations agree with 3976 real `DOS` images: 3226 of 3229 well-typed rootblocks validate, and the bootblock rate reproduces the measured 74.1%. Skips cleanly when the corpus is absent.
+- [x] Manifest tooling — `cargo run -p ade-fixtures --bin manifest` emits `sha256 size name` rows; SHA-256 verified against `sha256sum`. The manifest itself is written when differential tests reference specific images.
+**Acceptance:** met. D-001, D-002 and D-010 Accepted in [DECISIONS.md](DECISIONS.md); `LICENSE` present (D-011); the generator produces the Phase-1 fixture set and the differential suite runs against the local corpus, skipping cleanly without it.
+
+**Phase 0 is complete** as of 2026-08-22, bar D-009, which is scoped to Phase 2 and blocks nothing.
 
 ## Phase 1 — Read-only ADF core (happy path)
 **Goal:** Parse and extract from plain 880 KB DD ADF images, defensively, through the chosen stack.

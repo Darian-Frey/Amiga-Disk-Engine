@@ -58,6 +58,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "ade-fixtures"
+version = "0.0.0"
+
+[[package]]
 name = "ade-flux"
 version = "0.0.0"
 dependencies = [
