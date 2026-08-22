@@ -62,6 +62,7 @@ pub struct Geometry {
     heads: u32,
     sectors: u32,
     block_size: u32,
+    reserved: u32,
 }
 
 /// Constructing a geometry that cannot describe a real device.
@@ -71,6 +72,8 @@ pub enum GeometryError {
     ZeroDimension,
     /// The dimensions multiply out beyond what an address space can hold.
     Overflow,
+    /// More blocks are reserved than the volume contains.
+    ReservedExceedsVolume,
 }
 
 impl fmt::Display for GeometryError {
@@ -78,6 +81,9 @@ impl fmt::Display for GeometryError {
         match self {
             Self::ZeroDimension => f.write_str("geometry has a zero dimension"),
             Self::Overflow => f.write_str("geometry dimensions overflow the address space"),
+            Self::ReservedExceedsVolume => {
+                f.write_str("more blocks are reserved than the volume contains")
+            }
         }
     }
 }
@@ -85,12 +91,18 @@ impl fmt::Display for GeometryError {
 impl core::error::Error for GeometryError {}
 
 impl Geometry {
+    /// Reserved blocks at the start of a standard floppy volume — the two boot
+    /// blocks. Hard-disk partitions carry their own value in the DOSEnvVec
+    /// `Reserved` field (usually 2, minimum 1).
+    pub const FLOPPY_RESERVED: u32 = 2;
+
     /// Standard 880 KB double-density Amiga floppy: 80 × 2 × 11 × 512.
     pub const DD_FLOPPY: Self = Self {
         cylinders: 80,
         heads: 2,
         sectors: 11,
         block_size: 512,
+        reserved: Self::FLOPPY_RESERVED,
     };
 
     /// 1.76 MB high-density Amiga floppy: 80 × 2 × 22 × 512.
@@ -99,17 +111,21 @@ impl Geometry {
         heads: 2,
         sectors: 22,
         block_size: 512,
+        reserved: Self::FLOPPY_RESERVED,
     };
 
     /// Build a geometry, rejecting shapes that cannot describe a device.
     ///
     /// Hard-disk images carry configurable block sizes (512/1K/2K/4K per
     /// C-002/C-005), so `block_size` is a parameter rather than a constant.
+    /// `reserved` is the number of reserved blocks at the volume start, which
+    /// feeds [`Self::root_block`] — see C-007.
     pub const fn new(
         cylinders: u32,
         heads: u32,
         sectors: u32,
         block_size: u32,
+        reserved: u32,
     ) -> Result<Self, GeometryError> {
         if cylinders == 0 || heads == 0 || sectors == 0 || block_size == 0 {
             return Err(GeometryError::ZeroDimension);
@@ -119,11 +135,21 @@ impl Geometry {
             heads,
             sectors,
             block_size,
+            reserved,
         };
-        match geometry.checked_total_blocks() {
-            Some(_) => Ok(geometry),
-            None => Err(GeometryError::Overflow),
+        let Some(total) = geometry.checked_total_blocks() else {
+            return Err(GeometryError::Overflow);
+        };
+        if reserved as u64 >= total {
+            return Err(GeometryError::ReservedExceedsVolume);
         }
+        Ok(geometry)
+    }
+
+    /// Reserved blocks at the start of the volume.
+    #[must_use]
+    pub const fn reserved(&self) -> u32 {
+        self.reserved
     }
 
     const fn checked_total_blocks(&self) -> Option<u64> {
@@ -173,14 +199,29 @@ impl Geometry {
         self.total_blocks().saturating_mul(self.block_size as u64)
     }
 
-    /// The volume midpoint, where a floppy's rootblock sits (block 880 on a
-    /// standard DD floppy).
+    /// Where this volume's rootblock is located.
     ///
-    /// This is the conventional location, not a guarantee: the rootblock
-    /// pointer must still be read and validated rather than assumed.
+    /// Computed, never read from the bootblock: that field reports 880 even on
+    /// HD volumes whose rootblock is at 1760, so it cannot be trusted (C-007).
+    ///
+    /// Clévy's ADF FAQ §4.2 gives the formula as
+    ///
+    /// ```text
+    /// highKey = numCyls * numSurfaces * numBlocksPerTrack - 1
+    /// rootKey = (numReserved + highKey) / 2
+    /// ```
+    ///
+    /// which is *not* half the block count once `reserved` rises above two:
+    /// 1000 blocks with four reserved gives 501, not 500. It yields 880 for a
+    /// DD floppy and 1760 for HD.
+    ///
+    /// This is the conventional location, not a guarantee — a rootblock found
+    /// here should still be validated (type, secondary type, checksum) rather
+    /// than assumed.
     #[must_use]
-    pub const fn midpoint(&self) -> BlockIndex {
-        BlockIndex(self.total_blocks() / 2)
+    pub const fn root_block(&self) -> BlockIndex {
+        let high_key = self.total_blocks().saturating_sub(1);
+        BlockIndex((self.reserved as u64).saturating_add(high_key) / 2)
     }
 
     /// Prove that `index` addresses a block inside this geometry.
@@ -296,31 +337,50 @@ mod tests {
         let g = Geometry::DD_FLOPPY;
         assert_eq!(g.total_blocks(), 1760);
         assert_eq!(g.total_bytes(), 901_120, "the canonical 880 KB ADF");
-        assert_eq!(
-            g.midpoint(),
-            BlockIndex(880),
-            "rootblock sits at the midpoint"
-        );
+        assert_eq!(g.root_block(), BlockIndex(880));
     }
 
     #[test]
     fn hd_floppy_is_1760k() {
-        assert_eq!(Geometry::HD_FLOPPY.total_bytes(), 1_802_240);
+        let g = Geometry::HD_FLOPPY;
+        assert_eq!(g.total_bytes(), 1_802_240);
+        // The bootblock claims 880 here; the real rootblock is at 1760 (C-007).
+        assert_eq!(g.root_block(), BlockIndex(1760));
+    }
+
+    #[test]
+    fn root_block_follows_the_documented_formula_not_the_midpoint() {
+        // BUG-002. (reserved + total - 1) / 2 diverges from total / 2 as soon
+        // as `reserved` rises above two — the case RDB partitions will hit.
+        let g = Geometry::new(25, 1, 40, 512, 4).unwrap();
+        assert_eq!(g.total_blocks(), 1000);
+        assert_eq!(g.root_block(), BlockIndex(501), "not 500");
+
+        // ...while staying correct for the floppy geometries, where the two
+        // formulas happen to coincide.
+        for g in [Geometry::DD_FLOPPY, Geometry::HD_FLOPPY] {
+            assert_eq!(g.root_block().0, g.total_blocks() / 2);
+        }
     }
 
     #[test]
     fn rejects_degenerate_geometry() {
         assert_eq!(
-            Geometry::new(0, 2, 11, 512),
+            Geometry::new(0, 2, 11, 512, 2),
             Err(GeometryError::ZeroDimension)
         );
         assert_eq!(
-            Geometry::new(80, 2, 11, 0),
+            Geometry::new(80, 2, 11, 0, 2),
             Err(GeometryError::ZeroDimension)
         );
         assert_eq!(
-            Geometry::new(u32::MAX, u32::MAX, u32::MAX, 512),
+            Geometry::new(u32::MAX, u32::MAX, u32::MAX, 512, 2),
             Err(GeometryError::Overflow)
+        );
+        assert_eq!(
+            Geometry::new(1, 1, 4, 512, 4),
+            Err(GeometryError::ReservedExceedsVolume),
+            "reserving the whole volume leaves nothing to address"
         );
     }
 

@@ -7,6 +7,20 @@
 # Cargo.lock IS committed: ADE ships binaries (CLI, bridge), so reproducible
 # builds matter more than downstream version flexibility.
 
+# --- disk images: never committed (D-010) ---
+# TOSEC Amiga images are copyrighted commercial software and this is a public
+# repository. Ignored by extension everywhere, not by location, so a stray copy
+# outside disks/ is caught too. When D-010 permits specific fixtures, negate
+# them explicitly — committing a disk image should be a deliberate act.
+*.adf
+*.adz
+*.hdf
+*.hdz
+*.dms
+*.scp
+*.ipf
+/disks/
+
 # --- Qt6 / CMake GUI (Phase 5) ---
 /build/
 gui/build/

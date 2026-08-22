@@ -11,9 +11,11 @@ Severity: Critical (must hold) | Major (regression on release blocks) | Minor (t
 ### AV-001 Directory hash-chain loops
 **Severity:** Critical
 **Description.** A corrupt or malicious directory hash chain that points back into itself causes unbounded traversal → hang or OOM. This is the exact class of bug ADFlib had to add loop detection for.
-**Detection.** Not implemented (would require a cycle-detecting traversal with a visited-set bound, plus a malformed-chain fixture in the fuzz corpus).
-**Related decisions.** D-006. **Related features.** F-001.
-**History.** Identified 2026-08-21 during initial scaffolding, from the ADFlib precedent.
+
+**Wider than first recorded.** The 2026-08-22 SPEC research found that cycles are reachable on **structurally valid, non-corrupt disks**: AmigaDOS permits hard links to directories, "which opens the way to endless recursion" (Clévy, ADF FAQ §4.6). Cycle detection is therefore a correctness requirement for ordinary images, not only a defence against hostile input — and it must be a visited-set over block numbers rather than a depth limit, since a legitimate deep tree and a two-block cycle are indistinguishable by depth alone.
+**Detection.** Not implemented (would require a cycle-detecting traversal carrying a visited-set of block numbers, exercised by both a malformed-chain fuzz fixture *and* a legitimate directory-hardlink fixture).
+**Related decisions.** D-006. **Related features.** F-001, F-012. **Related constraints.** SPEC §Links.
+**History.** Identified 2026-08-21 during initial scaffolding, from the ADFlib precedent. Scope widened 2026-08-22 to include legitimate directory hard links.
 
 ### AV-004 Out-of-range block pointers
 **Severity:** Critical
@@ -37,8 +39,10 @@ Severity: Critical (must hold) | Major (regression on release blocks) | Minor (t
 **Severity:** Major
 **Description.** A cleared or corrupt bitmap-valid flag, trusted blindly, leads to mis-allocation on any write path.
 **Detection.** Not implemented (would require treating the flag as advisory and offering a defensive bitmap rebuild, verified against a tampered-bitmap fixture).
-**Related decisions.** D-004, D-006. **Related features.** F-010.
-**History.** Identified 2026-08-21 during initial scaffolding.
+**Related decisions.** D-004, D-006. **Related features.** F-010. **Related constraints.** SPEC §Bitmap.
+**History.** Identified 2026-08-21 during initial scaffolding. Corroborated 2026-08-22 by the Linux AFFS driver documentation, which warns the flag "may not be accurate when the system crashes while an affs partition is mounted" — so this is a routine real-world condition, not only an attack.
+
+> **Note on polarity.** A **set** bitmap bit means the block is **free**; cleared means allocated (ADF FAQ §4.3). This is the opposite of the usual convention and an easy inversion to make, which would mis-report every block on every disk. Worth a dedicated test.
 
 ## Guest content
 

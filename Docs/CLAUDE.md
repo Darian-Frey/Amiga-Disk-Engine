@@ -28,7 +28,9 @@ Do not violate without a DECISIONS entry:
 - Every image is untrusted; no parse path may crash/hang/allocate unboundedly (D-006).
 - Internal model can hold a raw MFM track from day one (D-005).
 - Read paths ship before their write counterparts (D-004).
-- Format dispatch by content sniffing, not extension (F-003).
+- Format dispatch by content sniffing, not extension (F-003) — and it is a cascade, not a magic lookup, because plain ADF has no magic (SPEC §The sniffing problem).
+- International hashing applies when the INTL **or** the dircache bit is set, and always for `DOS\6`/`DOS\7` (C-006). Use `Dostype::mode()`; do not test flag bits directly. `DOS\6`/`DOS\7` are dostypes, not bit patterns — they took the combinations the classic encoding left spare (BUG-001, fixed).
+- Directory traversal carries a visited-set: hard links to directories make cycles legal, not merely hostile (AV-001).
 - No FFI dependency on ADFlib in any shipping path; it is a test oracle only, and its GPL source is not read (D-002).
 
 ## Build & test

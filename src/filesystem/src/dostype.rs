@@ -1,19 +1,36 @@
 //! Dostype — the four-byte filesystem magic in the bootblock.
 //!
-//! The identifier is `D`, `O`, `S` followed by a flags byte. ADE models the
-//! flags byte by its documented bit meanings rather than by enumerating eight
-//! named constants, because the bits are what the on-disk format actually
-//! encodes and they compose independently.
+//! The identifier is `D`, `O`, `S` followed by a flags byte.
 //!
-//! # A deliberate gap
+//! # The flags byte is not purely a bitfield
 //!
-//! [SPEC.md](../../../Docs/SPEC.md) defers the authoritative dostype table to
-//! Phase 1/2, to be tabulated against the AFFS driver documentation. In
-//! particular the long-filename (LNFS) variants and the exact naming of
-//! `DOS\6`/`DOS\7` are **not** settled here, and this module does not pretend
-//! otherwise: it decodes the three bits it can justify and preserves the raw
-//! value for everything else. Guessing the table now would put an unverified
-//! claim somewhere it would later be trusted.
+//! Bits 0..2 mean FFS, international, and dircache — but two rules break naive
+//! bit decoding, and both fail *silently* if missed (see C-006):
+//!
+//! 1. **Dircache implies international.** `DOS\4` and `DOS\5` set the dircache
+//!    bit and leave the international bit *clear*, yet international hashing
+//!    applies. Reading bit 1 alone makes directory lookup miss on those disks,
+//!    reporting "not found" rather than erroring.
+//! 2. **`DOS\6` and `DOS\7` are dostypes, not bit patterns.** Because dircache
+//!    already implies international, the combinations `0b110` and `0b111` were
+//!    never used by the classic filesystems — which is exactly why LNFS (long
+//!    filenames, from the AmigaOS 4-era FFS rewrite) claimed them. Decoding
+//!    them as "international + dircache" is wrong: they are always
+//!    international and never dircache.
+//!
+//! Use [`Dostype::mode`], [`Dostype::is_international`] and
+//! [`Dostype::has_dircache`] rather than testing bits directly.
+//!
+//! Sources: Clévy's ADF FAQ §4.1, the AmigaOS wiki on DCFS/LNFS structures, and
+//! the Linux AFFS driver documentation (which supports `DOS\0`..`DOS\5` only).
+//! Tabulated in [SPEC.md](../../../Docs/SPEC.md).
+//!
+//! # What is still unverified
+//!
+//! The LNFS *block layout* — the 112-byte name-and-comment array and the
+//! separate comment block — is summary-level only and needs a field-level pass
+//! before Phase 2 implements it. Only the dostype identification above is
+//! settled.
 
 use ade_endian::{OutOfBounds, u32_at};
 
@@ -35,6 +52,22 @@ pub const FLAG_FFS: u8 = 0b001;
 pub const FLAG_INTL: u8 = 0b010;
 /// Bit 2: directory cache blocks are present.
 pub const FLAG_DIRCACHE: u8 = 0b100;
+
+/// The naming and caching scheme a volume uses.
+///
+/// Resolved from the whole flags byte rather than from individual bits,
+/// because `DOS\6`/`DOS\7` are distinct dostypes rather than bit combinations.
+/// See the module documentation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Mode {
+    /// 30-character names, no directory cache. `DOS\0`..`DOS\3`.
+    Classic,
+    /// Directory cache blocks present. `DOS\4`, `DOS\5`. Always international.
+    DirCache,
+    /// Long filenames (LNFS). `DOS\6`, `DOS\7`. Always international, never
+    /// dircache. A later extension; the Linux AFFS driver does not support it.
+    LongNames,
+}
 
 /// Which of the two filesystems a volume uses.
 ///
@@ -140,16 +173,48 @@ impl Dostype {
         }
     }
 
+    /// The naming and caching scheme.
+    ///
+    /// `DOS\6` and `DOS\7` are matched on the whole byte, not on their low
+    /// bits: they are documented dostypes rather than flag combinations, so a
+    /// byte that merely happens to end in `110` is treated as classic with
+    /// unrecognised bits instead of being mistaken for LNFS.
+    #[must_use]
+    pub const fn mode(self) -> Mode {
+        match self.flags {
+            6 | 7 => Mode::LongNames,
+            f if f & FLAG_DIRCACHE != 0 => Mode::DirCache,
+            _ => Mode::Classic,
+        }
+    }
+
     /// Whether international case-folding applies to directory hashing.
+    ///
+    /// True when the international bit is set, **and also** whenever dircache
+    /// or LNFS is in use — those imply international hashing while leaving the
+    /// international bit clear (C-006).
     #[must_use]
     pub const fn is_international(self) -> bool {
-        self.flags & FLAG_INTL != 0
+        match self.mode() {
+            Mode::DirCache | Mode::LongNames => true,
+            Mode::Classic => self.flags & FLAG_INTL != 0,
+        }
     }
 
     /// Whether directory cache blocks are present.
     #[must_use]
     pub const fn has_dircache(self) -> bool {
-        self.flags & FLAG_DIRCACHE != 0
+        matches!(self.mode(), Mode::DirCache)
+    }
+
+    /// The raw international bit, as stored on disk.
+    ///
+    /// Distinct from [`Self::is_international`]: on a dircache or LNFS volume
+    /// this is `false` while international hashing still applies. Exposed so a
+    /// health report can state what the disk *says* beside what it *means*.
+    #[must_use]
+    pub const fn intl_flag_set(self) -> bool {
+        self.flags & FLAG_INTL != 0
     }
 
     /// Flag bits ADE does not yet interpret.
@@ -158,7 +223,11 @@ impl Dostype {
     /// bits — surfaced rather than ignored, per D-006.
     #[must_use]
     pub const fn unrecognised_flags(self) -> u8 {
-        self.flags & !(FLAG_FFS | FLAG_INTL | FLAG_DIRCACHE)
+        match self.mode() {
+            // LNFS uses the whole low three bits; none of them is spare.
+            Mode::LongNames => self.flags & !0x07,
+            Mode::Classic | Mode::DirCache => self.flags & !(FLAG_FFS | FLAG_INTL | FLAG_DIRCACHE),
+        }
     }
 }
 
@@ -172,8 +241,13 @@ impl core::fmt::Display for Dostype {
         if self.is_international() {
             f.write_str(", INTL")?;
         }
-        if self.has_dircache() {
-            f.write_str(", dircache")?;
+        match self.mode() {
+            Mode::DirCache => f.write_str(", dircache")?,
+            Mode::LongNames => f.write_str(", long names")?,
+            Mode::Classic => {}
+        }
+        if self.unrecognised_flags() != 0 {
+            write!(f, ", unknown bits {:#04x}", self.unrecognised_flags())?;
         }
         f.write_str(")")
     }
@@ -188,15 +262,56 @@ mod tests {
         Dostype::parse(&[b'D', b'O', b'S', flags], 0).unwrap()
     }
 
+    /// The full table, as tabulated in SPEC.md from the ADF FAQ, the AmigaOS
+    /// wiki and the Linux AFFS docs. Columns: flags, filesystem, international,
+    /// dircache, mode.
+    const TABLE: &[(u8, FileSystem, bool, bool, Mode)] = &[
+        (0, FileSystem::Ofs, false, false, Mode::Classic),
+        (1, FileSystem::Ffs, false, false, Mode::Classic),
+        (2, FileSystem::Ofs, true, false, Mode::Classic),
+        (3, FileSystem::Ffs, true, false, Mode::Classic),
+        // DIRC implies INTL even though the INTL bit stays clear — BUG-001.
+        (4, FileSystem::Ofs, true, true, Mode::DirCache),
+        (5, FileSystem::Ffs, true, true, Mode::DirCache),
+        // LNFS: always international, never dircache, despite bits 1 and 2.
+        (6, FileSystem::Ofs, true, false, Mode::LongNames),
+        (7, FileSystem::Ffs, true, false, Mode::LongNames),
+    ];
+
     #[test]
-    fn decodes_the_documented_bits() {
-        assert_eq!(dostype(0).filesystem(), FileSystem::Ofs);
-        assert_eq!(dostype(1).filesystem(), FileSystem::Ffs);
-        assert!(!dostype(1).is_international());
-        assert!(dostype(2).is_international());
-        assert!(dostype(4).has_dircache());
-        assert!(dostype(5).has_dircache());
-        assert_eq!(dostype(5).filesystem(), FileSystem::Ffs);
+    fn matches_the_full_dostype_table() {
+        for &(flags, fs, intl, dirc, mode) in TABLE {
+            let d = dostype(flags);
+            assert_eq!(d.filesystem(), fs, "DOS\\{flags} filesystem");
+            assert_eq!(d.is_international(), intl, "DOS\\{flags} international");
+            assert_eq!(d.has_dircache(), dirc, "DOS\\{flags} dircache");
+            assert_eq!(d.mode(), mode, "DOS\\{flags} mode");
+            assert_eq!(d.unrecognised_flags(), 0, "DOS\\{flags} has no spare bits");
+        }
+    }
+
+    #[test]
+    fn dircache_is_international_with_the_intl_bit_clear() {
+        // BUG-001, the regression that matters: `toupper` is the only
+        // difference between the two hash functions, so getting this wrong
+        // makes directory lookup miss rather than error.
+        for flags in [4u8, 5] {
+            let d = dostype(flags);
+            assert!(d.is_international(), "DOS\\{flags} hashes as international");
+            assert!(!d.intl_flag_set(), "...while the stored INTL bit is clear");
+        }
+    }
+
+    #[test]
+    fn lnfs_is_not_decoded_as_intl_plus_dircache() {
+        // 0b110 and 0b111 were free precisely because DIRC implies INTL, so
+        // LNFS took them. Bit-decoding them would report dircache wrongly.
+        for flags in [6u8, 7] {
+            let d = dostype(flags);
+            assert_eq!(d.mode(), Mode::LongNames);
+            assert!(!d.has_dircache(), "DOS\\{flags} has no directory cache");
+            assert!(d.is_international());
+        }
     }
 
     #[test]
@@ -216,6 +331,20 @@ mod tests {
     fn surfaces_bits_it_cannot_explain() {
         assert_eq!(dostype(0b0000_0111).unrecognised_flags(), 0);
         assert_eq!(dostype(0b0010_0000).unrecognised_flags(), 0b0010_0000);
+        // 0x32 occurs three times in a 4288-image TOSEC survey. Decode what we
+        // can (bit 1 set → international) and surface the rest.
+        let odd = dostype(0x32);
+        assert_eq!(odd.mode(), Mode::Classic);
+        assert!(odd.is_international());
+        assert_eq!(odd.unrecognised_flags(), 0x30);
+    }
+
+    #[test]
+    fn a_high_bit_does_not_turn_a_byte_into_lnfs() {
+        // 0b0001_0110 ends in 110 but is not DOS\6.
+        let d = dostype(0b0001_0110);
+        assert_eq!(d.mode(), Mode::DirCache, "bit 2 is set, so dircache");
+        assert_eq!(d.unrecognised_flags(), 0b0001_0000);
     }
 
     #[test]
@@ -234,6 +363,11 @@ mod tests {
     fn displays_readably() {
         assert_eq!(dostype(0).to_string(), "DOS\\0 (OFS)");
         assert_eq!(dostype(3).to_string(), "DOS\\3 (FFS, INTL)");
-        assert_eq!(dostype(5).to_string(), "DOS\\5 (FFS, dircache)");
+        assert_eq!(dostype(5).to_string(), "DOS\\5 (FFS, INTL, dircache)");
+        assert_eq!(dostype(7).to_string(), "DOS\\7 (FFS, INTL, long names)");
+        assert_eq!(
+            dostype(0x32).to_string(),
+            "DOS\\50 (OFS, INTL, unknown bits 0x30)"
+        );
     }
 }
