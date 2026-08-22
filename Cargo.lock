@@ -21,6 +21,7 @@ name = "ade-cli"
 version = "0.0.0"
 dependencies = [
  "ade-core",
+ "ade-fixtures",
 ]
 
 [[package]]
@@ -40,6 +41,7 @@ dependencies = [
  "ade-container",
  "ade-endian",
  "ade-filesystem",
+ "ade-fixtures",
  "ade-flux",
  "ade-object",
  "ade-track",

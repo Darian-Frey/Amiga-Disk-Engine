@@ -16,6 +16,8 @@
 //! field is private to this crate. An implementor of [`BlockSource`] cannot be
 //! handed an unchecked index, and a caller cannot manufacture one.
 
+pub mod checksum;
+
 use core::fmt;
 
 /// A logical block address, numbered from zero. Not yet known to be in range.

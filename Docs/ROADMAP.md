@@ -24,14 +24,20 @@ Background context (why ADE exists, the documentation landscape survey, and the 
 
 ## Phase 1 — Read-only ADF core (happy path)
 **Goal:** Parse and extract from plain 880 KB DD ADF images, defensively, through the chosen stack.
-**Status:** Not started
+**Status:** In progress — first vertical slice landed 2026-08-22
 **Features delivered:** F-001, F-002 (initial), F-003 (ADF/ADZ), F-010 (initial), F-015 (initial)
 **Deliverables:**
-- [ ] Bootblock parse + checksum; RDB detection ([SPEC.md](SPEC.md) §Bootblock, §RDB).
+- [x] **`ade info <image>`** — the first vertical slice, cutting container → block → endian → filesystem so every seam is exercised before integration rather than after. Reports container kind with its evidence, bootblock, and volume as independent facts (C-008), with stable exit codes (F-015).
+- [x] Bootblock parse + checksum; both checksum algorithms in `ade-block::checksum` as separately named functions. RDB *detection* (parsing is Phase 2).
 - [ ] Mount OFS and FFS volumes: rootblock, bitmap, hash-table directory traversal, file header → extension → data blocks, extraction.
-- [ ] Single byte-order module (C-001); bounds-checked block access; directory-loop detection from the outset (AV-001, AV-004).
+- [x] Single byte-order module (C-001); bounds-checked block access via `ValidBlock` (AV-004).
+- [x] Content sniffing as an evidence cascade, not a magic lookup (F-003, C-008): verified against 4288 real images, correctly classifying 4270 canonical ADFs, 11 extended-ADFs, 5 extra-cylinder images and 2 size anomalies.
+- [ ] Directory-loop detection (AV-001) — needed once traversal lands.
+- [ ] Mount and traverse: rootblock hash table, directory blocks, file header → extension → data blocks, extraction.
 - [ ] Spike validated against three fixtures: one OFS DD, one FFS DD, one multi-partition HDF.
 **Acceptance:** Round-trip-read extraction matches a reference tool on the clean fixtures; the fuzz corpus runs with zero crashes (F-001).
+
+*Progress 2026-08-22:* `ade info` runs over all 4288 corpus images with **zero crashes, hangs or unhandled errors** — 2608 clean, 626 with faults, 1054 with no AmigaDOS volume. That is not yet the F-001 bar, which requires a fuzz corpus rather than well-formed real images, but it is the first evidence the defensive stance holds on real input.
 
 ## Phase 2 — Filesystem breadth
 **Goal:** Cover the full non-flux filesystem surface, including hard-disk images, plus forensic recovery.

@@ -17,5 +17,8 @@ ade-filesystem = { workspace = true }
 ade-flux = { workspace = true }
 ade-object = { workspace = true }
 ade-track = { workspace = true }
+[dev-dependencies]
+ade-fixtures = { workspace = true }
+
 [lints]
 workspace = true

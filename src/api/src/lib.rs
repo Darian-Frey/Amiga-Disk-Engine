@@ -4,8 +4,10 @@
 //! crate wires the layers together and presents one surface. It is the only
 //! crate that depends on every layer, and the only place cross-layer
 //! coordination is permitted (D-003).
-//!
-//! Barely implemented: the layers it will wire are still stubs.
+
+pub mod inspect;
+
+pub use inspect::{Inspection, InspectionError, VolumeInfo, inspect_bytes, inspect_path};
 
 /// The layer crates, re-exported so that front-ends depend on this crate alone.
 pub mod layers {

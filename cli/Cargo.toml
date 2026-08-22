@@ -10,6 +10,9 @@ description = "ADE: command-line front-end"
 
 [dependencies]
 ade-core = { workspace = true }
+[dev-dependencies]
+ade-fixtures = { workspace = true }
+
 [lints]
 workspace = true
 

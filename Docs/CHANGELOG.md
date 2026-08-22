@@ -41,6 +41,14 @@ Format follows [Keep a Changelog](https://keepachangelog.com). Reference F-, D-,
 - **`ade-fixtures --bin manifest`** — emits `sha256 size name` rows for a corpus directory, with a dependency-free SHA-256 verified against `sha256sum`.
 - **`tests/fixtures/README.md`** — states the no-images policy, how to build fixtures, and that CI never exercises a real disk.
 
+- **`ade info <image>`** — the first working command, and the first vertical slice through the pipeline. Reports the container kind *with the evidence behind it*, the bootblock, and the volume as three independent facts (C-008), then lists faults.
+- **`ade-block::checksum`** — both algorithms as separately named functions (`normal`, `boot`) rather than one with a flag, because confusing them is a silent-corruption bug.
+- **`ade-container`** — `RawImage` (an in-memory `BlockSource`) and `sniff`, an evidence cascade rather than a magic lookup. Handles the fact that plain ADF has no signature, that 81–83-cylinder images exist, and that a `DOS` prefix is neither necessary nor sufficient.
+- **`ade-filesystem`** — `bootblock` and `rootblock` read-only inspection, plus `datestamp` decoding with a dependency-free civil-date conversion. Out-of-range datestamps are reported, never normalised: folding 90 minutes into an hour would destroy the evidence.
+- **`ade-core::inspect`** — wires the layers; the single seam the CLI consumes.
+- **CLI exit codes** (F-015): 0 clean, 1 faults, 2 usage, 3 unreadable, **4 no AmigaDOS volume**. 4 is separate deliberately — 1054 of 4288 real images have no rootblock where one should be, and reporting those as "clean" would mislead while calling them faulty would be wrong.
+- Verified against the full corpus: 4288 images, **zero crashes**, container detection matching the independent census exactly. Findings included 248 stale bitmap-valid flags (AV-003 in the wild), 3 rootblock checksum failures and 3 dostypes carrying undocumented bits — each matching the earlier Python analysis.
+
 ### Changed
 - **SPEC §Corpus observations** — new section recording a survey of 4288 TOSEC Amiga ADF images, explicitly labelled measurement rather than specification. Magic distribution, the 300 non-`DOS` images across 144 distinct bootloaders, bootblock-checksum and rootblock validity rates, and the non-canonical size distribution.
 - **SPEC §Extended-ADF** — the `UAE-1ADF` layout, derived from eleven corpus images and verified arithmetically (`12 + tracks × 12 + Σ space` equals file size for all eleven). Track type 0 is standard sector data and 1 is raw MFM; `length` is in **bits**, `space` in bytes. Mixed types within one image are the copy-protection signature.

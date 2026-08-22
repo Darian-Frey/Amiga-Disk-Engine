@@ -19,8 +19,9 @@ Amiga Disk Engine (ADE) — a forensic-grade, cross-platform toolkit for reading
 
 Phase 0 is complete (2026-08-22). Phase 1 is unblocked and nothing is waiting on a decision.
 
-1. First slice: **`ade info <image>`** — geometry, dostype, bootblock checksum. Chosen as a vertical cut through container → block → endian → filesystem so every seam is exercised now rather than at integration time.
-2. Then Phase 1 proper (F-001, F-002, F-003-ADF, F-010): read-only ADF parse, extraction, health report.
+1. ~~First slice `ade info`~~ — **done 2026-08-22**. Runs over all 4288 corpus images with zero crashes.
+2. Next: mount and traverse. Rootblock hash table → directory blocks → file header → extension → data blocks → extraction. **Directory traversal carries a visited-set from the first commit** (AV-001): hard links to directories make cycles legal, not merely hostile.
+3. Then the fuzz harness (F-001) — the acceptance bar is a fuzz corpus, not well-formed real images.
 3. Fuzz at the **block** level, not whole images — a rootblock parser takes 512 bytes, so seeding with 880 KB images wastes the budget on bytes nothing reads.
 4. Report bootblock and filesystem as **two independent facts** (C-008). A `DOS` prefix does not imply a mountable volume — 19% of real ones are not — and its absence does not imply an unmountable one.
 
