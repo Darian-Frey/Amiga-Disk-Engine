@@ -25,6 +25,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com). Reference F-, D-,
 - GitHub Actions CI: fmt, clippy, tests, docs-without-warnings, and the layering check.
 
 ### Changed
+- Copyright holder in `LICENSE`, `NOTICE`, and workspace `authors` corrected from the bare handle to `Shane Hartley (Darian-Frey)`, so the notice names a legal person. Done before any external contribution, while it is still a one-party change. Recorded under D-011.
 - **D-001 → Accepted** (Option A): Rust core exposing a C-ABI bridge, Qt6 GUI over it from Phase 5. The flux/IPF-binding half of the original reversal condition was withdrawn as unfounded.
 - **D-002 → Accepted**, scope narrowed to ADFlib alone, decided as a new Option D: reimplement OFS/FFS/RDB in Rust with ADFlib as a **black-box differential-test oracle** — never linked, source never read. Rejects the previously-leaned hybrid, whose safety gap would have made F-001 unclaimable.
 - **D-008** — deferral **discharged** and closed out: D-002 inherited no GPL obligation, and the resulting free choice was made the same day (see D-011). The entry stays in the register as the audit trail for the period without a licence.

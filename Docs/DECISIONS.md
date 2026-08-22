@@ -274,6 +274,8 @@ D-002 raised the stakes. With ADFlib reduced to a black-box oracle, differential
 
 A `NOTICE` file accompanies the licence. It currently records that ADE contains **no** third-party code, and states explicitly that ADFlib is a black-box test oracle rather than a dependency, so the provenance discipline of D-002 is legible from the distribution itself and not only from this register.
 
+**Copyright holder.** `Copyright 2026 Shane Hartley (Darian-Frey)` in `LICENSE`, `NOTICE`, and the workspace `authors` metadata — legal name with the handle the project is published under, so the notice identifies a legal person while still matching the identity contributors will encounter. Corrected on 2026-08-22 from the handle alone, before any external contribution.
+
 **Consequences.** Discharges D-008. Source files carry the standard Apache header once code exists. Third-party attribution goes in `NOTICE`. Note two licence surfaces that remain outside this decision: the optional CAPS library for IPF-read stays restrictively licensed and compile-time-gated (C-003), and D-009 could reintroduce a licence question at Phase 3 if it lands on wrapping rather than porting.
 
 **Reversal conditions.** Relicensing after public release requires the consent of all contributors, so this is effectively one-way once external contributions land. Before that point, revisit only if D-009 forces a GPL dependency that cannot be avoided — which would be a reason to reopen D-009, not to relicense ADE.
