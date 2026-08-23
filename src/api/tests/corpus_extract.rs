@@ -62,7 +62,7 @@ fn extracts_every_file_from_a_corpus_sample() {
         let Ok(walked) = volume.walk(volume.root()) else {
             continue;
         };
-        for (name, entry) in walked {
+        for (name, entry) in walked.entries {
             if !entry.kind.is_file() {
                 continue;
             }

@@ -422,13 +422,19 @@ fn extract(path: &Path, inner: &str, dest: Option<PathBuf>) -> ExitCode {
             return ExitCode::from(EXIT_FAULTS);
         }
     };
-    if !data.is_complete() {
+    if !data.is_full_length() {
         eprintln!(
             "ade: {inner}: recovered {} of {} declared bytes — {} short",
             data.bytes.len(),
             data.declared_size,
             data.short_by
         );
+    }
+    // Structural faults are reported even when the byte count came out right:
+    // a file can be exactly its declared length and still have stopped being a
+    // file part-way through (IMP-002).
+    for fault in &data.faults {
+        eprintln!("ade: {inner}: {fault}");
     }
     let incomplete = !data.is_complete();
     let data = data.into_bytes();

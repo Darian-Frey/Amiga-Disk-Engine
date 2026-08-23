@@ -13,6 +13,28 @@ _None._
 
 ## Fixed
 
+### BUG-003 `read_file` allocated an attacker-controlled amount before reading anything
+**Severity:** high
+**Status:** fixed
+**Found:** 2026-08-24, while applying IMP-003 — by mutation-testing `walk` and finding the 4 GB allocation was not in `walk` at all.
+**Where:** [src/filesystem/src/volume.rs](../src/filesystem/src/volume.rs), `Volume::read_file`.
+
+**What was wrong.** `Vec::with_capacity(entry.byte_size as usize)`. `byte_size` is a `u32` read straight off the disk, so a crafted or corrupt file header could claim up to 4,294,967,295 bytes on an 880 KB floppy — and ADE would try to allocate exactly that, before reading a single data block.
+
+```
+memory allocation of 4294967295 bytes failed
+```
+
+**Why it matters.** This is AV-005 — resource exhaustion from untrusted input — in one line, on the *plain ADF* path rather than in decompression where the vector was originally expected. It is the same failure class as the reference implementation's 29 GB blow-up that SPEC §Corpus observations holds up as the bar ADE clears, which ADE did not in fact clear.
+
+It also passed 900,000 fuzz cases unnoticed. The harness asserts on *output* size, and a `with_capacity` that merely succeeds produces no output and no failure — so a several-hundred-megabyte allocation looked exactly like a clean run. Reserving is invisible to an output-bounds check.
+
+**Fixed 2026-08-24.** The reservation is clamped to the volume's own size: `byte_size` is a hint, and the volume is the bound. A file cannot exceed the medium holding it.
+
+Test `a_file_header_claiming_four_gigabytes_must_not_allocate_it` pins it, and runs under the ordinary suite.
+
+**Follow-up worth noting.** The fuzz harness cannot see allocation that is never used. Catching this class properly needs either an allocator hook — which requires the `unsafe` the workspace forbids (D-001) — or explicit assertions at each point where a length from disk sizes an allocation. The second is tractable and there are few such points; it is not yet done.
+
 ### BUG-001 `Dostype::is_international()` is wrong for `DOS\4` and `DOS\5`
 **Severity:** high
 **Status:** fixed

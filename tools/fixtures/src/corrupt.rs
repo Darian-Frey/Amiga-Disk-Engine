@@ -113,6 +113,42 @@ pub fn directory_cycle(img: &mut [u8], dir: u32, target: u32) {
     rechecksum(img, dir);
 }
 
+/// Overwrite an OFS data block's primary type, so it stops identifying as one.
+///
+/// The shape found on `A500+A2000 Systest v9.1`, where a file's table points at
+/// blocks holding raw audio: the header fields read as sample data (IMP-002).
+pub fn data_block_type(img: &mut [u8], block: u32, block_type: u32) {
+    put_u32(img, block as usize * BSIZE, block_type);
+}
+
+/// Make an OFS data block claim it belongs to a different file.
+///
+/// Cross-linked files are a classic filesystem corruption: two headers whose
+/// tables name the same block.
+pub fn data_block_owner(img: &mut [u8], block: u32, owner: u32) {
+    put_u32(img, block as usize * BSIZE + 4, owner);
+}
+
+/// Give an OFS data block the wrong sequence number.
+pub fn data_block_seq(img: &mut [u8], block: u32, seq: u32) {
+    put_u32(img, block as usize * BSIZE + 8, seq);
+}
+
+/// Declare a payload longer than a block can hold.
+pub fn data_block_oversized(img: &mut [u8], block: u32, declared: u32) {
+    put_u32(img, block as usize * BSIZE + 12, declared);
+}
+
+/// Zero a block entirely.
+///
+/// 18 of one real file's 79 data-block pointers address blocks like this.
+pub fn zero_block(img: &mut [u8], block: u32) {
+    let o = block as usize * BSIZE;
+    if let Some(slice) = img.get_mut(o..o + BSIZE) {
+        slice.fill(0);
+    }
+}
+
 /// Truncate the image to `blocks` blocks.
 ///
 /// One survey image is 90,112 bytes — eight cylinders of what should be eighty.

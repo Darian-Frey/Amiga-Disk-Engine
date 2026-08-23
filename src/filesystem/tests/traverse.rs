@@ -16,7 +16,7 @@
 use ade_block::{BlockError, BlockSource, Geometry, ValidBlock};
 use ade_filesystem::{
     entry::EntryKind,
-    volume::{FsError, Volume},
+    volume::{DataFaultKind, FsError, Volume},
 };
 use ade_fixtures::{Volume as Fixture, corrupt};
 
@@ -210,11 +210,18 @@ fn a_directory_cycle_terminates_a_tree_walk() {
     let mem = Mem::dd(img);
     let v = Volume::mount(&mem).unwrap();
     let walked = v.walk(v.root()).expect("walk must terminate");
-    assert!(!walked.is_empty());
+    assert!(!walked.entries.is_empty());
     assert!(
-        walked.len() < 100,
+        walked.entries.len() < 100,
         "a visited set must stop the walk, not a depth limit: got {} entries",
-        walked.len()
+        walked.entries.len()
+    );
+    // The structural cap is the backstop, not the mechanism. If it fired, the
+    // visited set failed and this test would be passing for the wrong reason
+    // (IMP-003).
+    assert!(
+        !walked.hit_limit,
+        "the cycle was stopped by the cap, not by the visited set"
     );
 }
 
@@ -271,4 +278,175 @@ fn mounting_a_volume_without_a_rootblock_fails_cleanly() {
 fn a_zeroed_volume_does_not_panic() {
     let mem = Mem::dd(corrupt::zeroed_volume());
     assert!(Volume::mount(&mem).is_err());
+}
+
+// --- IMP-002: OFS data-block validation -------------------------------------
+
+/// Build a one-file OFS volume and return (image, file header block, first
+/// data block).
+fn ofs_with_file(payload: &[u8]) -> (Vec<u8>, u32, u32) {
+    let mut f = Fixture::dd(0);
+    let hdr = f.add_file("victim", payload);
+    let img = f.build();
+    // The first data block pointer lives at BSIZE-204 in the header.
+    let o = hdr as usize * 512 + 512 - 204;
+    // Through ade-endian, not `to_be_bytes`: C-001 has no exemptions, in test
+    // code either.
+    let first = ade_endian::u32_at(&img, o).expect("first data pointer");
+    (img, hdr, first)
+}
+
+fn read_faults(img: Vec<u8>) -> Vec<ade_filesystem::volume::DataFault> {
+    let mem = Mem::dd(img);
+    let v = Volume::mount(&mem).expect("mount");
+    let e = v.lookup("victim").expect("lookup");
+    v.read_file(&e).expect("read").faults
+}
+
+#[test]
+fn a_clean_ofs_file_reports_no_faults() {
+    let (img, _, _) = ofs_with_file(&vec![0x5A; 3000]);
+    let contents = {
+        let mem = Mem::dd(img);
+        let v = Volume::mount(&mem).unwrap();
+        let e = v.lookup("victim").unwrap();
+        v.read_file(&e).unwrap()
+    };
+    assert!(contents.faults.is_empty(), "{:?}", contents.faults);
+    assert!(contents.is_complete());
+}
+
+#[test]
+fn a_zeroed_data_block_is_reported_as_zeroed() {
+    let (mut img, _, first) = ofs_with_file(&vec![1u8; 3000]);
+    corrupt::zero_block(&mut img, first);
+    let faults = read_faults(img);
+    assert_eq!(faults.len(), 1, "{faults:?}");
+    assert_eq!(faults[0].kind, DataFaultKind::Zeroed);
+    assert_eq!(faults[0].first_block, first);
+}
+
+#[test]
+fn a_non_data_block_is_reported_with_the_type_it_claims() {
+    let (mut img, _, first) = ofs_with_file(&vec![2u8; 3000]);
+    corrupt::data_block_type(&mut img, first, 0x6db6_6db6);
+    let faults = read_faults(img);
+    assert_eq!(
+        faults[0].kind,
+        DataFaultKind::NotADataBlock { found: 0x6db6_6db6 },
+        "the real disk carried exactly this value"
+    );
+}
+
+#[test]
+fn a_cross_linked_block_is_reported() {
+    let (mut img, hdr, first) = ofs_with_file(&vec![3u8; 3000]);
+    corrupt::data_block_owner(&mut img, first, 999);
+    let faults = read_faults(img);
+    assert_eq!(
+        faults[0].kind,
+        DataFaultKind::WrongOwner {
+            expected: hdr,
+            found: 999
+        }
+    );
+}
+
+#[test]
+fn an_out_of_sequence_block_is_reported() {
+    let (mut img, _, first) = ofs_with_file(&vec![4u8; 3000]);
+    corrupt::data_block_seq(&mut img, first, 42);
+    let faults = read_faults(img);
+    assert_eq!(
+        faults[0].kind,
+        DataFaultKind::OutOfSequence {
+            expected: 1,
+            found: 42
+        }
+    );
+}
+
+#[test]
+fn an_oversized_length_is_reported_and_clamped() {
+    let (mut img, _, first) = ofs_with_file(&vec![5u8; 3000]);
+    corrupt::data_block_oversized(&mut img, first, 0xFFFF_FFFF);
+    let mem = Mem::dd(img);
+    let v = Volume::mount(&mem).unwrap();
+    let e = v.lookup("victim").unwrap();
+    let c = v.read_file(&e).unwrap();
+    assert_eq!(
+        c.faults[0].kind,
+        DataFaultKind::OversizedLength {
+            declared: 0xFFFF_FFFF,
+            capacity: 488
+        }
+    );
+    // Clamped, not trusted: the read must not run past the volume.
+    assert!(c.bytes.len() <= 3000, "got {} bytes", c.bytes.len());
+}
+
+#[test]
+fn repeated_faults_coalesce_into_one_summary() {
+    // A cracked disk can have dozens of bad blocks in a row; one entry each
+    // would bury the finding.
+    let (mut img, _, first) = ofs_with_file(&vec![6u8; 6000]);
+    for n in 0..5u32 {
+        corrupt::zero_block(&mut img, first + n);
+    }
+    let faults = read_faults(img);
+    assert_eq!(faults.len(), 1, "must summarise, not enumerate: {faults:?}");
+    assert_eq!(faults[0].count, 5);
+    assert_eq!(faults[0].first_block, first);
+}
+
+#[test]
+fn faults_do_not_prevent_recovery() {
+    // The whole point of D-012: read the bytes, flag the doubt.
+    let (mut img, _, first) = ofs_with_file(&vec![7u8; 3000]);
+    corrupt::data_block_seq(&mut img, first, 999);
+    let mem = Mem::dd(img);
+    let v = Volume::mount(&mem).unwrap();
+    let e = v.lookup("victim").unwrap();
+    let c = v.read_file(&e).unwrap();
+    assert!(!c.faults.is_empty(), "the doubt is flagged");
+    assert_eq!(c.bytes.len(), 3000, "...and the data still comes back");
+    assert!(c.is_full_length());
+    assert!(
+        !c.is_complete(),
+        "complete means sound as well as full-length"
+    );
+}
+
+#[test]
+fn ffs_has_no_data_block_faults_to_find() {
+    // C-005's asymmetry: FFS data blocks carry no header, so there is nothing
+    // to validate and nothing to report.
+    let mut f = Fixture::dd(1);
+    f.add_file("victim", &vec![9u8; 3000]);
+    let mem = Mem::dd(f.build());
+    let v = Volume::mount(&mem).unwrap();
+    let e = v.lookup("victim").unwrap();
+    assert!(v.read_file(&e).unwrap().faults.is_empty());
+}
+
+#[test]
+fn a_file_header_claiming_four_gigabytes_must_not_allocate_it() {
+    // AV-005. `byte_size` is a u32 read straight off the disk, so a hostile or
+    // corrupt header can claim 4 GB on an 880 KB floppy.
+    let (mut img, hdr, _) = ofs_with_file(&vec![1u8; 2000]);
+    ade_endian::put_u32(&mut img, hdr as usize * 512 + 512 - 188, u32::MAX).unwrap();
+    // Re-checksum so the entry still parses as valid.
+    let ck =
+        ade_block::checksum::normal(&img[hdr as usize * 512..(hdr as usize + 1) * 512]).unwrap();
+    ade_endian::put_u32(&mut img, hdr as usize * 512 + 20, ck).unwrap();
+
+    let mem = Mem::dd(img);
+    let v = Volume::mount(&mem).unwrap();
+    let e = v.lookup("victim").unwrap();
+    let c = v.read_file(&e).unwrap();
+    assert!(
+        c.bytes.len() <= 901_120,
+        "recovered {} bytes from an 880 KB volume",
+        c.bytes.len()
+    );
 }

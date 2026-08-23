@@ -33,6 +33,15 @@ jobs:
       - name: Tests
         run: cargo test --workspace --all-targets
 
+      # F-001's acceptance bar. Runs on every push at modest iteration counts;
+      # a deep sweep is `ADE_FUZZ_ITERS=150000 cargo test --release --test fuzz`.
+      #
+      # Caveat worth knowing (IMP-003): a regression in the traversal cycle
+      # detection would exhaust this runner's memory rather than fail cleanly,
+      # because the harness asserts on a result the broken code never returns.
+      - name: Fuzz the parse paths (F-001)
+        run: cargo test -p ade-core --test fuzz
+
       - name: Docs build without warnings
         run: cargo doc --workspace --no-deps
         env:

@@ -29,7 +29,7 @@ use ade_block::{BlockError, BlockIndex, BlockSource, Geometry, read_at};
 use crate::{
     bootblock::Bootblock,
     dostype::{Dostype, FileSystem},
-    entry::{Entry, T_LIST},
+    entry::{Entry, T_DATA, T_LIST},
     rootblock::Rootblock,
 };
 
@@ -434,7 +434,18 @@ impl<'a> Volume<'a> {
             self.geometry.block_size() as usize
         };
 
-        let mut out: Vec<u8> = Vec::with_capacity(entry.byte_size as usize);
+        let volume_bytes = usize::try_from(self.geometry.total_bytes()).unwrap_or(usize::MAX);
+        // `byte_size` is a u32 read straight off the disk, so a crafted header
+        // can claim 4 GB on an 880 KB floppy. Reserving it verbatim allocated
+        // exactly that (BUG-003) — attacker-controlled allocation before a
+        // single byte is read, which is AV-005 in one line. The reservation is
+        // a hint; the volume's own size is the bound.
+        let mut out: Vec<u8> = Vec::with_capacity((entry.byte_size as usize).min(volume_bytes));
+        let mut faults: Vec<DataFault> = Vec::new();
+        let mut exceeded_volume = false;
+        // OFS sequence numbers count from 1, across the whole file rather than
+        // per header block, so this carries over into the extension chain.
+        let mut index_in_file: usize = 1;
         let mut header_block = entry.block;
         let mut header_raw = self.read_block(header_block)?;
         let mut seen_headers: HashSet<u32> = HashSet::from([header_block]);
@@ -461,6 +472,14 @@ impl<'a> Volume<'a> {
                 }
                 let data = self.read_block(ptr)?;
                 if ofs {
+                    // Check the block's own header against what the table
+                    // claims (IMP-002). Faults are recorded, never acted on:
+                    // the bytes are read regardless, because refusing to
+                    // recover data is the one thing a forensic tool must not
+                    // do (D-012).
+                    let seq = u32::try_from(index_in_file).unwrap_or(u32::MAX);
+                    check_ofs_block(&data, ptr, seq, entry.block, payload, &mut faults);
+
                     let size = ade_endian::u32_at(&data, 12).unwrap_or(0) as usize;
                     let take = size.min(payload);
                     if let Some(slice) = data.get(OFS_HEADER..OFS_HEADER.saturating_add(take)) {
@@ -469,7 +488,15 @@ impl<'a> Volume<'a> {
                 } else {
                     out.extend_from_slice(&data);
                 }
+                index_in_file = index_in_file.saturating_add(1);
                 if out.len() >= entry.byte_size as usize {
+                    break;
+                }
+                // A file cannot exceed the volume holding it. Independent of the
+                // extension chain's visited set, for the same reason `walk`
+                // carries a cap (IMP-003).
+                if out.len() >= volume_bytes {
+                    exceeded_volume = true;
                     break;
                 }
             }
@@ -512,6 +539,8 @@ impl<'a> Volume<'a> {
                 .byte_size
                 .saturating_sub(u32::try_from(out.len()).unwrap_or(u32::MAX)),
             bytes: out,
+            faults,
+            exceeded_volume,
         })
     }
 
@@ -520,29 +549,66 @@ impl<'a> Volume<'a> {
     /// Carries one visited set across the entire walk, so a hard link that
     /// points back up the tree terminates rather than recursing (AV-001).
     ///
+    /// # Two defences, not one
+    ///
+    /// The visited set is the correctness mechanism. Behind it sits a hard
+    /// structural cap — a volume cannot hold more entries than it has blocks —
+    /// that does **not** depend on the set being right.
+    ///
+    /// That redundancy is deliberate. D-006 forbids unbounded allocation on a
+    /// parse path, and resting the Critical-rated AV-001 vector on a single
+    /// `HashSet::insert` proved too thin: removing that one call made ADE
+    /// allocate 28.8 GB and take the host down, the same failure shape as the
+    /// reference implementation's (SPEC §Corpus observations). The cap turns
+    /// that into a reported fault, which is the difference between an invariant
+    /// that is *tested* and one merely *asserted* (IMP-003).
+    ///
     /// # Errors
     /// A read error on the starting directory.
-    pub fn walk(&self, start: u32) -> Result<Vec<(String, Entry)>, FsError> {
-        let mut out = Vec::new();
+    pub fn walk(&self, start: u32) -> Result<Walk, FsError> {
+        // A volume cannot contain more entries than it has blocks, nor can more
+        // directories be pending than exist. Neither bound consults `visited`.
+        let cap = usize::try_from(self.geometry.total_blocks()).unwrap_or(usize::MAX);
+        let mut out: Vec<(String, Entry)> = Vec::new();
+        let mut hit_limit = false;
         let mut visited: HashSet<u32> = HashSet::from([start]);
-        let mut stack = vec![(String::new(), start)];
-        while let Some((prefix, dir)) = stack.pop() {
+        // Depth is carried explicitly: bounding the entry count is not enough,
+        // because each path is built from its parent's. A cycle makes the
+        // *strings* grow without bound — "a/b/a/b/a/b/…" — even while the
+        // count stays inside its cap. Found by mutation-testing this very
+        // function: the first version of the cap still reached 4 GB.
+        let mut stack = vec![(String::new(), start, 0usize)];
+
+        'outer: while let Some((prefix, dir, depth)) = stack.pop() {
             let Ok(listing) = self.list(dir) else {
                 continue;
             };
             for entry in listing.entries {
+                if out.len() >= cap {
+                    hit_limit = true;
+                    break 'outer;
+                }
                 let path = if prefix.is_empty() {
                     entry.name_lossy()
                 } else {
                     format!("{prefix}/{}", entry.name_lossy())
                 };
                 if entry.kind.is_directory() && visited.insert(entry.block) {
-                    stack.push((path.clone(), entry.block));
+                    // A tree cannot nest deeper than it has directory blocks,
+                    // and cannot have more pending than it has blocks.
+                    if depth >= cap || stack.len() >= cap {
+                        hit_limit = true;
+                        break 'outer;
+                    }
+                    stack.push((path.clone(), entry.block, depth.saturating_add(1)));
                 }
                 out.push((path, entry));
             }
         }
-        Ok(out)
+        Ok(Walk {
+            entries: out,
+            hit_limit,
+        })
     }
 }
 
@@ -579,6 +645,96 @@ impl Listing {
     }
 }
 
+/// Something wrong with an OFS data block.
+///
+/// OFS data blocks carry a header — type, owning file, sequence number, length
+/// — and it can disagree with the table that pointed here. FFS blocks have no
+/// header, so none of this applies to them: C-005's forensic asymmetry again.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DataFaultKind {
+    /// The block is entirely zero. Usually an allocated-but-never-written
+    /// block, or a table entry left pointing at free space.
+    Zeroed,
+    /// The primary type is not `T_DATA`, so this is not a data block at all.
+    NotADataBlock {
+        /// What the type field said.
+        found: u32,
+    },
+    /// The block belongs to a different file.
+    WrongOwner {
+        /// The file header that claimed it.
+        expected: u32,
+        /// The file header the block names.
+        found: u32,
+    },
+    /// The sequence number is not the position the table put it in.
+    OutOfSequence {
+        /// Position in the file, counting from 1.
+        expected: u32,
+        /// The block's own claim.
+        found: u32,
+    },
+    /// `data_size` exceeds what a block can hold, so it was clamped.
+    OversizedLength {
+        /// The declared length.
+        declared: u32,
+        /// The most a block can carry.
+        capacity: u32,
+    },
+}
+
+impl core::fmt::Display for DataFaultKind {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Zeroed => f.write_str("data block is entirely zero"),
+            Self::NotADataBlock { found } => {
+                write!(f, "not a data block: type {found:#x}, expected {T_DATA}")
+            }
+            Self::WrongOwner { expected, found } => {
+                write!(f, "block belongs to file header {found}, not {expected}")
+            }
+            Self::OutOfSequence { expected, found } => {
+                write!(f, "sequence number {found}, expected {expected}")
+            }
+            Self::OversizedLength { declared, capacity } => {
+                write!(
+                    f,
+                    "declared length {declared} exceeds the {capacity}-byte capacity"
+                )
+            }
+        }
+    }
+}
+
+/// A data-block fault, summarised across every block that showed it.
+///
+/// Summarised rather than one entry per block: a cracked disk can have dozens
+/// of bad blocks in a row, and a health report that lists each one buries the
+/// finding it is trying to surface.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DataFault {
+    /// What was wrong.
+    pub kind: DataFaultKind,
+    /// The first block it was seen on.
+    pub first_block: u32,
+    /// Its position in the file, counting from 1.
+    pub first_index: u32,
+    /// How many blocks showed this fault.
+    pub count: u32,
+}
+
+impl core::fmt::Display for DataFault {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "{}", self.kind)?;
+        if self.count > 1 {
+            write!(f, " ({} blocks, first at {})", self.count, self.first_block)?;
+        } else {
+            write!(f, " (block {})", self.first_block)?;
+        }
+        Ok(())
+    }
+}
+
 /// A file's contents, with whatever the disk failed to deliver.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FileContents {
@@ -593,12 +749,35 @@ pub struct FileContents {
     /// reader fault, but either way it is the caller's to report, not ADE's to
     /// hide.
     pub short_by: u32,
+    /// Set when the read stopped at the volume's size rather than because the
+    /// data ran out.
+    ///
+    /// A file cannot legitimately exceed the volume holding it, so this means a
+    /// chain escaped its visited set — a fault in ADE, not in the disk. It
+    /// exists so such a fault surfaces as a report rather than as an exhausted
+    /// machine (IMP-003).
+    pub exceeded_volume: bool,
+    /// Structural faults found in the OFS data blocks, summarised by kind.
+    ///
+    /// Empty for FFS, which has no data-block headers to check. Non-empty does
+    /// **not** mean the bytes are wrong — ADE reads them anyway and says so,
+    /// because refusing to recover data is the one thing a forensic tool must
+    /// not do (D-012). It means the structure stopped agreeing with itself,
+    /// which is the difference between "this file is short" and "this file
+    /// stopped being a file here".
+    pub faults: Vec<DataFault>,
 }
 
 impl FileContents {
-    /// Whether the file read complete.
+    /// Whether the file read complete **and** its structure held.
     #[must_use]
-    pub const fn is_complete(&self) -> bool {
+    pub fn is_complete(&self) -> bool {
+        self.short_by == 0 && self.faults.is_empty() && !self.exceeded_volume
+    }
+
+    /// Whether every declared byte was recovered, regardless of structure.
+    #[must_use]
+    pub const fn is_full_length(&self) -> bool {
         self.short_by == 0
     }
 
@@ -607,4 +786,90 @@ impl FileContents {
     pub fn into_bytes(self) -> Vec<u8> {
         self.bytes
     }
+}
+
+/// Check one OFS data block against what the table claimed of it.
+///
+/// Records faults into `faults`, coalescing repeats of the same kind so a
+/// hundred consecutive bad blocks report once with a count rather than a
+/// hundred times (IMP-002).
+fn check_ofs_block(
+    data: &[u8],
+    block: u32,
+    expected_seq: u32,
+    owner: u32,
+    payload: usize,
+    faults: &mut Vec<DataFault>,
+) {
+    let mut note = |kind: DataFaultKind| {
+        // Coalesce on kind *discriminant* rather than on equality, so that
+        // twenty blocks each naming a different wrong owner still summarise
+        // as one finding rather than twenty.
+        if let Some(existing) = faults
+            .iter_mut()
+            .find(|f| core::mem::discriminant(&f.kind) == core::mem::discriminant(&kind))
+        {
+            existing.count = existing.count.saturating_add(1);
+        } else {
+            faults.push(DataFault {
+                kind,
+                first_block: block,
+                first_index: expected_seq,
+                count: 1,
+            });
+        }
+    };
+
+    if data.iter().all(|&b| b == 0) {
+        // More specific and more useful than "type 0 is not T_DATA": an
+        // all-zero block is an allocated-but-unwritten block or a table entry
+        // left pointing at free space, which is a different story from a
+        // block holding someone else's data.
+        note(DataFaultKind::Zeroed);
+        return;
+    }
+
+    let block_type = ade_endian::u32_at(data, 0).unwrap_or(0);
+    if block_type != T_DATA {
+        note(DataFaultKind::NotADataBlock { found: block_type });
+        // The remaining fields are meaningless if this is not a data block.
+        return;
+    }
+    let header_key = ade_endian::u32_at(data, 4).unwrap_or(0);
+    if header_key != owner {
+        note(DataFaultKind::WrongOwner {
+            expected: owner,
+            found: header_key,
+        });
+    }
+    let seq = ade_endian::u32_at(data, 8).unwrap_or(0);
+    if seq != expected_seq {
+        note(DataFaultKind::OutOfSequence {
+            expected: expected_seq,
+            found: seq,
+        });
+    }
+    let declared = ade_endian::u32_at(data, 12).unwrap_or(0);
+    if declared as usize > payload {
+        note(DataFaultKind::OversizedLength {
+            declared,
+            capacity: u32::try_from(payload).unwrap_or(u32::MAX),
+        });
+    }
+}
+
+/// The result of a tree walk.
+///
+/// A struct rather than a bare `Vec`, so that hitting the structural cap is
+/// reportable. A truncated walk indistinguishable from a complete one would be
+/// the worst of both worlds: bounded, but silently wrong.
+#[derive(Debug, Default)]
+pub struct Walk {
+    /// Every entry reached, as `(path, entry)`.
+    pub entries: Vec<(String, Entry)>,
+    /// Set when the walk stopped at the structural cap.
+    ///
+    /// Means the visited set failed to terminate a cycle — a fault in ADE
+    /// rather than in the disk (IMP-003, AV-001).
+    pub hit_limit: bool,
 }

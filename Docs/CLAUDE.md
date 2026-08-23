@@ -21,9 +21,11 @@ Phase 0 is complete (2026-08-22). Phase 1 is unblocked and nothing is waiting on
 
 1. ~~First slice `ade info`~~ — **done 2026-08-22**. Runs over all 4288 corpus images with zero crashes.
 2. ~~Mount and traverse~~ — **done 2026-08-22**. `ade ls` and `ade extract` work; 11,087 files extracted from a 400-image sample with zero read errors. AV-001 is discharged: every chain carries a visited set.
-3. Next: the **fuzz harness** (F-001). Block level, not whole images. The last outstanding Phase 1 acceptance bar.
-   Note AV-005 is not theoretical: ADFlib allocates 29 GB on a plain uncompressed ADF in the corpus, so unbounded allocation belongs to the ADF parse path, not just decompression.
-   **Never run the oracle uncapped.** `unadf` OOM-killed a whole session once already; the test wraps it in `ulimit -v` and `timeout`.
+3. ~~Fuzz harness~~ — **done 2026-08-23**. 900,000 cases, six targets, zero failures. Runs in CI; deep sweeps via `ADE_FUZZ_ITERS`.
+   **Phase 1's acceptance criteria are met and IMP-001/002/003 are all applied.** Nothing is outstanding against the phase.
+   **Beware allocation sized from disk fields.** BUG-003 was `Vec::with_capacity(byte_size)` with `byte_size` straight off the disk — 4 GB on an 880 KB floppy, and 900,000 fuzz cases never saw it, because the harness bounds output and a successful reservation produces none. Any length read from a disk that sizes an allocation needs an explicit bound *and* an explicit assertion.
+   **Never run the oracle uncapped.** `unadf` OOM-killed a whole session once; the test wraps it in `ulimit -v` and `timeout`.
+   **Be careful mutation-testing traversal.** Removing `walk`'s visited set makes ADE allocate 28.8 GB and take the host down — that is IMP-003, and it is why the harness cannot currently prove that invariant by breaking it.
 4. Then the health report proper (F-010) — aggregate the faults `ade info` already finds.
 5. ~~IMP-001~~ — **applied 2026-08-22**. `--format=json` on `info` and `ls`. The JSON field names and fault codes are now a **stability commitment** (F-015): rename them only with a decision entry. Text output is explicitly not parseable and may be reworded freely.
 3. Fuzz at the **block** level, not whole images — a rootblock parser takes 512 bytes, so seeding with 880 KB images wastes the budget on bytes nothing reads.

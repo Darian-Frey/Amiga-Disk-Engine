@@ -36,10 +36,14 @@ Background context (why ADE exists, the documentation landscape survey, and the 
 - [x] Mount and traverse: rootblock hash table, directory blocks, same-hash chains, path lookup with the volume's own case folding, and file reading through the reversed `data_blocks[]` table plus extension blocks, for both OFS and FFS.
 - [x] `ade ls` and `ade extract`.
 - [x] Differential testing against ADFlib (D-002's oracle) — 2894 of 2896 files byte-identical; the two differences are D-012, where ADE recovers content ADFlib refuses.
-- [ ] Fuzz harness at the block level (F-001) — the acceptance bar, still outstanding.
+- [x] Fuzz harness at the block level (F-001) — six targets over the block parsers, the sniffer, mount/traverse, deliberately hostile structures, and truncated images. Deterministic PRNG, so a failure reproduces from its seed; runs in CI on every push.
 - [ ] Health report proper (F-010): aggregate the faults `ade info` already finds.
 - [ ] Spike validated against three fixtures: one OFS DD, one FFS DD, one multi-partition HDF.
-**Acceptance:** Round-trip-read extraction matches a reference tool on the clean fixtures *(met 2026-08-22: 99.93% byte-identical against ADFlib, the residue being D-012)*; the fuzz corpus runs with zero crashes (F-001) *(outstanding — no fuzz harness yet)*.
+**Acceptance:** Round-trip-read extraction matches a reference tool on the clean fixtures *(met: 99.36% byte-identical against ADFlib over 3900 files; every disagreement investigated and attributed to D-012 or to genuine disk damage, none to a reader fault)*; the fuzz corpus runs with zero crashes *(met 2026-08-23: 900,000 cases across six targets, zero failures)*.
+
+**Phase 1 acceptance is met**, and the three improvements raised against it (IMP-001, IMP-002, IMP-003) are all applied. Applying the last of them uncovered **BUG-003**, a live AV-005 unbounded allocation on the plain ADF path, now fixed.
+
+Remaining before the phase can be called complete: nothing on the criteria. Outstanding by judgement: the fuzz harness cannot see allocation that is never used (see BUG-003), so lengths read from disk that size an allocation want explicit assertions.
 
 *Progress 2026-08-22:* `ade info` runs over all 4288 corpus images with **zero crashes, hangs or unhandled errors** — 2608 clean, 626 with faults, 1054 with no AmigaDOS volume.
 

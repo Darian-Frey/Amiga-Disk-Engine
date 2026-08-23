@@ -22,7 +22,9 @@ Priorities are MoSCoW (Must / Should / Could / Won't). Effort is rough and pre-s
 - No input — however malformed, truncated, or hostile — causes a crash, hang, or unbounded memory growth; failures return typed errors.
 - A fuzz corpus of malformed images runs to completion with zero panics/segfaults.
 - Every parse fault is reported with block/offset context, never silently swallowed.
-**Status:** Not started
+**Status:** Met for the ADF read path, 2026-08-23
+**Evidence:** 900,000 fuzz cases across six targets, zero failures; 4652 real images inspected with zero crashes; 12,468 files extracted from a 400-image sample with two read errors and no panics. The harness is hand-rolled rather than `cargo-fuzz` because the latter needs nightly and CI runs stable — a harness CI cannot run protects nothing against regressions, which is most of what a fuzzer does after the first round.
+**Caveat:** unbounded *growth* is caught by structural bounds on outputs rather than by measuring the heap, since the workspace forbids the `unsafe` an allocator hook needs. IMP-003 records where that leaves a thin margin.
 **Notes:** Directly answers AV-001…AV-005. The competitor baseline (adftools segfaulting on compressed input) is the bar to clear.
 
 ### F-002 Fast core + library API + CLI, GUI layered on top

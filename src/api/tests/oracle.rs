@@ -179,7 +179,7 @@ fn extraction_agrees_with_adflib() {
         };
         disks += 1;
 
-        for (_, entry) in walked {
+        for (_, entry) in walked.entries {
             if !entry.kind.is_file() {
                 continue;
             }
@@ -277,7 +277,7 @@ fn ade_survives_what_the_oracle_does_not() {
         };
         if let Ok(volume) = image.volume() {
             let walked = volume.walk(volume.root()).unwrap_or_default();
-            for (_, entry) in walked {
+            for (_, entry) in walked.entries {
                 if entry.kind.is_file() {
                     let _ = volume.read_file(&entry);
                 }

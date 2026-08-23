@@ -32,6 +32,10 @@ Severity: Critical (must hold) | Major (regression on release blocks) | Minor (t
 **Detection.** Not implemented (would require capped output sizes and fuzzing the DMS/gzip front-ends; `errdms` fixtures as known-bad inputs).
 **Related decisions.** D-002, D-006, D-009. **Related constraints.** C-004 (SPEC.md).
 
+> **Observed in ADE itself, 2026-08-24 — BUG-003.** `read_file` reserved `Vec::with_capacity(byte_size)` from a `u32` read off the disk, so a crafted file header claiming 4 GB caused a 4 GB allocation on an 880 KB floppy, before any data block was read. Fixed by clamping the reservation to the volume's own size.
+>
+> Two lessons. This vector reaches the **plain ADF path**, not only decompression where it was first expected. And it survived 900,000 fuzz cases undetected, because the harness bounds *output* while a `with_capacity` that merely succeeds produces none — allocation is invisible to an output-bounds check unless something asserts on it directly.
+>
 > **Observed in the reference implementation, 2026-08-22.** This vector is not hypothetical, and it is not confined to compressed formats. Running ADFlib's `unadf` over the 4288-image corpus produced **15 crashes**, and on `Bomb Busters_Disk1.adf` — an ordinary uncompressed 901,120-byte game disk — it allocated **29 GB** before the kernel OOM killer terminated it *and the surrounding session*. ADE reads the same disk in 2.8 MB and reports its volume cleanly.
 >
 > Two consequences. First, unbounded allocation belongs to the plain-ADF parse path too, not just to decompression — the fuzz harness must cover both. Second, every invocation of the D-002 oracle now runs under `ulimit -v` and `timeout`, because a test that can take down the developer's machine is not a test.

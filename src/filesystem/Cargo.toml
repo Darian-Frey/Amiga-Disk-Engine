@@ -12,6 +12,8 @@ description = "ADE: OFS/FFS mount, dostypes, directory traversal, RDB partitions
 ade-block = { workspace = true }
 ade-endian = { workspace = true }
 [dev-dependencies]
+ade-block = { workspace = true }
+ade-endian = { workspace = true }
 ade-fixtures = { workspace = true }
 
 [lints]

@@ -201,10 +201,10 @@ Rationale, in short:
 ---
 
 ### D-009 xDMS — wrap vs port vs reimplement
-**Decided:** — (open)
+**Decided:** 2026-08-23
 **Recorded:** 2026-08-21
-**Status:** Proposed
-**Authors:** Claude (primary auditor)
+**Status:** Accepted
+**Authors:** Darian-Frey (decision); Claude (analysis)
 **Related:** F-003, F-016, D-002, D-006, D-008, AV-005, C-004 (SPEC.md)
 
 **Context.** Split out of D-002, which originally bundled ADFlib and xDMS. DMS (DiskMasher) is a proprietary format fully reverse-engineered by xDMS across all compression modes including encryption. It is not needed until **Phase 3**, so this decision does not gate implementation and is deliberately left open.
@@ -216,13 +216,25 @@ The considerations differ from D-002 in two ways. First, DMS is the decompressio
 - **B. Port xDMS to safe Rust.** Owned code, no FFI, safety across the bomb surface, and the decompressors are translated rather than rediscovered. Requires a licence permitting derivation, and requires attribution.
 - **C. Reimplement from the format description, with xDMS as a black-box oracle** (the D-002 posture). Cleanest provenance, but DMS's multiple compression modes are fiddly and far less well documented than OFS/FFS — this re-solves genuinely hard reverse-engineering rather than well-specified structures.
 
-**Decision.** Open, deferred to Phase 2. Lean towards **B if xDMS's licence permits a port**, since it is the only option that gets safety over AV-005 without redoing the reverse-engineering. Fall back to C if the licence forbids derivation.
+**Decision.** Option B — **port xDMS to safe Rust**.
+
+The licence question that blocked this entry is resolved. xDMS is **Public Domain**: "xDMS is released as public domain software. You can spread it, modify it and use it in any way you like. You can do anything with it without even asking me first." (`/usr/share/doc/xdms/copyright`, Andre Rodrigues de la Rocha and Heikki Orsila.) Derivation is permitted outright, so a port carries no obligation and ADE's Apache-2.0 licence (D-011) is unaffected. Attribution goes in `NOTICE` as a courtesy and because the author asked to hear about it.
+
+Note the deliberate asymmetry with D-002. There, ADFlib's source is **not** to be read, because GPL provenance would cost the licence freedom. Here, reading and translating the source is legitimate and is the entire basis of this option.
+
+Porting rather than wrapping is what gets safety across AV-005 — and that vector is no longer theoretical. The 2026-08-22 oracle work found ADFlib's `unadf` allocating **29 GB** on an ordinary uncompressed ADF and crashing on 15 of 4288 real images. A DMS decompressor handling attacker-controlled lengths is a strictly worse place to have unbounded allocation, and a fault inside wrapped C is uncatchable from Rust.
+
+Porting rather than reimplementing (option C) is what avoids redoing reverse-engineering that was already done well: the compression modes are undocumented outside this source, and rediscovering them from DMS files would be weeks of work with no better outcome.
 
 Note the asymmetry with D-002: there, ADFlib's source is *not* to be read, because GPL provenance would cost the licence freedom. Here, if xDMS proves permissively licensed, reading and translating the source is legitimate and is the whole basis of option B.
 
 **Consequences.** Determines whether DMS handling is owned Rust or an FFI dependency, and whether the licence chosen under D-008 needs revisiting from Phase 3. Bounded by C-004 regardless: some DMS images are known-bad and will not round-trip, and ADE must fail loudly rather than emit a silently-bad ADF.
 
-**Reversal conditions.** N/A while Proposed. Once decided, reverse if the ported/reimplemented decompressor cannot reproduce xDMS's output byte-for-byte on the clean fixture set.
+**Blocked on test data.** The port cannot begin responsibly: there is **not one DMS file** on this machine — the corpus is 4288 `.adf` and nothing else — and `xdms` only unpacks, so it cannot manufacture test input either. Writing a decompressor with nothing to decompress would produce code that compiles, passes its own tests, and is unverified against reality. That is precisely the failure D-002 and D-010 were written to avoid, and here it is worse than for ADF: a compression format has no self-describing structure to fixture against, so a hand-built synthetic DMS would only test the port against my own reading of the source.
+
+**Prerequisite.** Obtain real DMS images before writing the decompressors — TOSEC ships DMS sets, and Aminet hosts freely-distributable ones. The `errdms`-tagged images matter especially, since C-004 requires ADE to fail loudly on them rather than emit a silently-bad ADF, and that behaviour cannot be implemented against files we do not have.
+
+**Reversal conditions.** Reverse to wrapping (A) only if the port cannot reproduce `xdms`'s output byte-for-byte across a real corpus and the divergence cannot be explained. Note that `xdms` becomes this decision's oracle exactly as ADFlib is D-002's — with the difference that its source is readable, so a disagreement can be traced rather than merely observed.
 
 ---
 
