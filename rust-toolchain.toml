@@ -1,3 +1,14 @@
+# Pinned, not floating.
+#
+# CI denies all warnings, and clippy gains lints with every Rust release. On
+# `channel = "stable"` the runner installs whatever is current while a developer
+# may be several releases behind, so a build breaks with no code change — which
+# is what happened on 2026-08-24, when CI at 1.98.0 rejected code that passed
+# locally at 1.94.1.
+#
+# Bumping this is a deliberate commit. The `toolchain-drift` CI job watches
+# latest stable and reports without blocking, so the bump is scheduled rather
+# than sprung.
 [toolchain]
-channel = "stable"
+channel = "1.98.0"
 components = ["rustfmt", "clippy"]

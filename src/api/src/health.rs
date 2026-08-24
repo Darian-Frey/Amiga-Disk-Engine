@@ -223,7 +223,8 @@ pub fn examine(bytes: Vec<u8>) -> Health {
     let scan = scan_tree(&volume, &mut findings);
     let bitmap = cross_check_bitmap(&volume, &image, &scan.referenced, &mut findings);
 
-    findings.sort_by(|a, b| b.severity.cmp(&a.severity));
+    // Worst first, so the first line a reader sees is the one that matters.
+    findings.sort_by_key(|f| core::cmp::Reverse(f.severity));
     Health {
         inspection,
         bitmap,

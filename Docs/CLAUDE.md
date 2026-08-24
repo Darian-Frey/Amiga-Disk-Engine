@@ -50,6 +50,8 @@ Do not violate without a DECISIONS entry:
 
 ## Build & test
 
+**The toolchain is pinned** in `rust-toolchain.toml` — an exact version, not `stable`. Do not float it: CI denies all warnings, clippy gains lints every release, and a floating channel breaks the build with no code change. Bump the pin deliberately; the non-blocking `toolchain-drift` job says when it is worth doing.
+
 No build yet, but the toolchain is settled — Rust + Cargo for core/CLI/bridge, CMake + Qt6 for the GUI from Phase 5. See [BUILD.md](BUILD.md). Fuzzing the parsers (`cargo-fuzz`) is part of the Phase-1 acceptance bar, not an afterthought, and the ADFlib differential suite must **skip** rather than fail when the oracle binary is absent, so a fresh clone still builds and tests.
 
 ## Conventions

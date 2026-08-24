@@ -16,8 +16,10 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - name: Install toolchain
-        run: rustup component add rustfmt clippy
+      # The toolchain comes from rust-toolchain.toml, which is pinned. rustup
+      # installs it automatically on first use.
+      - name: Show toolchain
+        run: rustc --version && cargo clippy --version
 
       - uses: Swatinem/rust-cache@v2
 
@@ -57,3 +59,16 @@ jobs:
       # Cargo.toml.
       - name: Check the crate dependency graph
         run: python3 tools/check-layering.py
+
+  # Non-blocking: warns when the pinned toolchain has fallen behind stable, so
+  # a version bump is scheduled rather than arriving as a broken build.
+  toolchain-drift:
+    name: Drift from latest stable
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install latest stable
+        run: rustup toolchain install stable --profile minimal --component clippy
+      - name: Lint against latest stable
+        run: cargo +stable clippy --workspace --all-targets -- -D warnings

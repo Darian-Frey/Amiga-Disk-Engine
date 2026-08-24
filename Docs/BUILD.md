@@ -2,7 +2,9 @@
 
 > **No longer a stub.** The Rust workspace builds, tests, and lints as of 2026-08-21, so the commands below are real rather than intended. The Qt6 GUI does not exist yet (Phase 5), so its half remains prospective. Toolchain settled by **D-001** and **D-002** — see [DECISIONS.md](DECISIONS.md).
 >
-> Verified against Rust 1.95.0 on Linux x86-64. The workspace pins `edition = "2024"` and `rust-version = "1.85"`.
+> **The toolchain is pinned.** `rust-toolchain.toml` names an exact version, not `stable`, and rustup installs it automatically. Verified on Linux x86-64; the workspace pins `edition = "2024"` and a `rust-version` floor of 1.85.
+>
+> The pin exists because CI denies all warnings and clippy gains lints with every Rust release. On a floating channel the runner installs whatever is current while a developer may be several releases behind, so a build breaks with no code change — which happened on 2026-08-24, when CI at 1.98.0 rejected code that passed locally at 1.94.1. Bumping the pin is a deliberate commit, and a non-blocking `toolchain-drift` CI job lints against latest stable so the bump is scheduled rather than sprung.
 
 ## Supported platforms
 
