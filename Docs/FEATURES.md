@@ -102,7 +102,10 @@ Priorities are MoSCoW (Must / Should / Could / Won't). Effort is rough and pre-s
 **Acceptance:**
 - Report bad/unreadable sectors, weak bits, block-checksum failures, bitmap validity, and OFS/FFS recoverability for any image.
 - Problems are surfaced explicitly, never failed silently.
-**Status:** Not started
+**Status:** Largely met 2026-08-24 — `ade check`
+**What exists:** container identification with its evidence; bootblock and rootblock condition; per-entry and per-data-block checksum failures; a bitmap cross-check against the blocks the tree actually reaches, in both directions; cross-linked block detection; file shortfalls and OFS structural faults. Findings carry a stable code and a severity, and the report is available as text or JSON.
+**Deliberately absent:** bad sectors and weak bits. Both are flux-level properties — a sector is "bad" because it will not read off the physical medium, and weak bits exist only in a flux capture. Neither is knowable from a decoded image, so both wait for Phase 4 rather than being faked.
+**Measured:** over a 776-disk sample — 472 clean, 112 with warnings, 187 holding no AmigaDOS volume, and 5 where a finding would lose data.
 **Notes:** Relates to AV-003. A core forensic differentiator.
 
 ### F-011 Bootblock virus scanning

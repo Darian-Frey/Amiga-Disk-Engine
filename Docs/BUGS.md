@@ -13,6 +13,22 @@ _None._
 
 ## Fixed
 
+### BUG-004 The fixture generator wrote the bitmap checksum into the map
+**Severity:** medium
+**Status:** fixed
+**Found:** 2026-08-24, while building the F-010 health report — generated volumes reported 27 orphaned blocks where real disks reported none.
+**Where:** [tools/fixtures/src/lib.rs](../tools/fixtures/src/lib.rs), `Volume::write_bitmap`.
+
+**What was wrong.** The bitmap block is the **one exception** to the usual block layout: its checksum sits at offset 0 and the map runs from offset 4 (ADF FAQ §4.3, SPEC §Bitmap). Every other block type reserves 0 for the primary type and keeps the checksum at 20.
+
+`write_bitmap` wrote it at 20, where the map's fifth word lives, silently overwriting the bits covering blocks 130–161. Fixtures therefore claimed around thirty blocks were allocated that nothing referenced.
+
+**Why it hid.** The normal checksum is defined so the whole block sums to zero, which makes *validation* insensitive to where the field sits: checking against offset 20 succeeds on a block whose checksum is at 0. So the malformed fixtures passed their own checksum test, and ADE's reader — which also validated at offset 20 — agreed with them. The offset only matters for writing, and for not losing the map words it displaces.
+
+**How it surfaced.** Not from a test, but from the disagreement between fixtures and reality: the health report showed 0 orphaned blocks on real disks and 27 on generated ones. That is D-010's two-mechanism design working in the direction I had not anticipated — the argument for the corpus was always that it would catch the *parser* being wrong, and here it caught the *generator*.
+
+**Fixed 2026-08-24.** `normal_checksum_at(block, field)` in the fixtures crate and `checksum::normal_at` in `ade-block`; the bitmap writer uses field 0. `ade-block::checksum` gained `sums_to_zero`, which states the invariant directly and is what `Bitmap::read` now uses, since it is true regardless of layout.
+
 ### BUG-003 `read_file` allocated an attacker-controlled amount before reading anything
 **Severity:** high
 **Status:** fixed

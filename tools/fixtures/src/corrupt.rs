@@ -149,6 +149,15 @@ pub fn zero_block(img: &mut [u8], block: u32) {
     }
 }
 
+/// Zero the volume's creation datestamp.
+///
+/// Day zero is treated as "unset" by Amiga software and is the commonest
+/// cosmetic oddity in the wild: 567 of 4652 corpus images have one.
+pub fn clear_created_date(img: &mut [u8], root: u32) {
+    put_u32(img, root as usize * BSIZE + (BSIZE - 28), 0);
+    rechecksum(img, root);
+}
+
 /// Truncate the image to `blocks` blocks.
 ///
 /// One survey image is 90,112 bytes — eight cylinders of what should be eighty.

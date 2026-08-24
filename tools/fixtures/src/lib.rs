@@ -104,9 +104,17 @@ pub fn get_u32(buf: &[u8], off: usize) -> u32 {
 /// Used by every block type except the bootblock. Field lives at offset 20.
 #[must_use]
 pub fn normal_checksum(block: &[u8]) -> u32 {
+    normal_checksum_at(block, 20)
+}
+
+/// The normal checksum for a block whose field is not at the usual offset.
+///
+/// Bitmap blocks keep theirs at 0 rather than 20 (ADF FAQ §4.3).
+#[must_use]
+pub fn normal_checksum_at(block: &[u8], field: usize) -> u32 {
     let mut sum: u32 = 0;
     for i in (0..block.len()).step_by(4) {
-        let v = if i == 20 { 0 } else { get_u32(block, i) };
+        let v = if i == field { 0 } else { get_u32(block, i) };
         sum = sum.wrapping_add(v);
     }
     sum.wrapping_neg()
@@ -453,8 +461,12 @@ impl Volume {
             let v = get_u32(b, long) & !(1 << bit);
             put_u32(b, long, v);
         }
-        let ck = normal_checksum(b);
-        put_u32(b, 20, ck);
+        // The bitmap block is the one exception to the usual layout: its
+        // checksum sits at offset 0 and the map runs from 4. Writing it at 20 —
+        // where every other block type keeps it — silently overwrites the map
+        // words covering blocks 130..161 (BUG-004).
+        let ck = normal_checksum_at(b, 0);
+        put_u32(b, 0, ck);
     }
 }
 

@@ -31,6 +31,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com). Reference F-, D-,
 - `Geometry::reserved()`, `Geometry::FLOPPY_RESERVED`, and `GeometryError::ReservedExceedsVolume`.
 
 ### Fixed
+- **BUG-004 (medium)** — the fixture generator wrote the bitmap checksum at offset 20, where every *other* block type keeps it, overwriting the map words covering blocks 130–161. Bitmap blocks are the one exception: checksum at 0, map from 4. It hid because the normal checksum makes the whole block sum to zero, so validation passes wherever the field sits; only the layout differs. Surfaced by fixtures reporting 27 orphaned blocks where real disks reported none — D-010's two mechanisms catching the *generator* rather than the parser, which is the direction I had not anticipated.
 - **BUG-003 (high)** — `read_file` reserved `Vec::with_capacity(byte_size)` from a `u32` read straight off the disk, so a crafted header made ADE attempt a 4 GB allocation on an 880 KB floppy before reading anything. AV-005 in one line, on the plain ADF path rather than in decompression, and invisible to 900,000 fuzz cases because the harness bounds output and a successful reservation produces none. The reservation is now clamped to the volume's size.
 - **`ade ls --format=json … | head` no longer panics.** `println!` panics on a closed pipe, which for a tool built to be piped is unacceptable. All output now goes through an `emit` helper treating a closed pipe as the ordinary end of a command — `SIGPIPE` cannot be restored directly because that needs `unsafe`, which the workspace forbids.
 - **The oracle test can no longer take down the host.** Its first run allocated 29 GB *inside `unadf`* on `Bomb Busters_Disk1.adf` and the kernel OOM killer terminated the session. Every invocation now runs under `ulimit -v` and `timeout`, applied via `sh` because `Command::pre_exec` needs `unsafe`, which the workspace forbids — the D-001 posture doing its job in a place I did not expect it.
@@ -81,6 +82,13 @@ Format follows [Keep a Changelog](https://keepachangelog.com). Reference F-, D-,
 
 - **IMP-003 applied** — `walk` returns a `Walk` carrying `hit_limit` and stops at three structural bounds independent of the visited set: entry count, pending directories, and **depth**. Depth was the one that mattered: bounding the count is not enough, because each path is built from its parent's, so a cycle grows the *strings* without bound while the count stays inside its cap.
 - Verified by mutation: removing the visited set now yields a clean test failure in one second, naming the seed. The same mutation previously allocated 28.8 GB and the kernel killed the session.
+
+- **`ade check` — the health report (F-010).** Gathers everything knowable about an image's condition in one pass and ranks it by severity: `info` for the cosmetic, `warning` for the odd, `error` for what would lose data. Findings carry stable codes; text and JSON output both available.
+- **Bitmap cross-check (AV-003 detection).** `ade-filesystem::bitmap` reads the map — following the rootblock's 25 pointers and the `bm_ext` chain with a visited set, since extension blocks carry no checksum — and the health report compares it against the blocks the directory tree actually reaches. Two directions, two severities: *referenced but marked free* is an error, because the next write destroys live data; *marked used but unreachable* is a warning. Found on a real disk: block 25 of `Rolling Thunder.adf` is a live `T_DATA` block the bitmap says is free.
+- **Cross-linked block detection** — a block reachable from two files, which writing either would corrupt.
+- **`Volume::file_blocks`** — every block a file occupies, for bitmap cross-checking now and salvage later (F-012).
+- **`Volume::geometry`** accessor; `checksum::normal_at` and `checksum::sums_to_zero`.
+- **Exit code 5** for `check`: something would lose data. Distinct from 1 because "this disk is odd" and "do not write to this disk" are the two answers a batch run most needs separated.
 
 ### Changed
 - **SPEC §Corpus observations** — new section recording a survey of 4288 TOSEC Amiga ADF images, explicitly labelled measurement rather than specification. Magic distribution, the 300 non-`DOS` images across 144 distinct bootloaders, bootblock-checksum and rootblock validity rates, and the non-canonical size distribution.

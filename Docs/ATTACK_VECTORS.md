@@ -46,7 +46,12 @@ Severity: Critical (must hold) | Major (regression on release blocks) | Minor (t
 ### AV-003 Corrupt bitmap-valid flag
 **Severity:** Major
 **Description.** A cleared or corrupt bitmap-valid flag, trusted blindly, leads to mis-allocation on any write path.
-**Detection.** Not implemented (would require treating the flag as advisory and offering a defensive bitmap rebuild, verified against a tampered-bitmap fixture).
+**Detection.** **Implemented 2026-08-24** (F-010). ADE does not ask the flag whether the bitmap is trustworthy — it reads the bitmap and checks it against the blocks the directory tree actually reaches, in both directions:
+
+- *referenced but marked free* — live file data the filesystem believes is available. Rated **error**: the next write destroys it. Found on real disks, e.g. block 25 of `Rolling Thunder.adf`, a genuine `T_DATA` block owned by file header 910.
+- *marked used but unreachable* — lost space, or deleted files whose blocks were never freed. Rated **warning**.
+
+The flag itself is reported as an observation. Over a 776-disk sample: 76 had a stale flag, 65 had orphaned blocks (15,863 in total), and 2 had live data marked free. Standalone bitmap *rebuild* remains a Phase 2 deliverable; detection no longer is.
 **Related decisions.** D-004, D-006. **Related features.** F-010. **Related constraints.** SPEC §Bitmap.
 **History.** Identified 2026-08-21 during initial scaffolding. Corroborated 2026-08-22 by the Linux AFFS driver documentation, which warns the flag "may not be accurate when the system crashes while an affs partition is mounted" — so this is a routine real-world condition, not only an attack.
 

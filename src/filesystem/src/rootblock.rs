@@ -40,8 +40,12 @@ pub struct Rootblock {
     pub checksum_valid: bool,
     /// The `bm_flag` field as stored.
     pub bitmap_flag: u32,
-    /// First bitmap block pointer.
+    /// First bitmap block pointer, kept for compatibility with the common case.
     pub bitmap_block: u32,
+    /// All 25 bitmap pointers stored directly in the rootblock.
+    pub bitmap_pages: Vec<u32>,
+    /// First bitmap *extension* block, for volumes needing more than 25.
+    pub bitmap_extension: u32,
     /// Volume name, as bytes — Latin-1 on the Amiga, not UTF-8.
     pub name: Vec<u8>,
     /// Stored name length, which can disagree with what is readable.
@@ -94,6 +98,10 @@ impl Rootblock {
             checksum_valid: checksum::normal_valid(block),
             bitmap_flag: u32_at(block, end(200))?,
             bitmap_block: u32_at(block, end(196))?,
+            bitmap_pages: (0..crate::bitmap::ROOT_BITMAP_POINTERS)
+                .map(|i| u32_at(block, end(196).saturating_add(i.saturating_mul(4))).unwrap_or(0))
+                .collect(),
+            bitmap_extension: u32_at(block, end(96))?,
             name,
             declared_name_len,
             root_altered: Datestamp::new(

@@ -56,7 +56,7 @@ Neither run is the F-001 bar, which requires a fuzz corpus rather than well-form
 ## Phase 2 — Filesystem breadth
 **Goal:** Cover the full non-flux filesystem surface, including hard-disk images, plus forensic recovery.
 **Status:** Not started
-**Features delivered:** F-009 (initial), F-010, F-012, F-017, F-018
+**Features delivered:** F-009 (initial), F-010 *(largely delivered early, 2026-08-24)*, F-012, F-017, F-018
 **Deliverables:**
 - [ ] HD (1.76 MB) and 5.25" DD geometry; all dostypes (OFS/FFS × INTL × dircache) and LNFS long names.
 - [ ] HDF + RDB multi-partition images; configurable block sizes (C-002, C-005).

@@ -41,7 +41,7 @@ use std::{
     process::ExitCode,
 };
 
-use ade_core::{Image, Inspection, entry_to_json, inspect_path};
+use ade_core::{Health, Image, Inspection, Severity, entry_to_json, examine, inspect_path};
 
 /// No faults found.
 const EXIT_CLEAN: u8 = 0;
@@ -53,6 +53,11 @@ const EXIT_USAGE: u8 = 2;
 const EXIT_UNREADABLE: u8 = 3;
 /// The image was read, but holds no AmigaDOS volume.
 const EXIT_NO_VOLUME: u8 = 4;
+/// `check` found something that would lose or corrupt data.
+///
+/// Distinct from 1 because the difference between "this disk is odd" and "do
+/// not write to this disk" is the one a batch run most needs to act on.
+const EXIT_DATA_AT_RISK: u8 = 5;
 
 /// Write one line to stdout, reporting whether the stream is still open.
 ///
@@ -135,6 +140,7 @@ fn main() -> ExitCode {
 
     match (args.command.as_str(), args.positional.len()) {
         ("info", 1) => info(Path::new(p(0)), args.format),
+        ("check", 1) => check(Path::new(p(0)), args.format),
         ("ls", 1) => list(Path::new(p(0)), None, args.format),
         ("ls", 2) => list(Path::new(p(0)), Some(p(1)), args.format),
         ("extract", 2) => extract(Path::new(p(0)), p(1), None),
@@ -159,6 +165,7 @@ fn usage() {
     println!();
     println!("USAGE:");
     println!("    ade info <image>                   inspect a disk image");
+    println!("    ade check <image>                  full health report (F-010)");
     println!("    ade ls <image> [path]              list a directory");
     println!("    ade extract <image> <path> [dest]  extract a file");
     println!("    ade --version");
@@ -169,6 +176,8 @@ fn usage() {
     println!();
     println!("EXIT CODES:");
     println!("    0  clean   1  faults   2  usage   3  unreadable   4  no volume");
+    println!();
+    println!("`check` exits 1 on any warning, and 5 when an error would lose data.");
 }
 
 fn info(path: &Path, format: Format) -> ExitCode {
@@ -454,4 +463,106 @@ fn extract(path: &Path, inner: &str, dest: Option<PathBuf>) -> ExitCode {
         let _ = stdout.flush();
     }
     ExitCode::from(if incomplete { EXIT_FAULTS } else { EXIT_CLEAN })
+}
+
+/// Report an image's condition (F-010).
+fn check(path: &Path, format: Format) -> ExitCode {
+    let bytes = match std::fs::read(path) {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("ade: {}: {e}", path.display());
+            return ExitCode::from(EXIT_UNREADABLE);
+        }
+    };
+    let health = examine(bytes);
+    let mut out = std::io::stdout().lock();
+    match format {
+        Format::Json => {
+            emit(&mut out, &health.to_json().to_json());
+        }
+        Format::Text => report_health(&mut out, path, &health),
+    }
+    let _ = out.flush();
+
+    ExitCode::from(match health.worst() {
+        Some(Severity::Error) => EXIT_DATA_AT_RISK,
+        Some(Severity::Warning) => EXIT_FAULTS,
+        _ if health.inspection.volume.is_none() => EXIT_NO_VOLUME,
+        _ => EXIT_CLEAN,
+    })
+}
+
+fn report_health(out: &mut impl Write, path: &Path, h: &Health) {
+    let mut lines = vec![
+        format!("{}", path.display()),
+        format!("  container   {}", h.inspection.detection.kind),
+    ];
+    if let Some(v) = &h.inspection.volume {
+        lines.push(format!(
+            "  volume      {:?}  (rootblock {})",
+            v.rootblock.name_lossy(),
+            v.rootblock_at
+        ));
+        lines.push(format!(
+            "  contents    {} files, {} directories, {} bytes recovered",
+            h.files, h.directories, h.bytes_recovered
+        ));
+    } else {
+        lines.push("  volume      none".to_owned());
+    }
+
+    if let Some(b) = &h.bitmap {
+        lines.push("  bitmap".to_owned());
+        lines.push(format!(
+            "    flag        {}",
+            if b.flagged_valid {
+                "valid"
+            } else {
+                "CLEAR — may be stale"
+            }
+        ));
+        let percent = (b.marked_used as u64)
+            .saturating_mul(100)
+            .checked_div(u64::from(b.covered))
+            .unwrap_or(0);
+        lines.push(format!(
+            "    usage       {} blocks marked used, {} reachable, {percent}% full",
+            b.marked_used, b.actually_used
+        ));
+        if b.orphaned > 0 {
+            lines.push(format!("    orphaned    {} blocks", b.orphaned));
+        }
+        if b.referenced_but_free > 0 {
+            lines.push(format!(
+                "    AT RISK     {} blocks in use but marked free",
+                b.referenced_but_free
+            ));
+        }
+    }
+
+    let (info, warning, error) = h.counts();
+    if h.findings.is_empty() {
+        lines.push("  findings    none".to_owned());
+    } else {
+        lines.push(format!(
+            "  findings    {error} error, {warning} warning, {info} info"
+        ));
+        for f in &h.findings {
+            let mark = match f.severity {
+                Severity::Error => "!!",
+                Severity::Warning => " !",
+                Severity::Info => "  ",
+            };
+            let at = f
+                .block
+                .map_or_else(String::new, |b| format!(" [block {b}]"));
+            lines.push(format!("    {mark} [{}] {}{at}", f.code, f.message));
+        }
+    }
+
+    for line in &lines {
+        if !emit(out, line) {
+            return;
+        }
+    }
 }

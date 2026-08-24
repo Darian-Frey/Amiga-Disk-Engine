@@ -21,6 +21,12 @@ use ade_endian::u32_at;
 pub const BOOT_OFFSET: usize = 4;
 /// Offset of the checksum field in every other block type.
 pub const NORMAL_OFFSET: usize = 20;
+/// Offset of the checksum field in a **bitmap** block, which is the exception.
+///
+/// Bitmap blocks put their checksum at 0 and the map from 4 (ADF FAQ §4.3),
+/// where every other block type reserves 0 for its primary type and puts the
+/// checksum at 20.
+pub const BITMAP_OFFSET: usize = 0;
 
 /// Sum every big-endian long with the checksum field taken as zero, then
 /// negate. Used by every block type except the bootblock.
@@ -28,7 +34,31 @@ pub const NORMAL_OFFSET: usize = 20;
 /// Returns `None` if `block` is not a whole number of longs.
 #[must_use]
 pub fn normal(block: &[u8]) -> Option<u32> {
-    fold(block, NORMAL_OFFSET, u32::wrapping_add).map(u32::wrapping_neg)
+    normal_at(block, NORMAL_OFFSET)
+}
+
+/// The normal checksum for a block whose field is not at the usual offset.
+///
+/// Bitmap blocks are the only such case; see [`BITMAP_OFFSET`].
+#[must_use]
+pub fn normal_at(block: &[u8], field: usize) -> Option<u32> {
+    fold(block, field, u32::wrapping_add).map(u32::wrapping_neg)
+}
+
+/// Whether a block satisfies the checksum invariant, wherever its field sits.
+///
+/// The normal checksum is defined so that **the whole block sums to zero**:
+/// the stored value is the negation of everything else. Validation is therefore
+/// insensitive to *which* long holds it — checking against offset 20 succeeds
+/// on a bitmap block whose checksum is at 0, which is why the mismatch went
+/// unnoticed on 317 real disks.
+///
+/// The offset still matters for *writing*, and for reading the map: a bitmap
+/// block's offset 20 is map data covering blocks 130–161, and treating it as a
+/// checksum field loses them.
+#[must_use]
+pub fn sums_to_zero(block: &[u8]) -> bool {
+    fold(block, usize::MAX, u32::wrapping_add) == Some(0)
 }
 
 /// Add every big-endian long with carry, then take the one's complement.

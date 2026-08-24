@@ -5,9 +5,11 @@
 //! crate that depends on every layer, and the only place cross-layer
 //! coordination is permitted (D-003).
 
+pub mod health;
 pub mod inspect;
 pub mod json;
 
+pub use health::{BitmapHealth, Finding, Health, Severity, examine};
 pub use inspect::{
     Fault, Image, Inspection, InspectionError, VolumeInfo, entry_to_json, inspect_bytes,
     inspect_path,

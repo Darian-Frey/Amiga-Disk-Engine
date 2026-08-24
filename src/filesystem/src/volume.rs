@@ -174,6 +174,12 @@ impl<'a> Volume<'a> {
         self.root
     }
 
+    /// The geometry this volume was mounted with.
+    #[must_use]
+    pub const fn geometry(&self) -> &Geometry {
+        &self.geometry
+    }
+
     /// Which filesystem this volume uses.
     ///
     /// Falls back to FFS when there is no dostype: an FFS reader treats the
@@ -542,6 +548,63 @@ impl<'a> Volume<'a> {
             faults,
             exceeded_volume,
         })
+    }
+
+    /// Every block a file occupies: its header, its extension blocks, and its
+    /// data blocks.
+    ///
+    /// Needed wherever the question is "what does this file *use*" rather than
+    /// "what does it contain" — bitmap cross-checking, cross-link detection,
+    /// and eventually salvage (F-012).
+    ///
+    /// Bounded the same way [`Self::read_file`] is: a visited set on the
+    /// extension chain, plus a hard cap at the volume's block count (IMP-003).
+    ///
+    /// # Errors
+    /// A read error on the file header.
+    pub fn file_blocks(&self, entry: &Entry) -> Result<Vec<u32>, FsError> {
+        let cap = usize::try_from(self.geometry.total_blocks()).unwrap_or(usize::MAX);
+        let ht = self.hash_table_size() as usize;
+        let mut blocks = vec![entry.block];
+        let mut header_block = entry.block;
+        let mut header_raw = self.read_block(header_block)?;
+        let mut seen: HashSet<u32> = HashSet::from([header_block]);
+
+        loop {
+            let high_seq = ade_endian::u32_at(&header_raw, 8).unwrap_or(0) as usize;
+            for i in 0..high_seq.min(ht) {
+                if blocks.len() >= cap {
+                    return Ok(blocks);
+                }
+                let index = ht.saturating_sub(1).saturating_sub(i);
+                let offset = 24usize.saturating_add(index.saturating_mul(4));
+                let Ok(ptr) = ade_endian::u32_at(&header_raw, offset) else {
+                    continue;
+                };
+                if ptr != 0 && self.geometry.validate(BlockIndex(u64::from(ptr))).is_ok() {
+                    blocks.push(ptr);
+                }
+            }
+            let next =
+                ade_endian::u32_at(&header_raw, header_raw.len().saturating_sub(8)).unwrap_or(0);
+            if next == 0 || !seen.insert(next) || blocks.len() >= cap {
+                break;
+            }
+            if self.geometry.validate(BlockIndex(u64::from(next))).is_err() {
+                break;
+            }
+            let Ok(raw) = self.read_block(next) else {
+                break;
+            };
+            if ade_endian::u32_at(&raw, 0).unwrap_or(0) != T_LIST {
+                break;
+            }
+            blocks.push(next);
+            header_raw = raw;
+            header_block = next;
+        }
+        let _ = header_block;
+        Ok(blocks)
     }
 
     /// Walk the whole tree from `start`, depth first.
