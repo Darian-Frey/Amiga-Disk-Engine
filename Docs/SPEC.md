@@ -498,6 +498,14 @@ A hardfile is a raw volume dump with no RDB — bootblock, rootblock, bitmap, ex
 
 So **HDF covers two distinct layouts**: RDB-partitioned whole-disk images, and unpartitioned single-volume dumps. The container layer must distinguish them by looking for `RDSK` within the first 16 blocks and falling back to a bootblock at block 0.
 
+### A raw volume has no geometry
+
+An unpartitioned hardfile records no cylinders, heads or sectors anywhere. Those are a convention of whatever created it, not a property of the bytes, and nothing above the block layer depends on them: what a reader needs is the **block count**, because that is what fixes the rootblock's position (C-007).
+
+ADFlib takes exactly this view, reporting an 8 MB hardfile as "Cylinders = 16384, Heads = 1, Sectors = 1" — a shape invented to reach the right total. ADE does the same, and the two agree on the resulting volume.
+
+Large volumes also need **more than one bitmap block**: a 512-byte bitmap block covers `(512/4 - 1) × 32 = 4064` blocks, so an 8 MB hardfile needs five, their pointers filling the rootblock's `bm_pages` and, past 25, a `bm_ext` chain.
+
 ## Containers & compression
 
 | Format | Magic | Offset | Verified |

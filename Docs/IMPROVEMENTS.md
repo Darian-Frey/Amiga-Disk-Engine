@@ -11,7 +11,29 @@ Effort vocabulary: trivial | small | medium | large.
 
 ## Suggested
 
-_None._
+### IMP-004 The fixture generator cannot build file extension blocks
+**Status:** suggested
+**Effort:** small
+**Found:** 2026-08-24, writing a hardfile test whose file needed 82 data blocks.
+**Where:** [tools/fixtures/src/lib.rs](../tools/fixtures/src/lib.rs), `Volume::add_file`.
+
+**What works today.** Files up to 72 data blocks — about 35 KB on OFS, 36 KB on FFS — which covers every fixture written so far. Beyond that the generator asserts and says so, loudly:
+
+```
+fixture files must fit one header block; extension blocks are not built yet
+```
+
+**Why it could be better.** A larger file stores the overflow pointers in *file extension blocks*, chained from the header's `extension` field (SPEC §Files). ADE **reads** that chain — it is how `taterm1` on the Amigan Radio disk was recovered, following an extension block to seven more data pointers — but nothing can **generate** one.
+
+So the extension-chain path in `read_file` is exercised only by real corpus disks. It has no fixture, which means no test on a fresh clone and, more importantly, **no oracle**: D-010's amendment turns on ADFlib being able to read what we generate, and we cannot generate this at all. The visited set guarding that chain against loops (AV-001) is likewise untested by fixture.
+
+It also caps what can be tested on hardfiles, where multi-megabyte files are the normal case rather than an edge one.
+
+**Suggested fix.** Allocate extension blocks in `add_file` when the data-block count exceeds the hash-table size: `T_LIST` primary type, `parent` naming the file header, the reversed pointer table as in the header, and `extension` chaining onward. Then generate a file spanning several and cross-check it against `unadf`.
+
+**Trade-offs.** More generator surface to keep correct, and the generator is already the thing BUG-004 and BUG-006 were found in — each new structure is somewhere else a fixture can be quietly wrong. Against that: it is the only way to bring the extension path under the oracle, and a reader path validated by neither fixture nor independent implementation is exactly what D-010 exists to prevent.
+
+**Related.** D-010, AV-001, SPEC §Files.
 
 ## Applied
 

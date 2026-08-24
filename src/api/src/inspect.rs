@@ -108,7 +108,7 @@ pub fn inspect_bytes(bytes: Vec<u8>) -> Inspection {
 
     let bootblock = Bootblock::parse(&bytes).ok();
 
-    let Kind::Adf { cylinders, sectors } = detection.kind else {
+    let Some(geometry) = geometry_for(detection.kind, size) else {
         // Every other container is a later phase. Report what was identified
         // and stop, rather than guessing at a geometry.
         let reason = match detection.kind {
@@ -125,7 +125,7 @@ pub fn inspect_bytes(bytes: Vec<u8>) -> Inspection {
         };
     };
 
-    let geometry = match Geometry::new(cylinders, 2, sectors, 512, Geometry::FLOPPY_RESERVED) {
+    let geometry = match geometry {
         Ok(g) => g,
         Err(e) => {
             return Inspection {
@@ -414,6 +414,33 @@ pub fn entry_to_json(entry: &Entry, path: &[Vec<u8>]) -> Value {
     ])
 }
 
+/// The geometry to mount a detected container with, if ADE can mount it.
+///
+/// A raw volume — a hardfile — carries no geometry of its own. Heads and
+/// sectors are a convention of whatever created it, not a property of the
+/// bytes, and nothing above the block layer depends on them: what matters is
+/// the block count, which fixes where the rootblock sits (C-007). ADFlib takes
+/// the same view, reporting an 8 MB hardfile as "Cylinders = 16384, Heads = 1,
+/// Sectors = 1" — a shape it invented to reach the right total.
+fn geometry_for(kind: Kind, size: u64) -> Option<Result<Geometry, GeometryError>> {
+    match kind {
+        Kind::Adf { cylinders, sectors } => Some(Geometry::new(
+            cylinders,
+            2,
+            sectors,
+            512,
+            Geometry::FLOPPY_RESERVED,
+        )),
+        Kind::Hardfile => {
+            let blocks = u32::try_from(size / 512).ok()?;
+            // Below a floppy's worth there is nothing worth mounting, and the
+            // rootblock arithmetic stops being meaningful.
+            (blocks >= 64).then(|| Geometry::new(blocks, 1, 1, 512, Geometry::FLOPPY_RESERVED))
+        }
+        _ => None,
+    }
+}
+
 /// An image opened for browsing.
 ///
 /// Owns the bytes so a [`Volume`] can borrow from it; the two-step open keeps
@@ -439,10 +466,8 @@ impl Image {
     pub fn from_bytes(bytes: Vec<u8>) -> Result<Self, InspectionError> {
         let size = bytes.len() as u64;
         let head = bytes.get(..HEAD_BYTES.min(bytes.len())).unwrap_or(&[]);
-        let Kind::Adf { cylinders, sectors } = sniff(head, size).kind else {
-            return Err(InspectionError::Geometry(GeometryError::ZeroDimension));
-        };
-        let geometry = Geometry::new(cylinders, 2, sectors, 512, Geometry::FLOPPY_RESERVED)
+        let geometry = geometry_for(sniff(head, size).kind, size)
+            .ok_or(InspectionError::Geometry(GeometryError::ZeroDimension))?
             .map_err(InspectionError::Geometry)?;
         let raw = RawImage::new(bytes, geometry)
             .map_err(|_| InspectionError::Geometry(GeometryError::ReservedExceedsVolume))?;

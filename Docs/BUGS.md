@@ -13,6 +13,26 @@ _None._
 
 ## Fixed
 
+### BUG-006 The fixture generator panicked on any volume larger than ~2 MB
+**Severity:** medium
+**Status:** fixed
+**Found:** 2026-08-24, on the first attempt to generate a hardfile for Phase 2's RDB work.
+**Where:** [tools/fixtures/src/lib.rs](../tools/fixtures/src/lib.rs), `Volume::write_bitmap`.
+
+**What was wrong.** The generator wrote exactly one bitmap block. One 512-byte bitmap block covers `(512/4 - 1) × 32 = 4064` blocks, so any volume above that — anything past about 2 MB — overran it:
+
+```
+index out of bounds: the len is 512 but the index is 1024
+```
+
+An 8 MB hardfile, the smallest thing worth testing RDB against, needs five bitmap blocks. A real volume of that size stores their pointers in the rootblock's 25 `bm_pages` slots, and past 25 of them in a `bm_ext` chain.
+
+**Why it went unnoticed.** Every fixture until now was a floppy: 1760 blocks for DD, 3520 for HD, both comfortably inside one bitmap block. The limit only appears when a volume needs a second one, and nothing before Phase 2 asked for a volume that large.
+
+Loud rather than silent, at least — a panic, not a wrong answer. But it made the whole hardfile and RDB branch of Phase 2 unreachable.
+
+**Fixed 2026-08-24.** `write_bitmap` allocates as many bitmap blocks as the geometry needs, fills the rootblock's `bm_pages`, and chains beyond 25 through `bm_ext` — which `Bitmap::read` already followed, so the reader was ahead of the generator here.
+
 ### BUG-005 Reading a hard link returned an empty file, silently
 **Severity:** high
 **Status:** fixed

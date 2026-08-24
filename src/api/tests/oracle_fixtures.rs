@@ -102,6 +102,15 @@ fn adflib_reads_our_generated_volumes() {
             v.add_dir("Tools");
             ("hd", v.build())
         }))
+        .chain(std::iter::once({
+            // An 8 MB hardfile: a raw volume with no floppy geometry, and five
+            // bitmap blocks rather than one (BUG-006).
+            let mut v = Fixture::new(512, 1, 32, 1).named("Hardfile");
+            v.add_file("readme", b"a hardfile, not a floppy");
+            v.add_file("\u{e4}pfel", b"umlaut");
+            v.add_dir("Tools");
+            ("hardfile", v.build())
+        }))
         .collect();
 
     let mut checked = 0usize;
@@ -148,7 +157,7 @@ fn adflib_reads_our_generated_volumes() {
         checked += 1;
     }
     eprintln!("ADFlib agreed with ADE on {checked} generated volumes");
-    assert_eq!(checked, 9);
+    assert_eq!(checked, 10);
 }
 
 #[test]

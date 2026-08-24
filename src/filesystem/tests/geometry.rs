@@ -117,3 +117,79 @@ fn the_rootblock_moves_with_the_geometry() {
         assert_eq!(g.root_block().0, want, "{cyl}x{heads}x{sectors}");
     }
 }
+
+#[test]
+fn a_hardfile_mounts_and_needs_several_bitmap_blocks() {
+    // 8 MB in the UAE shape: 1 head, 32 sectors. One 512-byte bitmap block
+    // covers 4064 blocks, so this needs five — the case that used to panic the
+    // fixture generator (BUG-006).
+    let mut f = Fixture::new(512, 1, 32, 1).named("Hardfile");
+    f.add_file("readme", b"a hardfile, not a floppy");
+    f.add_dir("Tools");
+    let img = f.build();
+    assert_eq!(img.len(), 8_388_608);
+
+    // A raw volume carries no geometry; only the block count matters.
+    let geometry = Geometry::new(16_384, 1, 1, 512, Geometry::FLOPPY_RESERVED).unwrap();
+    let m = Mem {
+        bytes: img,
+        geometry,
+    };
+    let v = Volume::mount(&m).unwrap();
+    assert_eq!(v.root(), 8192, "(2 + 16383) / 2");
+    assert_eq!(v.rootblock().name_lossy(), "Hardfile");
+    assert_eq!(v.walk(v.root()).unwrap().entries.len(), 2);
+
+    let bm = ade_filesystem::bitmap::Bitmap::read(&m, v.geometry(), v.rootblock()).unwrap();
+    assert_eq!(
+        bm.blocks.len(),
+        5,
+        "five bitmap blocks for 16382 covered blocks"
+    );
+    assert!(bm.bad_checksums.is_empty());
+    assert!(!bm.incomplete, "the map must cover the whole volume");
+}
+
+#[test]
+fn a_hardfile_bitmap_survives_a_rebuild() {
+    // Multi-block bitmaps are where the per-block windowing could go wrong.
+    use std::collections::HashSet;
+    let mut f = Fixture::new(512, 1, 32, 0).named("BigOfs");
+    // Under 72 blocks: the fixture generator cannot build file extension
+    // blocks yet (IMP-004), and the point here is the multi-block *bitmap*.
+    f.add_file("data", &vec![5u8; 30_000]);
+    let geometry = Geometry::new(16_384, 1, 1, 512, Geometry::FLOPPY_RESERVED).unwrap();
+    let m = Mem {
+        bytes: f.build(),
+        geometry,
+    };
+    let v = Volume::mount(&m).unwrap();
+    let bm = ade_filesystem::bitmap::Bitmap::read(&m, v.geometry(), v.rootblock()).unwrap();
+
+    let mut reach: HashSet<u32> = HashSet::from([v.root()]);
+    reach.extend(bm.blocks.iter().copied());
+    for (_, e) in v.walk(v.root()).unwrap().entries {
+        reach.insert(e.block);
+        if let Ok(b) = v.file_blocks(&e) {
+            reach.extend(b);
+        }
+    }
+    assert!(bm.referenced_but_free(&reach).is_empty());
+    assert!(bm.orphaned(&reach).is_empty());
+
+    let rebuilt = ade_filesystem::bitmap::Bitmap::rebuild(&reach, v.geometry(), &bm.blocks);
+    assert_eq!(rebuilt.len(), 5);
+    let mut bytes = m.bytes.clone();
+    for (block, data) in &rebuilt {
+        let o = *block as usize * 512;
+        bytes[o..o + 512].copy_from_slice(data);
+    }
+    let m2 = Mem { bytes, geometry };
+    let v2 = Volume::mount(&m2).unwrap();
+    let back = ade_filesystem::bitmap::Bitmap::read(&m2, v2.geometry(), v2.rootblock()).unwrap();
+    assert_eq!(
+        back.allocated(),
+        &reach,
+        "a five-block bitmap must round-trip too"
+    );
+}

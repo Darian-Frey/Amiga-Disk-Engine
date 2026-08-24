@@ -195,7 +195,9 @@ pub struct Volume {
     total_blocks: u32,
     dostype: u8,
     root: u32,
-    bitmap_block: u32,
+    /// Every block the bitmap occupies. A 512-byte bitmap block covers 4064
+    /// blocks, so anything past about 2 MB needs more than one (BUG-006).
+    bitmap_blocks: Vec<u32>,
     next_free: u32,
     name: String,
 }
@@ -231,12 +233,19 @@ impl Volume {
         let total_blocks = cylinders * heads * sectors;
         // rootKey = (numReserved + highKey) / 2, per ADF FAQ §4.2 (C-007).
         let root = (RESERVED + total_blocks - 1) / 2;
+        // One bitmap block covers (BSIZE/4 - 1) * 32 bits, and the map starts
+        // at the first non-reserved block.
+        let bits_per_block = ((BSIZE / 4 - 1) * 32) as u32;
+        let covered = total_blocks.saturating_sub(RESERVED);
+        let needed = covered.div_ceil(bits_per_block).max(1);
+        // They sit immediately after the rootblock, as AmigaDOS lays them out.
+        let bitmap_blocks: Vec<u32> = (0..needed).map(|i| root + 1 + i).collect();
         Self {
             blocks: vec![0u8; total_blocks as usize * BSIZE],
             total_blocks,
             dostype,
             root,
-            bitmap_block: root + 1,
+            bitmap_blocks,
             next_free: RESERVED,
             name: "Fixture".to_owned(),
         }
@@ -283,7 +292,7 @@ impl Volume {
             let b = self.next_free;
             assert!(b < self.total_blocks, "fixture volume is full");
             self.next_free += 1;
-            if b != self.root && b != self.bitmap_block {
+            if b != self.root && !self.bitmap_blocks.contains(&b) {
                 return b;
             }
         }
@@ -474,13 +483,22 @@ impl Volume {
 
     fn write_rootblock(&mut self) {
         let root = self.root;
-        let bm = self.bitmap_block;
+        let bitmap_blocks = self.bitmap_blocks.clone();
         let name = self.name.clone();
         let b = self.block_mut(root);
         put_u32(b, 0, T_HEADER);
         put_u32(b, 12, Self::HT_SIZE);
         put_u32(b, BSIZE - 200, 0xFFFF_FFFF); // bm_flag: -1 means valid
-        put_u32(b, BSIZE - 196, bm);
+        // The rootblock holds 25 pointers directly; beyond that they go in a
+        // bm_ext chain, which this generator does not yet emit.
+        assert!(
+            bitmap_blocks.len() <= 25,
+            "volumes needing more than 25 bitmap blocks require a bm_ext chain, \
+             which the fixture generator does not build yet"
+        );
+        for (i, &bm) in bitmap_blocks.iter().enumerate() {
+            put_u32(b, BSIZE - 196 + i * 4, bm);
+        }
         for (field, value) in [(92, 1u32), (88, 0), (84, 0)] {
             put_u32(b, BSIZE - field, value); // r_days / r_mins / r_ticks
         }
@@ -494,26 +512,36 @@ impl Volume {
 
     fn write_bitmap(&mut self) {
         let total = self.total_blocks;
+        let bitmap_blocks = self.bitmap_blocks.clone();
         let used: Vec<u32> = (RESERVED..total)
-            .filter(|&b| b == self.root || b == self.bitmap_block || b < self.next_free)
+            .filter(|&b| b == self.root || bitmap_blocks.contains(&b) || b < self.next_free)
             .collect();
-        let bm = self.bitmap_block;
-        let b = self.block_mut(bm);
-        // A SET bit means FREE, and the map starts at block RESERVED, not 0.
-        b[4..].fill(0xFF);
-        for blk in used {
-            let idx = blk - RESERVED;
-            let long = 4 + (idx / 32) as usize * 4;
-            let bit = idx % 32;
-            let v = get_u32(b, long) & !(1 << bit);
-            put_u32(b, long, v);
+        let bits_per_block = ((BSIZE / 4 - 1) * 32) as u32;
+
+        for (i, &bm) in bitmap_blocks.iter().enumerate() {
+            let base = (i as u32).saturating_mul(bits_per_block);
+            let b = self.block_mut(bm);
+            // A SET bit means FREE, and the map starts at block RESERVED, not 0.
+            b[4..].fill(0xFF);
+            for &blk in &used {
+                let idx = blk - RESERVED;
+                // Each block covers its own window of the map.
+                if idx < base || idx >= base + bits_per_block {
+                    continue;
+                }
+                let local = idx - base;
+                let long = 4 + (local / 32) as usize * 4;
+                let bit = local % 32;
+                let v = get_u32(b, long) & !(1 << bit);
+                put_u32(b, long, v);
+            }
+            // The bitmap block is the one exception to the usual layout: its
+            // checksum sits at offset 0 and the map runs from 4. Writing it at
+            // 20 — where every other block type keeps it — silently overwrites
+            // the map words covering blocks 130..161 (BUG-004).
+            let ck = normal_checksum_at(b, 0);
+            put_u32(b, 0, ck);
         }
-        // The bitmap block is the one exception to the usual layout: its
-        // checksum sits at offset 0 and the map runs from 4. Writing it at 20 —
-        // where every other block type keeps it — silently overwrites the map
-        // words covering blocks 130..161 (BUG-004).
-        let ck = normal_checksum_at(b, 0);
-        put_u32(b, 0, ck);
     }
 }
 
