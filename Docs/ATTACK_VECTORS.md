@@ -51,7 +51,11 @@ Severity: Critical (must hold) | Major (regression on release blocks) | Minor (t
 - *referenced but marked free* — live file data the filesystem believes is available. Rated **error**: the next write destroys it. Found on real disks, e.g. block 25 of `Rolling Thunder.adf`, a genuine `T_DATA` block owned by file header 910.
 - *marked used but unreachable* — lost space, or deleted files whose blocks were never freed. Rated **warning**.
 
-The flag itself is reported as an observation. Over a 776-disk sample: 76 had a stale flag, 65 had orphaned blocks (15,863 in total), and 2 had live data marked free. Standalone bitmap *rebuild* remains a Phase 2 deliverable; detection no longer is.
+The flag itself is reported as an observation. Over a 776-disk sample: 76 had a stale flag, 65 had orphaned blocks (15,863 in total), and 2 had live data marked free.
+
+**Rebuild implemented 2026-08-24.** `Bitmap::rebuild` computes the map the volume should have and the report names the offending blocks — `Rolling Thunder.adf` reads "1 blocks are in use by files but marked free (25)", block 25 being a `T_DATA` block owned by file header 910. Naming them is the difference between knowing something is wrong and knowing what to repair.
+
+The rebuild is **computed, never applied**. D-004 defers write paths to Phase 4 and is marked never-reversible within v1; AV-003 asks for a rebuild to be *offered*, which this is. The separation is not bureaucratic: a bitmap rebuilt from a misread tree and written to the only copy of a disk destroys exactly what the tool exists to preserve. Correctness is still provable without writing — build the map, read it back, and check it describes the set it was built from.
 **Related decisions.** D-004, D-006. **Related features.** F-010. **Related constraints.** SPEC §Bitmap.
 **History.** Identified 2026-08-21 during initial scaffolding. Corroborated 2026-08-22 by the Linux AFFS driver documentation, which warns the flag "may not be accurate when the system crashes while an affs partition is mounted" — so this is a routine real-world condition, not only an attack.
 

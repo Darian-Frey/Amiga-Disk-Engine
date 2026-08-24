@@ -94,6 +94,11 @@ impl Finding {
 pub struct BitmapHealth {
     /// Blocks the bitmap marks in use.
     pub marked_used: usize,
+    /// The specific blocks in use by files but marked free. Naming them is the
+    /// difference between "something is wrong" and "here is what to repair".
+    pub at_risk_blocks: Vec<u32>,
+    /// The specific blocks marked in use but unreachable.
+    pub orphaned_blocks: Vec<u32>,
     /// Blocks actually reachable from the directory tree.
     pub actually_used: usize,
     /// Marked in use, but nothing references them. Lost space, or deleted
@@ -418,17 +423,10 @@ fn cross_check_bitmap(
     }
 
     // The two directions are not equally serious.
-    let mut referenced_but_free = 0usize;
-    for &b in &referenced {
-        if !bitmap.is_allocated(b) {
-            referenced_but_free = referenced_but_free.saturating_add(1);
-        }
-    }
-    let orphaned = bitmap
-        .allocated()
-        .iter()
-        .filter(|b| !referenced.contains(b))
-        .count();
+    let at_risk_blocks = bitmap.referenced_but_free(&referenced);
+    let orphaned_blocks = bitmap.orphaned(&referenced);
+    let referenced_but_free = at_risk_blocks.len();
+    let orphaned = orphaned_blocks.len();
 
     if referenced_but_free > 0 {
         // Live data the filesystem believes is free: the next write destroys
@@ -437,8 +435,9 @@ fn cross_check_bitmap(
             "referenced-but-free",
             Severity::Error,
             format!(
-                "{referenced_but_free} blocks are in use by files but marked free — \
-                 writing to this volume would overwrite live data"
+                "{referenced_but_free} blocks are in use by files but marked free \
+                 ({}) — writing to this volume would overwrite live data",
+                summarise(&at_risk_blocks)
             ),
         ));
     }
@@ -447,14 +446,17 @@ fn cross_check_bitmap(
             "orphaned-blocks",
             Severity::Warning,
             format!(
-                "{orphaned} blocks are marked in use but unreachable — lost space, \
-                 or deleted files whose blocks were never freed"
+                "{orphaned} blocks are marked in use but unreachable ({}) — lost \
+                 space, or deleted files whose blocks were never freed",
+                summarise(&orphaned_blocks)
             ),
         ));
     }
 
     Some(BitmapHealth {
         marked_used: bitmap.used_count(),
+        at_risk_blocks,
+        orphaned_blocks,
         actually_used: referenced.len(),
         orphaned,
         referenced_but_free,
@@ -499,6 +501,15 @@ impl Health {
                 Value::opt(self.bitmap.as_ref(), |b| {
                     Value::Obj(vec![
                         ("marked_used", Value::Num(b.marked_used as u64)),
+                        (
+                            "at_risk_blocks",
+                            Value::Arr(
+                                b.at_risk_blocks
+                                    .iter()
+                                    .map(|x| Value::Num(u64::from(*x)))
+                                    .collect(),
+                            ),
+                        ),
                         ("actually_used", Value::Num(b.actually_used as u64)),
                         ("orphaned", Value::Num(b.orphaned as u64)),
                         (
@@ -551,5 +562,21 @@ impl Health {
                 ),
             ),
         ])
+    }
+}
+
+/// Render a block list compactly: a health report naming 15,863 blocks
+/// individually is worse than one naming none.
+fn summarise(blocks: &[u32]) -> String {
+    const SHOWN: usize = 6;
+    let head: Vec<String> = blocks.iter().take(SHOWN).map(u32::to_string).collect();
+    if blocks.len() > SHOWN {
+        format!(
+            "{}, and {} more",
+            head.join(", "),
+            blocks.len().saturating_sub(SHOWN)
+        )
+    } else {
+        head.join(", ")
     }
 }

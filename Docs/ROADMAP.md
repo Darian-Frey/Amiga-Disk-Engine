@@ -64,7 +64,8 @@ Neither run is the F-001 bar, which requires a fuzz corpus rather than well-form
 - [ ] Real dircache blocks (`DOS\4`/`\5`) and LNFS long names (`DOS\6`/`\7`). Identification works; the structures do not exist yet.
 - [ ] HDF + RDB multi-partition images; configurable block sizes (C-002, C-005).
 - [x] Links, comments, protection bits, datestamps. Hard links resolve through `real_entry` with a bounds check and a visited set; `ade ls` shows targets; a link to a directory is walked once rather than once per link. Fixed BUG-005 on the way — reading a hard link had silently returned an empty file. **Caveat:** `unadf` omits links from its listings, so this is the one Phase 2 area with neither an oracle nor corpus material.
-- [ ] Undelete/salvage (F-012); standalone bitmap rebuild (AV-003).
+- [x] Standalone bitmap rebuild (AV-003) — `Bitmap::rebuild` computes the map a volume *should* have from the blocks its tree reaches, and the health report names the specific blocks that disagree in each direction. **Computed and offered, never written**: D-004 defers write paths to Phase 4 and is marked never-reversible in v1, and AV-003 asks for a rebuild to be *offered*. Proved correct without touching a disk — build it, read it back, confirm it describes the set it was built from.
+- [ ] Undelete/salvage (F-012). **Blocked on material**: the corpus holds no recoverable deleted entries — zero intact deleted file headers across 90 disks, since mastered game disks have no editing history. Fixture-only, and the oracle cannot help either. Worth deferring until there is something real to recover.
 **Acceptance:** All Phase-2 fixtures mount and enumerate correctly; a deleted-entry fixture is recovered.
 
 ## Phase 3 — Containers & compression

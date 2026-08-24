@@ -102,6 +102,9 @@ Format follows [Keep a Changelog](https://keepachangelog.com). Reference F-, D-,
 - `Entry::next_link`; `FsError::BrokenLink`; `Volume::add_hardlink` in the fixture generator.
 - **SPEC §Link block layout**, and the note that `unadf` omits link entries entirely — so link support is validated against the specification alone, with neither an independent implementation nor any corpus material. The one Phase 2 area where both of D-010's mechanisms come up empty.
 
+- **Bitmap rebuild (AV-003, Phase 2).** `Bitmap::rebuild` computes the allocation map a volume should have from the blocks its tree reaches, returning the corrected block contents in memory. **Nothing is written**: D-004 defers write paths to Phase 4, and AV-003 asks for a rebuild to be offered. Correctness is proved by round-trip — build it, read it back, confirm it describes the set it was built from — plus repair of both damage directions and coverage of HD volumes.
+- `Bitmap::orphaned` and `Bitmap::referenced_but_free` return the offending **block numbers**, and the health report names them: `Rolling Thunder.adf` now reads "1 blocks are in use by files but marked free (25)". Lists are summarised after six entries, since a report naming 1463 blocks individually is no more useful than one naming none.
+
 ### Changed
 - **SPEC §Corpus observations** — new section recording a survey of 4288 TOSEC Amiga ADF images, explicitly labelled measurement rather than specification. Magic distribution, the 300 non-`DOS` images across 144 distinct bootloaders, bootblock-checksum and rootblock validity rates, and the non-canonical size distribution.
 - **SPEC §Extended-ADF** — the `UAE-1ADF` layout, derived from eleven corpus images and verified arithmetically (`12 + tracks × 12 + Σ space` equals file size for all eleven). Track type 0 is standard sector data and 1 is raw MFM; `length` is in **bits**, `space` in bytes. Mixed types within one image are the copy-protection signature.

@@ -144,6 +144,102 @@ impl Bitmap {
         })
     }
 
+    /// Build the bitmap a volume *should* have, from the blocks its tree
+    /// actually reaches.
+    ///
+    /// Returns the corrected contents for each bitmap block, paired with the
+    /// block number it belongs in — **in memory**. Nothing is written.
+    ///
+    /// # Why this stops short of applying
+    ///
+    /// D-004 ships every write path only after its read path is proven, and is
+    /// marked never-reversible within v1. AV-003 asks for a rebuild to be
+    /// *offered*, which is this; putting it back on a disk is a write and waits
+    /// for Phase 4. The separation is not bureaucratic — a bitmap rebuilt from
+    /// a misread tree, written to the only copy of a disk, destroys exactly
+    /// what the tool exists to preserve.
+    ///
+    /// The result is still checkable without writing anything: feed it back
+    /// through [`Self::read`] and it must describe the set it was built from.
+    #[must_use]
+    pub fn rebuild(
+        allocated: &HashSet<u32>,
+        geometry: &Geometry,
+        bitmap_blocks: &[u32],
+    ) -> Vec<(u32, Vec<u8>)> {
+        let bsize = geometry.block_size() as usize;
+        let reserved = geometry.reserved();
+        let words = bsize.saturating_div(4).saturating_sub(1);
+        let bits_per_block = words.saturating_mul(32);
+
+        let mut out = Vec::with_capacity(bitmap_blocks.len());
+        for (i, &bm) in bitmap_blocks.iter().enumerate() {
+            let mut buf = vec![0u8; bsize];
+            // A SET bit means FREE, so start with everything free and clear
+            // the bits for blocks in use. Getting this inverted would mark
+            // every disk entirely full.
+            if let Some(map) = buf.get_mut(4..) {
+                map.fill(0xFF);
+            }
+            let base = i.saturating_mul(bits_per_block);
+            for word in 0..words {
+                let mut bits: u32 = 0xFFFF_FFFF;
+                for bit in 0..32usize {
+                    let index = base
+                        .saturating_add(word.saturating_mul(32))
+                        .saturating_add(bit);
+                    let Ok(index) = u32::try_from(index) else {
+                        continue;
+                    };
+                    let Some(block) = index.checked_add(reserved) else {
+                        continue;
+                    };
+                    if allocated.contains(&block) {
+                        bits &= !(1u32 << bit);
+                    }
+                }
+                let offset = 4usize.saturating_add(word.saturating_mul(4));
+                let _ = ade_endian::put_u32(&mut buf, offset, bits);
+            }
+            // The bitmap block is the one exception to block layout: checksum
+            // at 0, map from 4 (BUG-004).
+            if let Some(ck) = checksum::normal_at(&buf, checksum::BITMAP_OFFSET) {
+                let _ = ade_endian::put_u32(&mut buf, checksum::BITMAP_OFFSET, ck);
+            }
+            out.push((bm, buf));
+        }
+        out
+    }
+
+    /// Blocks the bitmap marks used that the tree does not reach.
+    ///
+    /// Lost space, or deleted files whose blocks were never freed.
+    #[must_use]
+    pub fn orphaned(&self, reachable: &HashSet<u32>) -> Vec<u32> {
+        let mut v: Vec<u32> = self
+            .allocated
+            .iter()
+            .filter(|b| !reachable.contains(b))
+            .copied()
+            .collect();
+        v.sort_unstable();
+        v
+    }
+
+    /// Blocks the tree reaches that the bitmap marks free.
+    ///
+    /// The dangerous direction: the next write would put something else there.
+    #[must_use]
+    pub fn referenced_but_free(&self, reachable: &HashSet<u32>) -> Vec<u32> {
+        let mut v: Vec<u32> = reachable
+            .iter()
+            .filter(|b| !self.allocated.contains(b))
+            .copied()
+            .collect();
+        v.sort_unstable();
+        v
+    }
+
     /// Whether the bitmap says this block is in use.
     #[must_use]
     pub fn is_allocated(&self, block: u32) -> bool {
