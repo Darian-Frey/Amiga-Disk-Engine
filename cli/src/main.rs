@@ -331,6 +331,12 @@ fn bootblock_lines(lines: &mut Vec<String>, i: &Inspection) {
                 bb.prefix_display()
             ));
         }
+    } else if !i.detection.kind.has_bootblock() {
+        // Not a defect: this container does not begin with one.
+        lines.push(format!(
+            "  bootblock   none — {} has no bootblock at block 0",
+            i.detection.kind
+        ));
     } else if i.rdb.is_none() {
         lines.push("  bootblock   absent — image too short".to_owned());
     }

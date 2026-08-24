@@ -276,3 +276,51 @@ fn a_closed_pipe_does_not_panic() {
     );
     assert_eq!(text.lines().count(), 2);
 }
+
+#[test]
+fn a_container_without_a_bootblock_says_so() {
+    // Only a raw block image has a bootblock at offset 0. An extended ADF
+    // opens with `UAE-1ADF`; parsing those bytes as a bootblock produced a
+    // dostype of 0x5541452d and a "checksum invalid" line about a checksum
+    // that was never a checksum. Found 2026-08-24 auditing the 11 extended
+    // ADFs in the corpus.
+    let mut bytes = vec![0u8; 1024];
+    bytes[..8].copy_from_slice(b"UAE-1ADF");
+    let (_, out) = info(&bytes, "extadf");
+
+    assert!(out.contains("extended ADF"), "{out}");
+    assert!(
+        out.contains("bootblock   none"),
+        "it should say there is none, not stay silent\n{out}"
+    );
+    for absent in ["boot code", "prefix", "checksum    invalid"] {
+        assert!(!out.contains(absent), "unexpected {absent:?}\n{out}");
+    }
+}
+
+#[test]
+fn a_raw_image_still_reports_its_bootblock() {
+    // The other side of the same rule: suppressing too eagerly would lose the
+    // bootblock report on every ordinary disk.
+    let (_, out) = info(&Volume::dd(1).named("Ordinary").build(), "rawbb");
+
+    assert!(out.contains("dostype     DOS\\1"), "{out}");
+    assert!(out.contains("boot code"), "{out}");
+}
+
+#[test]
+fn an_unrecognised_container_is_still_read_as_blocks() {
+    // 7% of real images have a non-DOS bootblock and some of them still
+    // mount, so Unknown must keep its bootblock report — C-008 treats the
+    // bootblock and the filesystem as independent facts.
+    let mut bytes = Volume::dd(1).named("Custom").build();
+    corrupt::non_dos_bootblock(&mut bytes, b"RNC\0");
+    let (_, out) = info(&bytes, "custombb");
+
+    assert!(out.contains("bootblock"), "{out}");
+    assert!(
+        !out.contains("bootblock   none"),
+        "an unrecognised container may still be a raw volume\n{out}"
+    );
+    assert!(out.contains("not DOS"), "{out}");
+}

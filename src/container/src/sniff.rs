@@ -49,6 +49,23 @@ pub enum Kind {
     Unknown,
 }
 
+impl Kind {
+    /// Whether block 0 of this container is an AmigaDOS bootblock.
+    ///
+    /// Only a raw block image has one. An extended ADF opens with a `UAE-1ADF`
+    /// header, a device opens with an `RDSK` block, and a compressed or flux
+    /// container is not blocks at all — parsing any of them as a bootblock
+    /// yields a confident report about a checksum that was never a checksum.
+    ///
+    /// `Unknown` counts, because an unrecognised container of the right length
+    /// may well be a raw volume whose bootblock is simply not `DOS` — 7% of
+    /// real images are exactly that (SPEC §Corpus observations).
+    #[must_use]
+    pub const fn has_bootblock(self) -> bool {
+        matches!(self, Self::Adf { .. } | Self::Hardfile | Self::Unknown)
+    }
+}
+
 impl fmt::Display for Kind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {

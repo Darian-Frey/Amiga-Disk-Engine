@@ -179,7 +179,14 @@ pub fn inspect_bytes(bytes: Vec<u8>) -> Inspection {
     let head = bytes.get(..HEAD_BYTES.min(bytes.len())).unwrap_or(&[]);
     let detection = sniff(head, size);
 
-    let bootblock = Bootblock::parse(&bytes).ok();
+    // Only a raw block image has a bootblock at offset 0. An extended ADF
+    // opens with `UAE-1ADF` and a device with `RDSK`; reading either as a
+    // bootblock reports a checksum that was never a checksum.
+    let bootblock = if detection.kind.has_bootblock() {
+        Bootblock::parse(&bytes).ok()
+    } else {
+        None
+    };
 
     let Some(geometry) = geometry_for(detection.kind, size) else {
         // Every other container is a later phase. Report what was identified
@@ -237,8 +244,9 @@ pub fn inspect_bytes(bytes: Vec<u8>) -> Inspection {
         detection,
         size,
         geometry: Some(geometry),
-        // A device whose block 0 is an RDB has no bootblock; parsing one out of
-        // the RDSK bytes yields a confident-sounding report about nothing.
+        // A device whose block 0 is an RDB has no bootblock either. The sniffer
+        // catches most of these; this catches a device whose RDSK sits past
+        // block 0, where the container still looks like a raw volume.
         bootblock: if rdb.is_some() { None } else { bootblock },
         volume,
         volume_absent,

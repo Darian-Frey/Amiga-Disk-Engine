@@ -75,10 +75,18 @@ fn info_does_not_report_an_rdb_as_a_bootblock() {
     // yields a confident report about a checksum that was never a checksum.
     let (_, out, _) = run("info-bb", &["info"]);
 
+    // Said explicitly rather than omitted: a reader should be able to tell
+    // "this container has none" from "this section was not reached".
     assert!(
-        !out.contains("bootblock"),
+        out.contains("bootblock   none"),
         "a device has no bootblock of its own\n{out}"
     );
+    // And none of the bootblock section's own lines should appear. "dostype"
+    // is deliberately not on this list: the partitions each have one, and it
+    // is reported there.
+    for absent in ["boot code", "prefix", "checksum    invalid"] {
+        assert!(!out.contains(absent), "unexpected {absent:?}\n{out}");
+    }
 }
 
 #[test]

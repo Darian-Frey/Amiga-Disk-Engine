@@ -17,6 +17,9 @@ Cited inline by key. These are ground truth; this document records ADE's working
 | **[AFFS]** | Linux kernel AFFS driver documentation — <https://www.kernel.org/doc/html/latest/filesystems/affs.html> |
 | **[AOS-LNFS]** | *DCFS and LNFS Low Level Data Structures*, AmigaOS Documentation Wiki — <https://wiki.amigaos.net/wiki/DCFS_and_LNFS_Low_Level_Data_Structures> |
 | **[SCP]** | Jim Drew, *SuperCard Pro Image File Specification v2.5* — <https://www.cbmstuff.com/downloads/scp/scp_image_specs.txt> |
+| **[AMIGAWIKI]** | *Filesystem*, amiga-wiki — <https://www.amigawiki.org/doku.php?id=en:system:filesystem>. Dostype table. |
+| **[DISKTYPE]** | `disktype`, `amiga.c` — the filesystem-identifier table of a working detector, consulted as a second opinion on the registry. Read as data, never as an implementation to copy (D-002 applies to it as it does to ADFlib). |
+| **[HYPERION-FS]** | *list of all FS indentificators*, Hyperion Entertainment forums — <https://forum.hyperion-entertainment.com/viewtopic.php?t=2343>. Community-assembled; treated as a lead, not as ground truth. |
 | **[RKRM]** | *Amiga ROM Kernel Reference Manual: Devices*, Appendix C — MFM track format. Not yet consulted; Phase 4. |
 | **[CORPUS]** | Direct survey of 4288 TOSEC Amiga ADF images held locally, 2026-08-22. **Observation, not specification** — it records what real images do, which is frequently not what the documentation says. See §Corpus observations. |
 
@@ -125,10 +128,42 @@ The flags byte after the `DOS` prefix. [FAQ §4.1]
 | `DOS\3` | FFS-INTL | FFS | yes | no | read/write |
 | `DOS\4` | OFS-DC | OFS | **yes** | yes | read-only |
 | `DOS\5` | FFS-DC | FFS | **yes** | yes | read-only |
-| `DOS\6` | OFS-LNFS | OFS | **yes** | no | unsupported |
-| `DOS\7` | FFS-LNFS | FFS | **yes** | no | unsupported |
+| `DOS\6` | OFS-LNFS | OFS | yes | no | unsupported |
+| `DOS\7` | FFS-LNFS | FFS | yes | no | unsupported |
 
 Support column from [AFFS], which documents only `DOS\0`–`DOS\5`.
+
+**Bold INTL means international hashing applies while the stored bit is clear** — true of `DOS\4` and `DOS\5` only. `DOS\6` and `DOS\7` are international *and* carry the bit (6 is `0b110`, 7 is `0b111`), so reading the bit alone gets the hash right on LNFS by luck and wrong on dircache by design. Both are still misclassified by a bit-pattern decoder, which is the separate trap below.
+
+### The wider dostype registry
+
+*Surveyed 2026-08-24 across [AMIGAWIKI], [DISKTYPE], [HYPERION-FS] and [AFFS]; cross-checked against the corpus.*
+
+Two conclusions, and the first closes a question rather than opening one.
+
+**`DOS\0`–`DOS\7` is the complete AmigaDOS set.** No source consulted knows a `DOS\8` or `DOS\9`. The eight above are all of them, so ADE's enumeration is complete and a ninth need not be designed for. One loose end: [HYPERION-FS] lists an `ID_VP255_DOS_DISK` labelled "FFS9", and no source found gives its byte value or says what it is. It is recorded here as a lead, not as a fact — if a `DOS\`-prefixed value outside 0–7 ever turns up, this is the thread to pull.
+
+**AmigaDOS is one family among many, and the rest must be identified and declined.** A dostype is a 4-byte tag, and the AmigaDOS test is `dostype & 0xFFFFFF00 == 0x444F5300` — everything below fails it and none of it is ADE's to mount:
+
+| Family | Values | Filesystem |
+|---|---|---|
+| muFS | `muFS`, `muF\0`–`muF\5` | MultiUser FFS — the OFS/FFS matrix again, with ownership |
+| PFS | `PFS\0`–`PFS\3`, `PDS\2`, `PDS\3`, `muPF` (`0x6D755046`) | Professional File System; `PDS` is the direct-SCSI build |
+| SFS | `SFS\0`, `SFS\2`, `SFS\3` | Smart File System. `SFS\1` was a beta and is **format-incompatible** with `SFS\2` |
+| AFS | `AFS\0`, `AFS\1`, `AFS\2`, `muAF` (`0x6D754146`) | Ami-File-Safe; `AFS\1` Pro, `AFS\2` User |
+| Other Amiga | `CFS\0`, `JXF\4`, `BOX\0` | CFS, JXFS, BoxFS |
+| AmigaOS 4 era | `NTFS`, `FAT2`, `FATX`, `EXT\2`, `HFS\0` | host filesystems reached through OS4 handlers |
+| Unix | `UNI\0`–`UNI\2` (Amix), `NBR\7`, `NBS\1`, `NBU\7` (NetBSD), `LNX\0`, `MNX\0` | |
+| Swap | `SWAP`, `SWP\0` | not a filesystem at all |
+| Foreign | `MAC\0`, `MSD\0`, `MSH\0` | HFS, MS-DOS |
+| Optical | `CD00`, `CD01`, `CDDA`, `CDFS` | |
+| Bootblock only | `KICK`, `BOOU` | a Kickstart disk and a generic boot disk, not filesystems |
+
+`resv` also appears in RDB partition tables, marking space reserved rather than formatted.
+
+**None of this is in the corpus.** Of 4652 images, 4341 begin `DOS` and **not one** carries any other filesystem identifier — the remaining 311 are custom bootblocks (`RNC` copylock loaders, `ATN!`, `NDOS`, and a long tail of one-offs) plus 11 extended ADFs and 100 all-zero blocks. So foreign-dostype handling has no corpus material either. It matters chiefly on RDB devices, where a partition may legitimately carry any of the above and mounting it as AmigaDOS would be actively wrong; `Partition::claims_amigados` is the guard, and SPEC §Partition block already says so.
+
+**Where a bit-pattern decoder goes wrong is not here.** These are distinct 4-byte tags, easy to tell apart. The trap is *within* the `DOS\` family, where the last byte is flags-shaped but is not purely flags — which is the next two sections.
 
 ### The dircache trap (C-006)
 
@@ -142,7 +177,100 @@ So `DOS\4` and `DOS\5` carry the dircache bit with the INTL bit **clear**, yet i
 
 A later extension from Olaf Barthel's FFS reimplementation (AmigaOS 4 era), raising the 30-character name limit to ~106. Structurally: the separate name and comment fields are replaced by a 112-byte **NaC** ("name and comment") array holding both as consecutive BCPL strings; if they do not fit, the comment moves to a dedicated `TYPE_COMMENT` block referenced by a new `CommentBlock` field. The rootblock gains `NumBlocksUsed` and `FileSystemType`. There is no DCFS variant of LNFS. [AOS-LNFS]
 
-Phase 2 work. Detail above is summary-level and needs a second pass before implementation.
+#### Field-level pass
+
+*Done 2026-08-24 against [AOS-LNFS], discharging the open question of the same name.*
+
+[AOS-LNFS] declares its structures in C rather than as an offset table. The offsets below are the declaration order laid out, which is safe here because the structures contain no padding — every member is naturally aligned — and because **both sum to exactly 512 bytes**, which they could not do if a field were missing or misread. Every field from 0x1F0 onward matches the classic layout exactly, which is the second check.
+
+Entry block — the long-name form of the canonical file/directory header:
+
+| offset | type | name | meaning |
+|---|---|---|---|
+| 0x000 | ulong | Type | `T_HEADER` = 2 |
+| 0x004 | ulong | OwnKey | self pointer |
+| 0x008 | ulong[3] | Spare1 | must be 0 (a **file** uses these for `HighSeq`, `DataSize`, `FirstData`) |
+| 0x014 | ulong | Checksum | normal algorithm |
+| 0x018 | ulong[72] | HashTable | hash table, or the data-block table on a file |
+| 0x138 | ulong | Spare2 | must be 0 |
+| 0x13c | uword | OwnerID | **same as classic** |
+| 0x13e | uword | GroupID | **same as classic** |
+| 0x140 | ulong | Protection | **same as classic** |
+| 0x144 | ulong | Spare3 | must be 0 (a **file** uses this for `ByteSize`, as classic does) |
+| 0x148 | char[112] | **NaC** | name and comment, as two consecutive BCPL strings |
+| 0x1b8 | ulong | CommentBlock | `TYPE_COMMENT` block, when the comment does not fit |
+| 0x1bc | ulong[2] | Spare4 | must be 0 |
+| 0x1c4 | ulong[3] | Created | datestamp — **moved** from the classic 0x1a4 |
+| 0x1d0 | ulong[2] | Spare5 | must be 0 |
+| 0x1d8 | ulong | FirstLink | same offset as the classic `real_entry` |
+| 0x1dc | ulong[5] | Spare6 | must be 0 |
+| 0x1f0 | ulong | HashChain | **same as classic** |
+| 0x1f4 | ulong | Parent | **same as classic** |
+| 0x1f8 | ulong | DirList | **same as classic** (the `extension` field) |
+| 0x1fc | long | SecondaryType | **same as classic** |
+
+The `NaC` array holds the name then the comment, each a BCPL string — one length byte followed by that many characters, no terminator. `[6]barney[4]fred` is a complete pair; a nameless comment is `[5]wilma[0]`. 112 bytes covers both, so the practical name limit is about 106 characters. When the pair will not fit, the comment moves to a `TYPE_COMMENT` block and `CommentBlock` names it:
+
+| offset | type | name | meaning |
+|---|---|---|---|
+| 0x00 | long | Type | `TYPE_COMMENT` = **64** |
+| 0x04 | ulong | OwnKey | self pointer |
+| 0x08 | ulong | HeaderKey | the entry block this comment belongs to |
+| 0x0c | ulong[2] | Spare1 | must be 0 |
+| 0x14 | long | Checksum | normal algorithm |
+| 0x18 | char[80] | Comment | BCPL string, 80 bytes including the length byte |
+| 0x68 | ulong[102] | Spare2 | must be 0 |
+
+Root block — identical to the classic one but for two fields:
+
+| offset | type | name | meaning |
+|---|---|---|---|
+| 0x1d4 | ulong | NumBlocksUsed | blocks allocated; **valid only when `BitmapFlag` is -1** |
+| 0x1f0 | ulong | FileSystemType | the dostype signature again, or 0 for a non-LNFS filesystem |
+
+Everything else — the hash table, `BitmapFlag` at 0x138, the 25 bitmap keys, `BitmapExtend`, all three datestamps, the 30-character volume name — sits exactly where the classic rootblock puts it. The root directory's name is still capped at 30 characters even on LNFS.
+
+**Hashing does not change.** [AOS-LNFS] is explicit: "No change is made to the hashing algorithm. It is the same that is being used for international mode, only that the names of the files can be longer than 30 characters." So C-006 covers LNFS, and the only difference is how many characters go into the hash.
+
+#### Why the two layouts are dangerous together
+
+The classic and LNFS entry blocks share a primary type, a secondary type, a checksum algorithm and their whole tail. Nothing in the block itself says which layout it is — **only the volume's dostype does**. Read one as the other and:
+
+- The classic **name** field at 0x1b0 lands inside LNFS's `Spare6`, so a classic reader finds an empty name on every LNFS entry.
+- The classic **datestamp** at 0x1a4–0x1b0 lands inside the `NaC` array, so a classic reader parses name characters as a date.
+- An LNFS reader pointed at a classic block reads the comment field as the name.
+
+Both blocks checksum correctly either way, because the checksum covers the bytes and not their meaning. This is the same class of trap as C-006 and BUG-001, and it is why the dostype must decide the layout before any field is read.
+
+#### The oracle cannot check LNFS — it does not implement it
+
+*Measured 2026-08-24.*
+
+ADFlib decodes the dostype **by bit pattern**, which is exactly the trap C-006 and BUG-001 describe. `DOS\6` is `0b110` and `DOS\7` is `0b111`, so it reports them as `OFS INTL DIRCACHE` and `FFS INTL DIRCACHE` — as classic dircache volumes, which they are not. There is no LNFS mode in it at all.
+
+It acts on that misreading. Asked to list a `DOS\7` volume from its dircache, `unadf -c` looks for cache blocks that LNFS never had:
+
+```
+Warning <adfReadDirCBlock : invalid checksum>
+Warning <adfReadDirCBlock : T_DIRC not found>
+Warning <adfReadDirCBlock : headerKey!=nSect>
+Volume : Floppy 880 KBytes, "LongNames" ... FFS INTL DIRCACHE . Filled at 0.4%.
+
+Using dir cache blocks.
+```
+
+— and then prints **nothing, exiting 0**. An empty listing reported as success is the worst shape a failure can take in a preservation tool: a caller scripting against the exit code concludes the disk is empty.
+
+Two consequences follow, and the first is the harder one:
+
+- **LNFS has no oracle.** It is absent from the corpus (§Open questions) and unimplemented in ADFlib, so it is the first structure in ADE with *neither* external check. D-010's amendment lets a generated fixture stand in for a real disk because ADFlib validates it independently; here there is nothing to do the validating. Any LNFS reader would be checked against SPEC and against itself, which is the situation D-002 gave up ADFlib's accumulated knowledge to avoid.
+- **ADE must not repeat the mistake.** It does not: `Dostype::mode()` matches `6 | 7 => LongNames` *before* testing the dircache bit, so `has_dircache()` is false on an LNFS volume and no cache is looked for. That ordering is BUG-001's fix, and `dostype_lnfs.rs` pins it, because the natural way to write that function is the way ADFlib wrote it.
+
+#### The file header is inferred, not documented
+
+[AOS-LNFS] declares `LongNameUserDirectoryBlock`, the `CommentBlock` and the root block. **It declares no long-name file header.** The table above marks the three file-only fields (`HighSeq`/`DataSize`/`FirstData` at 0x008, `ByteSize` at 0x144) in their classic positions on the reasoning that AmigaDOS has always used one canonical 512-byte shape for both files and directories — they differ only in which overlapping fields are live — and that Hyperion describes the change as "changing the layout of the canonical file/directory header block", singular.
+
+That reasoning is sound but it is **not a citation**. Anything built on it is built on inference, and this paragraph exists so that a future failure is diagnosed in one step rather than rediscovered.
 
 ## Rootblock
 
@@ -548,6 +676,17 @@ Large volumes also need **more than one bitmap block**: a 512-byte bitmap block 
 | SCP | `SCP` + version byte | 0 | [SCP] |
 | DMS | `DMS!` *(unverified)* | 0 | Phase 3 |
 | IPF | `CAPS` *(unverified)* | 0 | Phase 4 |
+| FDI | `FDI` *(unverified)* | 0 | not scheduled — see below |
+
+### FDI is the licence-free flux format
+
+*Found 2026-08-24 surveying formats.*
+
+FDI ("Formatted Disk Image", Vincent Joguin, 2000) stores raw low-level track data of the kind copy protection needs, and — unlike IPF — **the specification is public and the access tools are open source**. Most Amiga emulators read it.
+
+That matters because C-003 gates IPF behind a licence and forbids ADE from ever *emitting* it, which leaves Phase 4 able to read the dominant preservation format but not write it. FDI and SCP are the two flux formats ADE could support without a licensing constraint, and SCP (D-007) is already the chosen capture format. FDI is worth considering as a read/write interchange target alongside it; it is not currently on the roadmap, and this note exists so the option is visible when Phase 4 is planned rather than discovered afterwards.
+
+Not verified: the magic bytes above are asserted, not confirmed against a file or the specification. Do that before writing a sniffer arm.
 
 ### The sniffing problem (F-003)
 
@@ -599,24 +738,30 @@ MFM encoding, sync words (0x4489), and track/sector framing are Phase 4 and not 
 
 ## Corpus observations
 
-Everything in this section is **measurement, not specification**: a survey of 4288 TOSEC Amiga ADF images on 2026-08-22. It is recorded here because the gap between the documented format and real images is precisely what D-002 gave up when it declined to inherit ADFlib's accumulated knowledge, and measuring it back is how that knowledge is recovered.
+Everything in this section is **measurement, not specification**: a survey of TOSEC Amiga ADF images, first taken on 2026-08-22 over 4288 images and recounted on 2026-08-24 over 4652. It is recorded here because the gap between the documented format and real images is precisely what D-002 gave up when it declined to inherit ADFlib's accumulated knowledge, and measuring it back is how that knowledge is recovered.
 
 ### Leading magic
 
+*Recounted 2026-08-24 over 4652 images; the 2026-08-22 figures for 4288 are in brackets where they differ.*
+
 | Count | Leading bytes |
 |---|---|
-| 3794 | `DOS\0` |
+| 4025 [3794] | `DOS\0` |
 | 300 | *no recognised magic* |
-| 139 | `DOS\1` |
-| 20 | `DOS\3` |
-| 20 | `DOS\5` |
+| 212 [139] | `DOS\1` |
+| 79 [20] | `DOS\3` |
+| 21 [20] | `DOS\5` |
 | 11 | `UAE-1ADF` (extended-ADF) |
 | 3 | `DOS` + `0x32` |
 | 1 | `DOS\2` |
 
-Absent entirely: `DOS\4`, `DOS\6`, `DOS\7`. Their absence from one corpus is not evidence they do not matter — `DOS\5` appears twenty times and is the case that exposed BUG-001 — but it does mean this corpus cannot validate LNFS handling. Fixtures for those need sourcing separately.
+Every one of the 364 images added since the first survey is `DOS`-prefixed: the unrecognised count and the extended-ADF count are both unchanged. The proportion of AmigaDOS disks rose from 93% to 93.3%, which is to say the shape of the corpus did not move.
 
-The three `DOS` + `0x32` images carry a flags byte outside the documented three bits (`0x32` = `0b0011_0010`). ADE decodes what it can — bit 1 set, so international — and reports `0x30` as unrecognised rather than discarding it.
+Absent entirely: `DOS\4`, `DOS\6`, `DOS\7`. Their absence from one corpus is not evidence they do not matter — `DOS\5` appears twenty-one times and is the case that exposed BUG-001 — but it does mean this corpus cannot validate LNFS handling. `DOS\4` is now covered by generated fixtures under the oracle (§Confirmed against real disks); LNFS is not, which is D-013.
+
+**No corpus image carries a non-AmigaDOS filesystem.** Checked 2026-08-24 against the full registry in §The wider dostype registry — no muFS, PFS, SFS, AFS, CFS, JXFS, `KICK`, or any Unix, swap or CD type. The 300 unrecognised images are custom bootblocks, not other filesystems: `RNC` (Rob Northen copylock), `ATN!`, `NDOS`, `DSK`, and a long tail of one-offs, plus 100 images whose block 0 is entirely zero. So the foreign-dostype path has no corpus material; it matters on RDB devices rather than floppies.
+
+The three `DOS` + `0x32` images — `Shadowlands_Disk2`, `Shadoworlds_Disk2`, `F.1 Manager_Disk2` — carry a flags byte outside the documented three bits (`0x32` = `0b0011_0010`, and in ASCII the bootblock simply reads `DOS2`). ADE decodes what it can — bit 1 set, so international — and reports `0x30` as unrecognised rather than discarding it, then finds no rootblock at 880. Reporting the bits and declining to guess is the correct outcome, and is what C-008 asks for.
 
 ### 7% of images have no `DOS` bootblock
 
@@ -708,9 +853,9 @@ Stable, append-only IDs; referenced from [ARCHITECTURE.md](ARCHITECTURE.md), [DE
 Deliberately unresolved, each deferred to the phase that needs it:
 
 - **DMS and IPF magic bytes** — asserted from memory in the table above, not yet confirmed against a primary source. Phase 3 and Phase 4 respectively.
-- **LNFS block layout** — [AOS-LNFS] summarised above; needs a full field-level pass before implementation. Phase 2.
+- ~~**LNFS block layout**~~ — **done 2026-08-24** (§Field-level pass). The entry block, `TYPE_COMMENT` block and root block are now at field level. What replaces this question is narrower and harder: [AOS-LNFS] declares **no long-name file header**, so the three file-only fields are placed by inference from the canonical block shape (§The file header is inferred, not documented), and LNFS has no oracle to check that inference against (§The oracle cannot check LNFS).
 - **MFM track and sector framing** — [RKRM] Appendix C not yet consulted. Phase 4.
-- **muFS (MultiUser FS) variants** — [AFFS] says they are supported by the Linux driver; ADE's position is undecided. The `protect` field's bits 8–15 and 31 are muFS-related.
+- **muFS (MultiUser FS) variants** — [AFFS] says they are supported by the Linux driver; ADE's position is undecided. The `protect` field's bits 8–15 and 31 are muFS-related. The 2026-08-24 survey pinned down the identifiers (`muFS`, `muF\0`–`muF\5` — the OFS/FFS matrix again with ownership added), so what remains undecided is scope, not identification. None occur in the corpus.
 - **5.25" DD geometry** — named in ROADMAP Phase 2; not covered by [FAQ §3], which documents only 3.5" DD and HD.
 - **`DOS\6` and `DOS\7` fixtures.** The survey contains neither, so both LNFS variants cannot be validated against real material. `DOS\5` appears twenty-one times and was the case that exposed BUG-001, so the absent ones are not safely assumed unimportant — they need sourcing separately (D-010). **`DOS\4` is resolved rather than sourced**: it is absent from the corpus too, but the generator builds it and `unadf -c` validates it (§Confirmed against real disks), which is the shape D-010's amendment describes.
 - **The 750 `DOS`-magic images with no rootblock at 880.** Custom formats wearing an AmigaDOS bootblock, unexamined so far. Worth a pass: some may place a rootblock elsewhere, and the distribution of what they *do* contain would sharpen the F-003 cascade.

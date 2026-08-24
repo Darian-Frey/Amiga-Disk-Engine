@@ -28,7 +28,7 @@ use std::collections::{HashMap, HashSet};
 /// How many cache disagreements to report before saying so in one line.
 const MAX_DIRCACHE_FINDINGS: usize = 20;
 
-use ade_filesystem::{bitmap::Bitmap, dircache, entry::EntryKind, volume::Volume};
+use ade_filesystem::{bitmap::Bitmap, dircache, dostype::Mode, entry::EntryKind, volume::Volume};
 
 use crate::{
     inspect::{Inspection, inspect_bytes},
@@ -273,6 +273,25 @@ pub fn examine_partition(bytes: Vec<u8>, partition: Option<&str>) -> Health {
         ));
         return barren(inspection, findings);
     };
+
+    // D-013: the long-name block layout is not implemented, and a classic read
+    // of one does not fail — it silently produces the wrong name. The entry
+    // blocks share a primary type, a secondary type and a checksum algorithm
+    // with classic ones, and a wrong reading still checksums, so nothing
+    // downstream will notice. Say so rather than present names that cannot
+    // have been read correctly.
+    if volume
+        .dostype()
+        .is_some_and(|d| d.mode() == Mode::LongNames)
+    {
+        findings.push(Finding::new(
+            "lnfs-unsupported",
+            Severity::Warning,
+            "this volume uses the long-name layout (LNFS), which is not implemented \
+             (D-013) — names and comments are being read at their classic offsets \
+             and are unreliable; block accounting and checksums are not affected",
+        ));
+    }
 
     let scan = scan_tree(&volume, &mut findings);
     let source: &dyn ade_block::BlockSource = match &window {

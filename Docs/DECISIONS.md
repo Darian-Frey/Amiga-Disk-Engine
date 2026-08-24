@@ -357,3 +357,37 @@ Rare in practice: a 143-disk sample found no read-protected files and 46 delete-
 
 **Reversal conditions.** If ADE ever gains a write path that could damage a source image, protection bits should gate *writes* — that is a different question from reads and would need its own entry. Read behaviour should not change.
 
+
+---
+
+### D-013 LNFS is deferred on verifiability, not effort
+**Decided:** 2026-08-24
+**Recorded:** 2026-08-24
+**Status:** Accepted
+**Authors:** Darian-Frey (decision); Claude (analysis)
+**Related:** D-002, D-010, D-012, C-006, BUG-001, F-018
+
+**Context.** LNFS (`DOS\6`, `DOS\7`) is the last structural gap in Phase 2. The field-level pass SPEC asked for is done — the long-name entry block, the `TYPE_COMMENT` block and the root block are documented at byte offsets, and both structures reconcile against the classic layout and sum exactly to 512 bytes. The parsing work is small and well understood.
+
+What stopped it is that **nothing could check the result.**
+
+- **No corpus material.** `DOS\6` and `DOS\7` appear in none of the 4652 images held. Neither does `DOS\4`, but that was resolvable: the generator builds it and the oracle validates it, which is exactly the shape D-010's amendment describes.
+- **No oracle.** ADFlib does not implement LNFS. It decodes the dostype by bit pattern, so `DOS\6` (`0b110`) and `DOS\7` (`0b111`) come back as `OFS INTL DIRCACHE` and `FFS INTL DIRCACHE` — the trap C-006 and BUG-001 exist to describe. Asked to use that cache, `unadf -c` hunts for blocks LNFS never had, fails three checks, and prints an empty listing while **exiting 0**.
+- **No documented file header.** [AOS-LNFS] declares `LongNameUserDirectoryBlock`, the comment block and the root block. It declares no long-name *file* header. Its three file-only fields would be placed by inference from the canonical file/directory block shape — sound reasoning, but not a citation.
+
+So an LNFS reader would be checked against SPEC and against itself, with one of its structures inferred. That is precisely the position D-002 accepted a known cost to avoid: reimplementation forgoes ADFlib's accumulated edge-case knowledge, and differential testing was the mechanism chosen to recover it. Here the mechanism is unavailable.
+
+**Options.**
+- **A. Implement now against SPEC alone**, marked unverified and gated behind an opt-in. Rejected. A reader nothing can check is a claim, not a capability, and shipping one behind a flag mostly moves the problem to whoever trusts the flag. The inferred file header makes it worse: the most likely error is silent, since both layouts share a primary type, a secondary type and a checksum algorithm, and a wrong reading still checksums.
+- **B. Defer until material exists.** Chosen.
+- **C. Source material first, then decide.** Folded into B's reversal conditions rather than treated as a separate path — hunting is worth doing, but it is not a reason to hold the phase open.
+
+**Decision.** Option B. LNFS identification and hashing stay (they are correct, corpus-independent, and pinned by `dostype_lnfs.rs`); the block structures are not implemented. SPEC keeps the field-level pass, so the work is ready the moment it becomes checkable.
+
+This is the same standard D-010 set, applied where it bites. D-010's amendment permits generated fixtures *because ADFlib validates them independently* — the boundary was never "generated versus real", it was "conformance to the specification versus conformance to reality". LNFS fails both halves at once: no independent validator, and one structure not in the specification either.
+
+**Consequences.** Phase 2 completes without LNFS, which is recorded in ROADMAP rather than quietly dropped. Any `DOS\6`/`DOS\7` image encountered is identified correctly, hashed correctly, and read as a classic volume — which will produce empty or wrong names on real long-name entries. That is a worse outcome than refusing, so a reader that mounts an LNFS volume says so: `ade check` reports `lnfs-unsupported` as a warning, stating that names and comments are being read at their classic offsets and are unreliable while block accounting and checksums are not affected. Done 2026-08-24 alongside this entry — a silent wrong answer was the one outcome this decision must not produce.
+
+The corpus's silence is evidence of rarity, not of unimportance — `DOS\5` appears twenty-one times and is the case that exposed BUG-001.
+
+**Reversal conditions.** A single verified real `DOS\6` or `DOS\7` image reverses this: with one real disk, the fixture generator can be checked against reality and the inferred file header confirmed or corrected. An LNFS implementation appearing in ADFlib would reverse it too, by restoring the oracle. Neither is expected soon; both are cheap to act on, because SPEC already holds the layout.
