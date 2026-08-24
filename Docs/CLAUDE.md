@@ -35,6 +35,15 @@ Phase 0 is complete (2026-08-22). Phase 1 is unblocked and nothing is waiting on
 
 Fixtures are ready: `ade-fixtures` builds any volume the tests need and `corrupt` supplies the malformed cases. Real images are in `disks/`, gitignored; corpus tests must skip cleanly without them.
 
+## Testing posture
+
+Two mechanisms, and the boundary is **specification versus reality**, not generated versus real (D-010, amended 2026-08-24):
+
+- **The oracle** (`unadf`) validates conformance to the format, on anything structurally valid — including fixtures ADE generates. Runs in CI. Catches the generator and the parser sharing a misreading.
+- **The corpus** (4652 real images in `disks/`, gitignored) validates conformance to reality: what SPEC omits. Local only; CI never sees a real disk. Running it is a habit, not an option.
+
+Never run the oracle uncapped — `unadf` OOM-killed a session once. Every invocation goes through `sh` with `ulimit -v` and `timeout`.
+
 ## Architectural invariants
 
 Do not violate without a DECISIONS entry:

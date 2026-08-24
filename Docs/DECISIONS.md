@@ -265,11 +265,31 @@ The refinement from D to E came from acquiring the corpus (4288 TOSEC images, 20
 3. **AV-001 and AV-004 were always going to be code.** Hash-chain loops and out-of-range block pointers do not occur on genuine disks; they must be constructed. Committing them as binaries would have been storing the generator's output instead of the generator.
 4. **The copyright question disappears** rather than being managed. There is no whitelist to maintain, no per-disk licence verification to keep current, and no standing obligation. A disk image in the repository becomes a mistake by definition.
 
-**On the generator/parser agreement risk.** A generator written by the same hand as the parser can encode the same misreading of the spec, and both will agree. This is real and is *not* addressed by option E on its own — it is addressed by D-002's black-box oracle over the local corpus, which tests the parser against reality rather than against our understanding. The two mechanisms cover different failure modes: generated fixtures cover *specified* behaviour and hostile input, the corpus covers *actual* behaviour. Neither substitutes for the other, and the value of this decision depends on both being run.
+**On the generator/parser agreement risk.** A generator written by the same hand as the parser can encode the same misreading of the spec, and both will agree. This is real and is *not* addressed by option E on its own — it is addressed by D-002's black-box oracle, which tests against an independent implementation rather than against our understanding.
+
+**Amendment, 2026-08-24 — the oracle validates *generated* fixtures too.**
+
+As first written, this entry assumed the oracle could only be pointed at real images, and therefore that anything ADE had to synthesise was validated by nothing but its own author. That framing was wrong, and it made whole areas of the roadmap look untestable when they are not.
+
+ADFlib reads any structurally valid volume, regardless of who wrote it. So the loop closes without a single real image:
+
+```
+ade-fixtures generates  →  unadf reads it  →  ADE parses it  →  compare
+```
+
+An independent implementation checks the generator *and* the parser, which is precisely the shared-misreading failure this paragraph was worried about. Demonstrated on a generated 1.76 MB HD volume — `unadf` reports "Floppy HD, 80 cylinders, 22 sectors, FFS" and lists its contents — and on all eight dostypes carrying an accented filename, the case where international hashing decides whether a lookup succeeds (C-006).
+
+The consequence is not small. Phase 2 covers HD geometry, the full dostype matrix, LNFS and RDB partitioning, and the corpus contains **none** of them: no HD image, no `RDSK`, no `DOS\4`/`\6`/`\7`, no links in 8865 entries sampled. All of it appeared to be fixture-only and therefore weakly validated. It is not: each can be generated and cross-checked.
+
+What the oracle still cannot supply is what the *specification omits* — the accumulated real-world behaviour D-002 accepted losing. A generated fixture is only ever as good as SPEC, and SPEC is only as good as its sources. Real images remain the sole evidence of how disks actually behave, and the corpus has repeatedly earned that role: BUG-001 was confirmed on 20 real `DOS\5` images, D-012 emerged from two files no synthetic fixture would have produced, and BUG-004 surfaced because real disks and generated ones disagreed.
+
+So the two mechanisms still cover different ground, but the boundary is not where this entry first drew it. It is not *generated versus real*; it is **conformance to the specification versus conformance to reality**. The oracle can check the first on anything. Only the corpus can check the second.
 
 **Consequences.** `tests/fixtures/` contains no image data; the repository stays small and every fixture is reviewable as source. The test suite is hermetic and offline on a fresh clone. Differential tests against the local corpus skip cleanly when `disks/` is absent.
 
-The cost, stated plainly: **CI never exercises a real Amiga disk.** It verifies that the specification is implemented, not that reality matches the specification — and the survey already showed those differ, with 19% of `DOS`-magic images carrying no rootblock and only 74% a valid bootblock checksum. Running the corpus locally therefore has to be a habit rather than an optional extra, and a finding that only the corpus can catch will not be caught by a pull request.
+The cost, stated plainly: **CI never exercises a real Amiga disk, and never runs the oracle.** It verifies that the specification is implemented, not that reality matches the specification — and the survey already showed those differ, with 19% of `DOS`-magic images carrying no rootblock and only 74% a valid bootblock checksum. Running the corpus locally therefore has to be a habit rather than an optional extra, and a finding that only the corpus can catch will not be caught by a pull request.
+
+The 2026-08-24 amendment narrows that cost without removing it. Oracle checks over generated fixtures need no corpus — only `unadf` — so they **do** now run in CI, putting an independent implementation in the loop on every push. What CI still never sees is a real Amiga disk.
 
 **Implementation note.** Fuzzing (F-001) should target the **block** level rather than whole images: a rootblock parser takes 512-byte inputs and the container sniffer takes short headers, so seeding with 880 KB images would spend almost the entire fuzz budget on bytes no parser reads. This also keeps the committed seed corpus genuinely small.
 

@@ -91,6 +91,10 @@ Format follows [Keep a Changelog](https://keepachangelog.com). Reference F-, D-,
 - **`Volume::geometry`** accessor; `checksum::normal_at` and `checksum::sums_to_zero`.
 - **Exit code 5** for `check`: something would lose data. Distinct from 1 because "this disk is odd" and "do not write to this disk" are the two answers a batch run most needs separated.
 
+- **D-010 amended**: the D-002 oracle validates *generated* fixtures, not only real images. ADFlib reads any structurally valid volume regardless of who wrote it, so the loop closes without a corpus — an independent implementation checks the generator as well as the parser, which is precisely the shared-misreading risk the entry was written to worry about. The boundary between the two mechanisms is not *generated versus real*; it is **conformance to the specification versus conformance to reality**.
+- **`oracle_fixtures` test, running in CI.** ADFlib and ADE cross-checked on nine generated volumes — all eight dostypes plus a 1.76 MB HD volume, each carrying an accented filename so international hashing is exercised (C-006) — and byte-for-byte on multi-block file contents for both OFS and FFS. CI installs `unadf` and runs it on every push.
+- The practical consequence: Phase 2's HD geometry, dostype matrix, LNFS and RDB work is properly verifiable, where it had looked fixture-only. The corpus contains none of those — no HD image, no `RDSK`, no `DOS\4`/`\6`/`\7`, no links in 8865 entries sampled.
+
 ### Changed
 - **SPEC §Corpus observations** — new section recording a survey of 4288 TOSEC Amiga ADF images, explicitly labelled measurement rather than specification. Magic distribution, the 300 non-`DOS` images across 144 distinct bootloaders, bootblock-checksum and rootblock validity rates, and the non-canonical size distribution.
 - **SPEC §Extended-ADF** — the `UAE-1ADF` layout, derived from eleven corpus images and verified arithmetically (`12 + tracks × 12 + Σ space` equals file size for all eleven). Track type 0 is standard sector data and 1 is raw MFM; `length` is in **bits**, `space` in bytes. Mixed types within one image are the copy-protection signature.

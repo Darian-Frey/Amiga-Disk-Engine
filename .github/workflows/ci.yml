@@ -35,6 +35,18 @@ jobs:
       - name: Tests
         run: cargo test --workspace --all-targets
 
+      # D-002's oracle, over fixtures ADE generates rather than a corpus it
+      # cannot commit (D-010, amended 2026-08-24). ADFlib reads any structurally
+      # valid volume regardless of who wrote it, so this puts an independent
+      # implementation in the loop on every push — checking the generator as
+      # well as the parser. What it cannot check is what SPEC omits; that is
+      # the corpus's job, and the corpus is not here.
+      - name: Install the D-002 oracle
+        run: sudo apt-get update -qq && sudo apt-get install -y unadf
+
+      - name: Differential check against ADFlib (D-002)
+        run: cargo test -p ade-core --test oracle_fixtures
+
       # F-001's acceptance bar. Runs on every push at modest iteration counts;
       # a deep sweep is `ADE_FUZZ_ITERS=150000 cargo test --release --test fuzz`.
       #
