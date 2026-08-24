@@ -22,28 +22,35 @@ ADE targets the gap no current tool fills. The capable Amiga engines (amitools, 
 git clone https://github.com/Darian-Frey/Amiga-Disk-Engine
 cd Amiga-Disk-Engine
 cargo test --workspace
-cargo run -p ade-cli
+
+cargo run -p ade-cli -- info    disk.adf     # container, geometry, bootblock, volume
+cargo run -p ade-cli -- check   disk.adf     # health report, severity-ranked
+cargo run -p ade-cli -- ls      disk.adf     # directory tree
+cargo run -p ade-cli -- extract disk.adf Tools/thing out.bin
 ```
 
-The workspace builds and tests, but **the engine does nothing useful yet** — `ade` prints its version and says so. What exists is the skeleton, the layer seams, and the machinery that keeps them honest. See **Status** below and [BUILD.md](Docs/BUILD.md).
+Add `--format=json` to any of them for machine-readable output; the field names and fault codes are a stability commitment (F-015). On a partitioned hard disk, add `--partition=DH0` — a device holds no volume of its own.
+
+ADE never writes to an image: no image-write path exists in the codebase, and D-004 defers one to Phase 4. Even the bitmap rebuild is computed and reported, never applied. See [BUILD.md](Docs/BUILD.md).
 
 ## Status
 
-**Early implementation — nothing parses a real image yet.** What exists:
+**Phases 0 and 1 are complete; Phase 2 is in progress.** ADE reads OFS and FFS on DD, HD and extra-cylinder floppies, on unpartitioned hardfiles, and on RDB-partitioned hard disks. All eight dostypes are identified and hashed correctly, including the international variants; the dircache and long-name *structures* of `DOS\4`–`DOS\7` are still to come. It lists, extracts, resolves hard links, and reports volume health including a bitmap cross-check.
 
-- `ade-endian` — the C-001 byte-order seam, bounds-checked and overflow-safe.
-- `ade-block` — geometry, `BlockIndex`, and the `BlockSource` trait, with AV-004 enforced by the type system rather than by discipline: `read_block` takes a `ValidBlock`, which only `Geometry::validate` can construct.
-- `ade-filesystem::dostype` — dostype decoding by documented flag bits.
-- Seven further layer crates as documented stubs, wired into the dependency graph so the architecture is real before the code is.
+Measured rather than asserted:
 
-Next is the first vertical slice — `ade info <image>`, reporting geometry, dostype, and bootblock checksum validity — which cuts through container → block → endian → filesystem and so exercises every seam early rather than at integration time.
+- **4652 real images** read with zero crashes — including 11 that crash ADFlib.
+- **99.36%** byte-identical agreement with ADFlib on extracted file contents (3875 of 3900 files). Every difference is attributed to a recorded disagreement (D-012) or to genuine damage on the disk.
+- **900,000 fuzz cases** across six targets, zero failures. AV-004 is enforced by the type system, not by discipline: `read_block` takes a `ValidBlock`, which only `Geometry::validate` can construct.
+
+Still to come in Phase 2: real dircache blocks, LNFS long names, and undelete — the last blocked on material rather than effort, since the corpus holds no recoverable deleted entries. Then containers (Phase 3), flux (Phase 4), and the GUI (Phase 5).
 
 The two decisions that gated all implementation were settled on 2026-08-21:
 
 - **D-001 — stack.** Rust core exposing a C-ABI bridge, with a Qt6 GUI over it from Phase 5. Memory safety and the untrusted-input mandate (D-006) are the same decision, and a Cargo workspace makes the "no module spans two layers" invariant a matter of the dependency graph rather than of review.
 - **D-002 — ADFlib.** Reimplement OFS/FFS/RDB in Rust rather than wrap the C library, using ADFlib as a **black-box differential-test oracle** — run as a separate binary, never linked, source not read. A segfault inside wrapped C is uncatchable from Rust, so wrapping would make F-001's "zero segfaults across the fuzz corpus" unclaimable. Licence freedom is preserved as a side effect.
 
-The licence followed from D-002 and is settled: **Apache-2.0** (D-011). Still open: **D-009** (xDMS's role, Phase 2, non-blocking) and **D-010** (what fixtures may lawfully be committed — see the note under Licence). See [DECISIONS.md](Docs/DECISIONS.md) and [ROADMAP.md](Docs/ROADMAP.md).
+The licence followed from D-002 and is settled: **Apache-2.0** (D-011). D-010 (fixture provenance) is settled too: fixtures are generated, never committed, and the oracle validates the generator as well as the parser. **D-009** (xDMS's role) remains accepted-but-blocked — on test material rather than on a decision. See [DECISIONS.md](Docs/DECISIONS.md) and [ROADMAP.md](Docs/ROADMAP.md).
 
 ## Formats
 

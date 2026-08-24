@@ -47,6 +47,7 @@
 )]
 
 pub mod corrupt;
+pub mod device;
 
 /// Bytes per block. ADE supports other sizes for hard disks; fixtures are
 /// floppies.
@@ -318,12 +319,18 @@ impl Volume {
         } else {
             data.chunks(payload).collect()
         };
-        assert!(
-            chunks.len() <= Self::HT_SIZE as usize,
-            "fixture files must fit one header block; extension blocks are not built yet"
-        );
+        let ht = Self::HT_SIZE as usize;
 
+        // Every data block first, so `next_data` and `seq_num` can be numbered
+        // across the whole file rather than per header block.
         let data_blocks: Vec<Block> = (0..chunks.len()).map(|_| self.alloc()).collect();
+
+        // Pointers past the header's table live in file extension blocks,
+        // chained from its `extension` field (SPEC §Files). One extension
+        // block per group of `ht` beyond the first (IMP-004).
+        let extra_groups = data_blocks.len().saturating_sub(ht).div_ceil(ht.max(1));
+        let ext_blocks: Vec<Block> = (0..extra_groups).map(|_| self.alloc()).collect();
+
         let is_ofs = self.is_ofs();
         for (i, (&blk, chunk)) in data_blocks.iter().zip(&chunks).enumerate() {
             let next = data_blocks.get(i + 1).copied().unwrap_or(0);
@@ -331,7 +338,7 @@ impl Volume {
             if is_ofs {
                 put_u32(b, 0, T_DATA);
                 put_u32(b, 4, header);
-                put_u32(b, 8, i as u32 + 1); // seq_num counts from 1
+                put_u32(b, 8, i as u32 + 1); // seq_num counts from 1, file-wide
                 put_u32(b, 12, chunk.len() as u32);
                 put_u32(b, 16, next);
                 b[24..24 + chunk.len()].copy_from_slice(chunk);
@@ -342,26 +349,48 @@ impl Volume {
             }
         }
 
-        let ht = Self::HT_SIZE as usize;
         let root = self.root;
+        let first_group: Vec<Block> = data_blocks.iter().take(ht).copied().collect();
         {
             let b = self.block_mut(header);
             put_u32(b, 0, T_HEADER);
             put_u32(b, 4, header);
-            put_u32(b, 8, data_blocks.len() as u32);
+            put_u32(b, 8, first_group.len() as u32);
             put_u32(b, 16, data_blocks.first().copied().unwrap_or(0));
             // data_blocks[] runs BACKWARDS: the first is at index ht-1.
-            for (i, &blk) in data_blocks.iter().enumerate() {
+            for (i, &blk) in first_group.iter().enumerate() {
                 put_u32(b, 24 + (ht - 1 - i) * 4, blk);
             }
             put_u32(b, BSIZE - 188, data.len() as u32);
             put_u32(b, BSIZE - 92, 1); // days: 0 is treated as illegal
             write_bcpl(b, BSIZE - 80, name.as_bytes(), 30);
             put_u32(b, BSIZE - 12, root);
+            put_u32(b, BSIZE - 8, ext_blocks.first().copied().unwrap_or(0));
             put_u32(b, BSIZE - 4, ST_FILE);
             let ck = normal_checksum(b);
             put_u32(b, 20, ck);
         }
+
+        for (g, &ext) in ext_blocks.iter().enumerate() {
+            let from = ht.saturating_mul(g + 1);
+            let group: Vec<Block> = data_blocks.iter().skip(from).take(ht).copied().collect();
+            let next_ext = ext_blocks.get(g + 1).copied().unwrap_or(0);
+            let b = self.block_mut(ext);
+            // An extension block is T_LIST, not T_HEADER, but keeps the file's
+            // secondary type and the same reversed pointer table.
+            put_u32(b, 0, T_LIST);
+            put_u32(b, 4, ext);
+            put_u32(b, 8, group.len() as u32);
+            for (i, &blk) in group.iter().enumerate() {
+                put_u32(b, 24 + (ht - 1 - i) * 4, blk);
+            }
+            put_u32(b, BSIZE - 12, header); // parent: the file header
+            put_u32(b, BSIZE - 8, next_ext);
+            put_u32(b, BSIZE - 4, ST_FILE);
+            let ck = normal_checksum(b);
+            put_u32(b, 20, ck);
+        }
+
         self.link_into(self.root, header, name.as_bytes());
         header
     }
@@ -546,7 +575,7 @@ impl Volume {
 }
 
 /// Write a BCPL-style string: a length byte followed by the characters, padded.
-fn write_bcpl(buf: &mut [u8], off: usize, s: &[u8], max: usize) {
+pub(crate) fn write_bcpl(buf: &mut [u8], off: usize, s: &[u8], max: usize) {
     let n = s.len().min(max);
     buf[off] = n as u8;
     buf[off + 1..off + 1 + n].copy_from_slice(&s[..n]);

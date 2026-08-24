@@ -171,8 +171,10 @@ Priorities are MoSCoW (Must / Should / Could / Won't). Effort is rough and pre-s
 **Effort:** M · **Phase:** 2, 5
 **Acceptance:**
 - Parse an RDB partition table in an HDF and browse/edit each volume through the GUI.
-**Status:** Not started
+**Status:** Partially delivered (2026-08-24) — reading is done, the GUI is not.
 **Notes:** rdbtool is CLI-only; friendly multi-partition HDF editing is essentially absent. Bounded by C-002.
+
+The parser reads `RDSK`, the `PART` chain and a minimal `FSHD`/`LSEG`, and every partition mounts through a bounds-checked window. `ade info` prints the table, and `ls`/`extract`/`check` take `--partition=` by drive name or index. What remains is the browse/edit surface in the GUI, which belongs to Phase 5, and editing itself, which D-004 defers to Phase 4.
 
 ## Candidate features (uncommitted)
 

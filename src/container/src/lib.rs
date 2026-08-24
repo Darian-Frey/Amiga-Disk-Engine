@@ -91,3 +91,82 @@ impl BlockSource for RawImage {
         Ok(())
     }
 }
+
+/// A window onto part of another block source.
+///
+/// A partition is a range of a device's blocks presented as a volume in its
+/// own right: block 0 of the view is block `start` of the device, and the
+/// rootblock sits at the view's midpoint rather than the device's.
+///
+/// Deliberately knows nothing about partition tables. It takes a start and a
+/// count, so the RDB parsing that produces those numbers stays in the
+/// filesystem layer and this stays in the container layer (D-003).
+pub struct Window<'a> {
+    source: &'a dyn BlockSource,
+    start: u64,
+    geometry: Geometry,
+}
+
+impl<'a> Window<'a> {
+    /// Present `blocks` blocks of `source`, beginning at `start`, as a volume.
+    ///
+    /// `reserved` is the partition's own reserved-block count, which comes from
+    /// its DOSEnvVec and is usually 2 — it feeds the rootblock computation, so
+    /// taking the floppy default would put the rootblock in the wrong place on
+    /// any partition that differs.
+    ///
+    /// # Errors
+    /// [`BlockError::OutOfRange`] if the window falls outside the device, or a
+    /// geometry error if the shape is unusable.
+    pub fn new(
+        source: &'a dyn BlockSource,
+        start: u64,
+        blocks: u32,
+        block_size: u32,
+        reserved: u32,
+    ) -> Result<Self, BlockError> {
+        let device_blocks = source.geometry().total_blocks();
+        let end = start.saturating_add(u64::from(blocks));
+        if end > device_blocks {
+            return Err(BlockError::OutOfRange {
+                index: BlockIndex(end),
+                total: device_blocks,
+            });
+        }
+        // A window is addressed as a flat run of blocks; heads and sectors are
+        // the device's business, not the volume's (SPEC §A raw volume has no
+        // geometry).
+        let geometry = Geometry::new(blocks, 1, 1, block_size, reserved).map_err(|_| {
+            BlockError::BufferSize {
+                got: 0,
+                want: block_size as usize,
+            }
+        })?;
+        Ok(Self {
+            source,
+            start,
+            geometry,
+        })
+    }
+
+    /// Where this window begins on the underlying device.
+    #[must_use]
+    pub const fn start(&self) -> u64 {
+        self.start
+    }
+}
+
+impl BlockSource for Window<'_> {
+    fn geometry(&self) -> &Geometry {
+        &self.geometry
+    }
+
+    fn read_block(&self, block: ValidBlock, out: &mut [u8]) -> Result<(), BlockError> {
+        // `block` is valid for the *window*; translating it to the device and
+        // validating again is what keeps AV-004 intact across the boundary —
+        // a window cannot be used to reach outside its own range.
+        let device_block = self.start.saturating_add(block.index());
+        let valid = self.source.geometry().validate(BlockIndex(device_block))?;
+        self.source.read_block(valid, out)
+    }
+}

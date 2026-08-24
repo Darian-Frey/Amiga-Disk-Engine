@@ -26,13 +26,14 @@
     clippy::expect_used,
     clippy::indexing_slicing,
     clippy::panic,
+    clippy::cast_possible_truncation,
     reason = "test scaffolding: a failure to set up is a test failure"
 )]
 
 use std::{fs, process::Command};
 
 use ade_core::Image;
-use ade_fixtures::Volume as Fixture;
+use ade_fixtures::{Volume as Fixture, device::Device};
 
 const MEM_KIB: u64 = 1_048_576;
 const TIMEOUT_S: u64 = 20;
@@ -43,7 +44,16 @@ fn have_unadf() -> bool {
 
 /// Run `unadf -lr` under hard caps, returning its listing.
 fn oracle_list(image: &std::path::Path) -> Option<String> {
-    let script = format!("ulimit -v {MEM_KIB}; exec timeout {TIMEOUT_S} unadf -lr \"$1\"");
+    oracle_list_volume(image, None)
+}
+
+/// As [`oracle_list`], but mounting one volume of a partitioned device.
+///
+/// ADFlib numbers partitions from zero in partition-list order, which is the
+/// order [`Image::partitions`] returns them in, so the indices line up.
+fn oracle_list_volume(image: &std::path::Path, volume: Option<usize>) -> Option<String> {
+    let select = volume.map_or(String::new(), |v| format!("-v {v} "));
+    let script = format!("ulimit -v {MEM_KIB}; exec timeout {TIMEOUT_S} unadf {select}-lr \"$1\"");
     let out = Command::new("sh")
         .arg("-c")
         .arg(&script)
@@ -111,6 +121,16 @@ fn adflib_reads_our_generated_volumes() {
             v.add_dir("Tools");
             ("hardfile", v.build())
         }))
+        .chain(std::iter::once({
+            // A file spanning several extension blocks, which the generator
+            // could not build until IMP-004 — so this path had no oracle.
+            let data: Vec<u8> = (0..200_000usize).map(|i| (i % 251) as u8).collect();
+            let mut v = Fixture::new(512, 1, 32, 0).named("ExtChain");
+            v.add_file("big.bin", &data);
+            v.add_file("\u{e4}pfel", b"umlaut");
+            v.add_dir("Tools");
+            ("extension", v.build())
+        }))
         .collect();
 
     let mut checked = 0usize;
@@ -157,7 +177,7 @@ fn adflib_reads_our_generated_volumes() {
         checked += 1;
     }
     eprintln!("ADFlib agreed with ADE on {checked} generated volumes");
-    assert_eq!(checked, 10);
+    assert_eq!(checked, 11);
 }
 
 #[test]
@@ -168,9 +188,20 @@ fn adflib_and_ade_agree_on_generated_file_contents() {
     }
     // Multi-block files, exercising the reversed data_blocks[] table and the
     // OFS/FFS payload difference (C-005) against an independent reader.
-    for (label, dostype) in [("ofs", 0u8), ("ffs", 1)] {
-        let payload: Vec<u8> = (0..9000u32).map(|i| (i % 251) as u8).collect();
-        let mut v = Fixture::dd(dostype).named("Contents");
+    // 9 KB fits a single header block; 200 KB spans several extension blocks,
+    // which is the path IMP-004 brought under the oracle.
+    for (label, dostype, size) in [
+        ("ofs", 0u8, 9_000usize),
+        ("ffs", 1, 9_000),
+        ("ofs-ext", 0, 200_000),
+        ("ffs-ext", 1, 200_000),
+    ] {
+        let payload: Vec<u8> = (0..size).map(|i| (i % 251) as u8).collect();
+        let mut v = if size > 100_000 {
+            Fixture::new(512, 1, 32, dostype).named("Contents")
+        } else {
+            Fixture::dd(dostype).named("Contents")
+        };
         v.add_file("data.bin", &payload);
         let path = write_temp(&v.build(), label);
 
@@ -203,4 +234,72 @@ fn adflib_and_ade_agree_on_generated_file_contents() {
         assert_eq!(ours.bytes, payload, "{label}: ADE did not round-trip");
         assert_eq!(theirs, payload, "{label}: ADFlib did not round-trip");
     }
+}
+
+#[test]
+fn adflib_reads_our_generated_device() {
+    // A partitioned device is the one shape with no counterpart in the corpus:
+    // every image we hold is a floppy. Without the oracle, the RDB parser and
+    // the RDB generator would only ever be checked against each other.
+    if !have_unadf() {
+        eprintln!("unadf not installed — skipping (apt install unadf)");
+        return;
+    }
+
+    let mut device = Device::new(64, 4, 32);
+    device.add_partition("DH0", 2, 30, 1, true, |v| {
+        v.add_file("startup", b"hello from DH0");
+        v.add_file("\u{e4}pfel", b"umlaut");
+        v.add_dir("Tools");
+    });
+    device.add_partition("DH1", 31, 63, 0, false, |v| {
+        v.add_file("data.bin", &[0xAA; 3000]);
+    });
+
+    let path = write_temp(&device.build(), "device");
+    let image = Image::open(&path).expect("open device");
+    let (parts, faults) = image.partitions().expect("read partition table");
+    assert!(faults.is_empty(), "clean device: {faults:?}");
+    assert_eq!(parts.len(), 2, "ADE found the wrong number of partitions");
+
+    let expected = [3usize, 1];
+    for (index, part) in parts.iter().enumerate() {
+        let listing = oracle_list_volume(&path, Some(index))
+            .unwrap_or_else(|| panic!("ADFlib refused partition {index} of a device we generated"));
+
+        // ADFlib reports the label from the partition's own rootblock, so this
+        // also checks that both readers placed that rootblock in the same
+        // place — the computation C-007 exists for.
+        let label = part.name_lossy();
+        assert!(
+            listing.contains(&format!("\"{label}\"")),
+            "partition {index}: ADFlib did not report the label {label:?}\n{listing}"
+        );
+
+        let window = image.partition_window(part).expect("window");
+        let volume = ade_core::layers::filesystem::volume::Volume::mount(&window)
+            .unwrap_or_else(|e| panic!("partition {index} did not mount: {e}"));
+        let ours = volume.walk(volume.root()).expect("walk").entries.len();
+
+        let theirs = listing
+            .lines()
+            .filter(|l| {
+                let t = l.trim();
+                !t.is_empty()
+                    && !t.starts_with("unADF")
+                    && !t.starts_with("Device")
+                    && !t.starts_with("Volume")
+                    && !t.starts_with("Warning")
+            })
+            .count();
+
+        assert_eq!(
+            theirs, ours,
+            "partition {index}: ADFlib found {theirs} entries, ADE found {ours}\n{listing}"
+        );
+        assert_eq!(ours, expected[index], "partition {index} entry count");
+    }
+
+    let _ = fs::remove_file(&path);
+    eprintln!("ADFlib agreed with ADE on both partitions of a generated device");
 }

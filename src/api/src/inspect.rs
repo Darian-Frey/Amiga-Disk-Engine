@@ -15,13 +15,15 @@
 
 use std::{fs, io, path::Path};
 
+use ade_block::{BlockError, BlockSource as _};
 use ade_block::{Geometry, GeometryError, read_at};
-use ade_container::{Detection, Kind, RawImage, sniff};
+use ade_container::{Detection, Kind, RawImage, Window, sniff};
 use ade_filesystem::{
     bootblock::Bootblock,
     datestamp::DateFault,
     dostype::FileSystem,
     entry::Entry,
+    rdb::{self, Partition, RigidDiskBlock},
     rootblock::Rootblock,
     volume::{FsError, Volume},
 };
@@ -47,6 +49,77 @@ pub struct Inspection {
     pub volume: Option<VolumeInfo>,
     /// Why no volume was found, when none was.
     pub volume_absent: Option<String>,
+    /// The Rigid Disk Block, where the device has one.
+    pub rdb: Option<RdbInfo>,
+    /// The partitions the device declares, empty for an unpartitioned image.
+    pub partitions: Vec<PartitionInfo>,
+    /// Faults found walking the partition chain.
+    pub partition_faults: Vec<String>,
+}
+
+/// A device's Rigid Disk Block, as `ade info` reports it.
+///
+/// The geometry here is what the **drive** declares, which is not the geometry
+/// used to address blocks: block numbers are linear from the start of the
+/// image. It is reported because partitions are cut in cylinders, so the
+/// cylinder size is what makes their extents make sense.
+#[derive(Debug, Clone)]
+pub struct RdbInfo {
+    /// The block the `RDSK` structure occupies — 0 on almost every device.
+    pub block: u32,
+    /// Whether its checksum verifies.
+    pub checksum_valid: bool,
+    /// Device block size in bytes.
+    pub block_size: u32,
+    /// Physical cylinders.
+    pub cylinders: u32,
+    /// Heads.
+    pub heads: u32,
+    /// Sectors per track.
+    pub sectors: u32,
+    /// Highest block used by the reserved area.
+    pub high_rdsk_block: u32,
+    /// Drive vendor, as stored.
+    pub vendor: String,
+    /// Drive product, as stored.
+    pub product: String,
+    /// Drive revision, as stored.
+    pub revision: String,
+}
+
+/// One partition, as `ade info` reports it.
+///
+/// The dostype here is what the **partition table** claims, which is advisory:
+/// the partition's own bootblock is authoritative (ADF FAQ §6.3). Where the two
+/// disagree, `volume_name` came from mounting, so it reflects the bootblock.
+#[derive(Debug, Clone)]
+pub struct PartitionInfo {
+    /// Drive name — `DH0` and the like.
+    pub name: String,
+    /// First cylinder, inclusive.
+    pub low_cylinder: u32,
+    /// Last cylinder, inclusive.
+    pub high_cylinder: u32,
+    /// First block on the device.
+    pub first_block: u64,
+    /// How many blocks the partition spans.
+    pub blocks: u64,
+    /// Block size in bytes.
+    pub block_size: u32,
+    /// Reserved blocks at the partition's start — usually 2. The rootblock is
+    /// computed from it, so a partition that differs is still placed correctly
+    /// (C-007).
+    pub reserved: u32,
+    /// The dostype the partition table claims.
+    pub dostype: u32,
+    /// Whether the partition is marked bootable.
+    pub bootable: bool,
+    /// Whether its `PART` checksum verifies.
+    pub checksum_valid: bool,
+    /// The volume label, where the partition mounted.
+    pub volume_name: Option<String>,
+    /// Why it did not mount, where it did not.
+    pub mount_error: Option<String>,
 }
 
 /// A mounted-enough volume: what the rootblock says about itself.
@@ -122,6 +195,9 @@ pub fn inspect_bytes(bytes: Vec<u8>) -> Inspection {
             bootblock,
             volume: None,
             volume_absent: Some(reason),
+            rdb: None,
+            partitions: Vec::new(),
+            partition_faults: Vec::new(),
         };
     };
 
@@ -135,30 +211,109 @@ pub fn inspect_bytes(bytes: Vec<u8>) -> Inspection {
                 bootblock,
                 volume: None,
                 volume_absent: Some(e.to_string()),
+                rdb: None,
+                partitions: Vec::new(),
+                partition_faults: Vec::new(),
             };
         }
     };
 
-    let (volume, volume_absent) = read_volume(bytes, geometry);
+    let Ok(image) = RawImage::new(bytes, geometry) else {
+        return Inspection {
+            detection,
+            size,
+            geometry: Some(geometry),
+            bootblock,
+            volume: None,
+            volume_absent: Some("image is shorter than its geometry".to_owned()),
+            rdb: None,
+            partitions: Vec::new(),
+            partition_faults: Vec::new(),
+        };
+    };
+    let (volume, volume_absent) = read_volume(&image, geometry);
+    let (rdb, partitions, partition_faults) = read_partition_table(&image);
     Inspection {
         detection,
         size,
         geometry: Some(geometry),
-        bootblock,
+        // A device whose block 0 is an RDB has no bootblock; parsing one out of
+        // the RDSK bytes yields a confident-sounding report about nothing.
+        bootblock: if rdb.is_some() { None } else { bootblock },
         volume,
         volume_absent,
+        rdb,
+        partitions,
+        partition_faults,
     }
 }
 
-fn read_volume(bytes: Vec<u8>, geometry: Geometry) -> (Option<VolumeInfo>, Option<String>) {
-    let Ok(image) = RawImage::new(bytes, geometry) else {
-        return (None, Some("image is shorter than its geometry".to_owned()));
+/// Read the partition table, mounting each partition far enough to learn its
+/// label.
+///
+/// A device with no Rigid Disk Block yields no partitions and no faults: a
+/// floppy having no partition table is not a defect.
+fn read_partition_table(image: &RawImage) -> (Option<RdbInfo>, Vec<PartitionInfo>, Vec<String>) {
+    let geometry = *image.geometry();
+    let Ok(Some(rdb)) = RigidDiskBlock::find(image, &geometry) else {
+        return (None, Vec::new(), Vec::new());
     };
+    let latin1 = |v: &[u8]| -> String { v.iter().map(|&b| char::from(b)).collect() };
+    let info = RdbInfo {
+        block: rdb.block,
+        checksum_valid: rdb.checksum_valid,
+        block_size: rdb.block_size,
+        cylinders: rdb.cylinders,
+        heads: rdb.heads,
+        sectors: rdb.sectors,
+        high_rdsk_block: rdb.high_rdsk_block,
+        vendor: latin1(&rdb.vendor).trim().to_owned(),
+        product: latin1(&rdb.product).trim().to_owned(),
+        revision: latin1(&rdb.revision).trim().to_owned(),
+    };
+    let (parts, faults) = rdb::read_partitions(image, &geometry, &rdb);
+    let infos = parts
+        .iter()
+        .map(|p| {
+            let blocks = u32::try_from(p.block_count()).unwrap_or(u32::MAX);
+            let block_size = if p.block_size == 0 { 512 } else { p.block_size };
+            let window = Window::new(image, p.first_block(), blocks, block_size, p.reserved);
+            let (volume_name, mount_error) = match window {
+                Ok(w) => match Volume::mount(&w) {
+                    Ok(v) => (Some(v.rootblock().name_lossy()), None),
+                    Err(e) => (None, Some(e.to_string())),
+                },
+                Err(e) => (None, Some(e.to_string())),
+            };
+            PartitionInfo {
+                name: p.name_lossy(),
+                low_cylinder: p.low_cylinder,
+                high_cylinder: p.high_cylinder,
+                first_block: p.first_block(),
+                blocks: p.block_count(),
+                block_size,
+                reserved: p.reserved,
+                dostype: p.dostype,
+                bootable: p.bootable,
+                checksum_valid: p.checksum_valid,
+                volume_name,
+                mount_error,
+            }
+        })
+        .collect();
+    (
+        Some(info),
+        infos,
+        faults.iter().map(ToString::to_string).collect(),
+    )
+}
+
+fn read_volume(image: &RawImage, geometry: Geometry) -> (Option<VolumeInfo>, Option<String>) {
     // Computed, never read from the bootblock — that field says 880 even on HD
     // volumes whose rootblock is at 1760 (C-007).
     let at = geometry.root_block();
     let mut block = vec![0u8; geometry.block_size() as usize];
-    if let Err(e) = read_at(&image, at, &mut block) {
+    if let Err(e) = read_at(image, at, &mut block) {
         return (None, Some(format!("cannot read {at}: {e}")));
     }
     match Rootblock::parse(&block) {
@@ -291,55 +446,10 @@ impl Inspection {
             ])
         });
 
-        let bootblock = self.bootblock.as_ref().map(|bb| {
-            Value::Obj(vec![
-                ("prefix", Value::str(bb.prefix_display())),
-                ("is_dos", Value::Bool(bb.is_dos())),
-                (
-                    "dostype",
-                    bb.dostype.as_ref().map_or(Value::Null, |d| {
-                        Value::Obj(vec![
-                            ("raw", Value::Num(u64::from(d.raw()))),
-                            ("flags", Value::Num(u64::from(d.flags()))),
-                            ("label", Value::str(d.to_string())),
-                            (
-                                "filesystem",
-                                Value::str(match d.filesystem() {
-                                    FileSystem::Ofs => "ofs",
-                                    FileSystem::Ffs => "ffs",
-                                }),
-                            ),
-                            ("international", Value::Bool(d.is_international())),
-                            ("dircache", Value::Bool(d.has_dircache())),
-                            (
-                                "unrecognised_flags",
-                                Value::Num(u64::from(d.unrecognised_flags())),
-                            ),
-                        ])
-                    }),
-                ),
-                ("checksum_valid", Value::Bool(bb.checksum_valid)),
-                ("has_boot_code", Value::Bool(bb.has_boot_code)),
-                (
-                    "stored_rootblock",
-                    Value::Num(u64::from(bb.stored_rootblock)),
-                ),
-            ])
-        });
-
-        let volume = self.volume.as_ref().map(|v| {
-            let r = &v.rootblock;
-            Value::Obj(vec![
-                ("name", Value::latin1(&r.name)),
-                ("rootblock", Value::Num(v.rootblock_at)),
-                ("checksum_valid", Value::Bool(r.checksum_valid)),
-                ("bitmap_flag_valid", Value::Bool(r.bitmap_flag_valid())),
-                ("hash_table_size", Value::Num(u64::from(r.hash_table_size))),
-                ("created", Value::str(r.created.to_string())),
-                ("modified", Value::str(r.volume_altered.to_string())),
-                ("root_altered", Value::str(r.root_altered.to_string())),
-            ])
-        });
+        let bootblock = self.bootblock.as_ref().map(bootblock_json);
+        let volume = self.volume.as_ref().map(volume_json);
+        let rdb = self.rdb.as_ref().map(RdbInfo::to_json);
+        let partitions = Value::Arr(self.partitions.iter().map(PartitionInfo::to_json).collect());
 
         Value::Obj(vec![
             ("container", Value::str(self.detection.kind.to_string())),
@@ -360,6 +470,17 @@ impl Inspection {
             (
                 "volume_absent",
                 Value::opt(self.volume_absent.as_ref(), Value::str),
+            ),
+            ("rdb", Value::opt(rdb, |r| r)),
+            ("partitions", partitions),
+            (
+                "partition_faults",
+                Value::Arr(
+                    self.partition_faults
+                        .iter()
+                        .map(|f| Value::str(f.clone()))
+                        .collect(),
+                ),
             ),
             (
                 "faults",
@@ -431,7 +552,10 @@ fn geometry_for(kind: Kind, size: u64) -> Option<Result<Geometry, GeometryError>
             512,
             Geometry::FLOPPY_RESERVED,
         )),
-        Kind::Hardfile => {
+        // Both present the device as a flat run of blocks. For an RDB device
+        // that run is the *device*, not a volume: partitions are windows onto
+        // it, each with its own reserved count from its DOSEnvVec.
+        Kind::Hardfile | Kind::RigidDisk => {
             let blocks = u32::try_from(size / 512).ok()?;
             // Below a floppy's worth there is nothing worth mounting, and the
             // rootblock arithmetic stops being meaningful.
@@ -474,6 +598,46 @@ impl Image {
         Ok(Self { raw })
     }
 
+    /// The device's partition table, if it has one.
+    ///
+    /// `Ok(None)` for an image with no Rigid Disk Block, which is most of them
+    /// — a floppy has no partition table and that is not a fault.
+    ///
+    /// # Errors
+    /// A read error on the reserved area.
+    pub fn rdb(&self) -> Result<Option<RigidDiskBlock>, FsError> {
+        RigidDiskBlock::find(&self.raw, self.raw.geometry())
+    }
+
+    /// Every partition the device declares, with any faults found walking the
+    /// chain.
+    ///
+    /// A broken chain stops the walk and is reported rather than discarding the
+    /// partitions found before it: half a partition table is still worth having.
+    ///
+    /// # Errors
+    /// A read error on the reserved area.
+    pub fn partitions(&self) -> Result<(Vec<Partition>, Vec<FsError>), FsError> {
+        let Some(rdb) = self.rdb()? else {
+            return Ok((Vec::new(), Vec::new()));
+        };
+        Ok(rdb::read_partitions(&self.raw, self.raw.geometry(), &rdb))
+    }
+
+    /// A window onto one partition, which can then be mounted like any volume.
+    ///
+    /// The partition's own `reserved` count comes from its DOSEnvVec and feeds
+    /// the rootblock computation, so a partition differing from the usual two
+    /// is still placed correctly (C-007).
+    ///
+    /// # Errors
+    /// [`BlockError`] if the partition's extent falls outside the device.
+    pub fn partition_window(&self, p: &Partition) -> Result<Window<'_>, BlockError> {
+        let blocks = u32::try_from(p.block_count()).unwrap_or(u32::MAX);
+        let block_size = if p.block_size == 0 { 512 } else { p.block_size };
+        Window::new(&self.raw, p.first_block(), blocks, block_size, p.reserved)
+    }
+
     /// Mount the volume this image holds.
     ///
     /// # Errors
@@ -481,6 +645,110 @@ impl Image {
     /// rootblock where one should be.
     pub fn volume(&self) -> Result<Volume<'_>, FsError> {
         Volume::mount(&self.raw)
+    }
+}
+
+/// One bootblock as JSON, split out to keep `Inspection::to_json` readable.
+fn bootblock_json(bb: &Bootblock) -> Value {
+    Value::Obj(vec![
+        ("prefix", Value::str(bb.prefix_display())),
+        ("is_dos", Value::Bool(bb.is_dos())),
+        (
+            "dostype",
+            bb.dostype.as_ref().map_or(Value::Null, |d| {
+                Value::Obj(vec![
+                    ("raw", Value::Num(u64::from(d.raw()))),
+                    ("flags", Value::Num(u64::from(d.flags()))),
+                    ("label", Value::str(d.to_string())),
+                    (
+                        "filesystem",
+                        Value::str(match d.filesystem() {
+                            FileSystem::Ofs => "ofs",
+                            FileSystem::Ffs => "ffs",
+                        }),
+                    ),
+                    ("international", Value::Bool(d.is_international())),
+                    ("dircache", Value::Bool(d.has_dircache())),
+                    (
+                        "unrecognised_flags",
+                        Value::Num(u64::from(d.unrecognised_flags())),
+                    ),
+                ])
+            }),
+        ),
+        ("checksum_valid", Value::Bool(bb.checksum_valid)),
+        ("has_boot_code", Value::Bool(bb.has_boot_code)),
+        (
+            "stored_rootblock",
+            Value::Num(u64::from(bb.stored_rootblock)),
+        ),
+    ])
+}
+
+/// One volume as JSON, split out to keep `Inspection::to_json` readable.
+fn volume_json(v: &VolumeInfo) -> Value {
+    let r = &v.rootblock;
+    Value::Obj(vec![
+        ("name", Value::latin1(&r.name)),
+        ("rootblock", Value::Num(v.rootblock_at)),
+        ("checksum_valid", Value::Bool(r.checksum_valid)),
+        ("bitmap_flag_valid", Value::Bool(r.bitmap_flag_valid())),
+        ("hash_table_size", Value::Num(u64::from(r.hash_table_size))),
+        ("created", Value::str(r.created.to_string())),
+        ("modified", Value::str(r.volume_altered.to_string())),
+        ("root_altered", Value::str(r.root_altered.to_string())),
+    ])
+}
+
+impl RdbInfo {
+    /// This device's Rigid Disk Block as JSON (F-015).
+    #[must_use]
+    pub fn to_json(&self) -> Value {
+        Value::Obj(vec![
+            ("block", Value::Num(u64::from(self.block))),
+            ("checksum_valid", Value::Bool(self.checksum_valid)),
+            ("block_size", Value::Num(u64::from(self.block_size))),
+            ("cylinders", Value::Num(u64::from(self.cylinders))),
+            ("heads", Value::Num(u64::from(self.heads))),
+            ("sectors", Value::Num(u64::from(self.sectors))),
+            (
+                "high_rdsk_block",
+                Value::Num(u64::from(self.high_rdsk_block)),
+            ),
+            ("vendor", Value::str(self.vendor.clone())),
+            ("product", Value::str(self.product.clone())),
+            ("revision", Value::str(self.revision.clone())),
+        ])
+    }
+}
+
+impl PartitionInfo {
+    /// This partition as JSON (F-015).
+    ///
+    /// `dostype` is the **table's** claim; `volume_name` came from mounting, so
+    /// it reflects the partition's own bootblock where the two disagree.
+    #[must_use]
+    pub fn to_json(&self) -> Value {
+        Value::Obj(vec![
+            ("name", Value::str(self.name.clone())),
+            ("low_cylinder", Value::Num(u64::from(self.low_cylinder))),
+            ("high_cylinder", Value::Num(u64::from(self.high_cylinder))),
+            ("first_block", Value::Num(self.first_block)),
+            ("blocks", Value::Num(self.blocks)),
+            ("block_size", Value::Num(u64::from(self.block_size))),
+            ("reserved", Value::Num(u64::from(self.reserved))),
+            ("dostype", Value::Num(u64::from(self.dostype))),
+            ("bootable", Value::Bool(self.bootable)),
+            ("checksum_valid", Value::Bool(self.checksum_valid)),
+            (
+                "volume_name",
+                Value::opt(self.volume_name.as_ref(), Value::str),
+            ),
+            (
+                "mount_error",
+                Value::opt(self.mount_error.as_ref(), Value::str),
+            ),
+        ])
     }
 }
 

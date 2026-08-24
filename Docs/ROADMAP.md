@@ -55,15 +55,16 @@ Neither run is the F-001 bar, which requires a fuzz corpus rather than well-form
 
 ## Phase 2 — Filesystem breadth
 **Goal:** Cover the full non-flux filesystem surface, including hard-disk images, plus forensic recovery.
-**Status:** Not started
-**Features delivered:** F-009 (initial), F-010 *(largely delivered early, 2026-08-24)*, F-012, F-017, F-018
+**Status:** In progress
+**Features delivered:** F-009 (initial), F-010 *(largely delivered early, 2026-08-24)*, F-012, F-017, F-018 *(reading half delivered 2026-08-24; the GUI half waits on Phase 5)*
 **Deliverables:**
 - [x] HD (1.76 MB) geometry — mounts, round-trips OFS and FFS, rootblock computed at 1760 rather than read (C-007). Extra-cylinder (81–83) geometries too. Cross-checked against ADFlib.
 - [x] Dostype identification and hashing across all eight, including the international variants, cross-checked against ADFlib on accented filenames (C-006).
 - [ ] 5.25" DD geometry — SPEC has no source for it; see §Open questions.
 - [ ] Real dircache blocks (`DOS\4`/`\5`) and LNFS long names (`DOS\6`/`\7`). Identification works; the structures do not exist yet.
 - [x] **HDF (unpartitioned hardfiles)** — mount, list, extract, health-check. A raw volume carries no geometry of its own: heads and sectors are a convention of whatever wrote it, and only the block count matters, since that fixes where the rootblock sits (C-007). ADFlib takes the same view, calling an 8 MB hardfile "Cylinders = 16384, Heads = 1, Sectors = 1". Cross-checked against `unadf`.
-- [ ] RDB multi-partition images; configurable block sizes (C-002, C-005). The RDB parser is next; hardfile mounting is its foundation.
+- [x] **RDB multi-partition images** — `RDSK` located by searching the first 16 blocks rather than assumed at 0, the `PART` chain walked with cycle detection, and each partition presented as a `Window` that re-validates every translated block number, so AV-004 holds across the partition boundary as well as inside it. `ade info` reports the table; `ls`, `extract` and `check` take `--partition=` by drive name or index. Two units the format makes easy to get wrong have their own tests: `SizeBlock` counts **longs**, and RDB lists terminate at **-1**, not 0. Cross-checked against ADFlib, which reads both partitions of a generated device at the same sector ranges we do. Scanning the corpus found the `RDSK` signature in the first 16 blocks of **0 of 4,652** images, so the search costs real floppies nothing.
+- [ ] Configurable block sizes (C-002, C-005). Each partition's `SizeBlock` is parsed and honoured, but every fixture and every corpus image is 512 bytes, so larger blocks are untested.
 - [x] Links, comments, protection bits, datestamps. Hard links resolve through `real_entry` with a bounds check and a visited set; `ade ls` shows targets; a link to a directory is walked once rather than once per link. Fixed BUG-005 on the way — reading a hard link had silently returned an empty file. **Caveat:** `unadf` omits links from its listings, so this is the one Phase 2 area with neither an oracle nor corpus material.
 - [x] Standalone bitmap rebuild (AV-003) — `Bitmap::rebuild` computes the map a volume *should* have from the blocks its tree reaches, and the health report names the specific blocks that disagree in each direction. **Computed and offered, never written**: D-004 defers write paths to Phase 4 and is marked never-reversible in v1, and AV-003 asks for a rebuild to be *offered*. Proved correct without touching a disk — build it, read it back, confirm it describes the set it was built from.
 - [ ] Undelete/salvage (F-012). **Blocked on material**: the corpus holds no recoverable deleted entries — zero intact deleted file headers across 90 disks, since mastered game disks have no editing history. Fixture-only, and the oracle cannot help either. Worth deferring until there is something real to recover.

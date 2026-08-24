@@ -22,8 +22,12 @@ Phase 0 is complete (2026-08-22). Phase 1 is unblocked and nothing is waiting on
 1. ~~First slice `ade info`~~ — **done 2026-08-22**. Runs over all 4288 corpus images with zero crashes.
 2. ~~Mount and traverse~~ — **done 2026-08-22**. `ade ls` and `ade extract` work; 11,087 files extracted from a 400-image sample with zero read errors. AV-001 is discharged: every chain carries a visited set.
 3. ~~Fuzz harness~~ — **done 2026-08-23**. 900,000 cases, six targets, zero failures. Runs in CI; deep sweeps via `ADE_FUZZ_ITERS`.
-4. **Phase 2 in progress.** Done: links (BUG-005), HD and extra-cylinder geometry, bitmap rebuild, unpartitioned hardfiles (BUG-006). Left: **RDB partitioning** (next, and hardfile mounting is its foundation), real dircache blocks, LNFS, 5.25" DD (no source).
+4. **Phase 2 in progress.** Done: links (BUG-005), HD and extra-cylinder geometry, bitmap rebuild, unpartitioned hardfiles (BUG-006), **RDB partitioning** (2026-08-24). Left: real dircache blocks, LNFS, 5.25" DD (no source), configurable block sizes (parsed and honoured, but nothing to test against — everything held is 512).
+   **A device has no volume of its own.** Its block 0 is an `RDSK`, not a bootblock; every volume is inside a partition. Anything that mounts an image must therefore ask which partition first, and a report that says "no volume" for a device is calling a sound disk broken — that is what `Health::examined` and `--partition=` exist for.
+   **The RDB counts in units the filesystem does not.** `SizeBlock` is in **longs**; its lists terminate at **-1**, not 0. Both have their own tests because both read plausibly when wrong.
+   **The RDB path has no corpus.** 0 of 4652 images carry an `RDSK` in their first 16 blocks, so the D-002 oracle over generated devices is its *only* external check — and ADFlib is stricter than the format there, refusing any device without an `LSEG` chain that FAQ §6.5 says is not needed (SPEC §The oracle is stricter than the format here).
    **A raw volume has no geometry** — only its block count, which fixes the rootblock. ADFlib invents a shape to match; so does ADE.
+   The fixture generator now builds file extension blocks (IMP-004), so large-file and extension-chain paths are under the oracle.
    **F-012 undelete is blocked on material**, not effort: zero intact deleted file headers across 90 corpus disks, because mastered game disks have no editing history.
    **Bitmap rebuild is computed, never applied** — D-004 defers writes to Phase 4 and is never-reversible in v1.
 5. ~~F-010 health report~~ — **done 2026-08-24**. `ade check`, severity-ranked findings, bitmap cross-check discharging AV-003's detection. Bad sectors and weak bits are deliberately absent: flux-level, Phase 4.

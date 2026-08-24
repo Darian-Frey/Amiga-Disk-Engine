@@ -158,6 +158,27 @@ pub fn clear_created_date(img: &mut [u8], root: u32) {
     rechecksum(img, root);
 }
 
+/// Point a file extension block's `extension` field back at itself (AV-001).
+///
+/// The extension chain loops as readily as a hash chain, and until the fixture
+/// generator could build extension blocks at all (IMP-004) the visited set
+/// guarding it had nothing to be tested against.
+pub fn extension_chain_loop(img: &mut [u8], ext_block: u32) {
+    put_u32(img, ext_block as usize * BSIZE + (BSIZE - 8), ext_block);
+    rechecksum(img, ext_block);
+}
+
+/// Make two extension blocks point at each other (AV-001).
+///
+/// Distinct from the self-loop: a "next != self" check catches that one and
+/// misses this.
+pub fn extension_chain_cycle(img: &mut [u8], a: u32, b: u32) {
+    put_u32(img, a as usize * BSIZE + (BSIZE - 8), b);
+    put_u32(img, b as usize * BSIZE + (BSIZE - 8), a);
+    rechecksum(img, a);
+    rechecksum(img, b);
+}
+
 /// Truncate the image to `blocks` blocks.
 ///
 /// One survey image is 90,112 bytes — eight cylinders of what should be eighty.

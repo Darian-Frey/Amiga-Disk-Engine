@@ -41,7 +41,13 @@ use std::{
     process::ExitCode,
 };
 
-use ade_core::{Health, Image, Inspection, Severity, entry_to_json, examine, inspect_path};
+use ade_core::{
+    Health, Image, Inspection, Severity, entry_to_json, examine_partition, inspect_path,
+    layers::{
+        container::Window,
+        filesystem::{rdb::Partition, volume::Volume},
+    },
+};
 
 /// No faults found.
 const EXIT_CLEAN: u8 = 0;
@@ -95,11 +101,14 @@ struct Args {
     command: String,
     positional: Vec<String>,
     format: Format,
+    /// Which partition of a hard disk to act on, by name or index.
+    partition: Option<String>,
 }
 
 fn parse_args(raw: Vec<String>) -> Result<Args, String> {
     let mut positional: Vec<String> = Vec::new();
     let mut format = Format::Text;
+    let mut partition: Option<String> = None;
     for arg in raw {
         match arg.as_str() {
             "--format=json" | "--json" => format = Format::Json,
@@ -109,6 +118,9 @@ fn parse_args(raw: Vec<String>) -> Result<Args, String> {
                     "unknown format: {}",
                     other.trim_start_matches("--format=")
                 ));
+            }
+            other if other.starts_with("--partition=") => {
+                partition = Some(other.trim_start_matches("--partition=").to_owned());
             }
             "--version" | "-V" | "--help" | "-h" => positional.push(arg),
             other if other.starts_with("--") => return Err(format!("unknown option: {other}")),
@@ -124,6 +136,7 @@ fn parse_args(raw: Vec<String>) -> Result<Args, String> {
         command,
         positional,
         format,
+        partition,
     })
 }
 
@@ -140,11 +153,26 @@ fn main() -> ExitCode {
 
     match (args.command.as_str(), args.positional.len()) {
         ("info", 1) => info(Path::new(p(0)), args.format),
-        ("check", 1) => check(Path::new(p(0)), args.format),
-        ("ls", 1) => list(Path::new(p(0)), None, args.format),
-        ("ls", 2) => list(Path::new(p(0)), Some(p(1)), args.format),
-        ("extract", 2) => extract(Path::new(p(0)), p(1), None),
-        ("extract", 3) => extract(Path::new(p(0)), p(1), Some(PathBuf::from(p(2)))),
+        ("check", 1) => check(Path::new(p(0)), args.format, args.partition.as_deref()),
+        ("ls", 1) => list(
+            Path::new(p(0)),
+            None,
+            args.format,
+            args.partition.as_deref(),
+        ),
+        ("ls", 2) => list(
+            Path::new(p(0)),
+            Some(p(1)),
+            args.format,
+            args.partition.as_deref(),
+        ),
+        ("extract", 2) => extract(Path::new(p(0)), p(1), None, args.partition.as_deref()),
+        ("extract", 3) => extract(
+            Path::new(p(0)),
+            p(1),
+            Some(PathBuf::from(p(2))),
+            args.partition.as_deref(),
+        ),
         ("--version" | "-V", 0) => {
             println!("ade {}", ade_core::version());
             ExitCode::from(EXIT_CLEAN)
@@ -173,6 +201,7 @@ fn usage() {
     println!("OPTIONS:");
     println!("    --format=text   human-readable (default); layout is not stable");
     println!("    --format=json   machine-readable; field names and fault codes are stable");
+    println!("    --partition=P   which partition of a hard disk, by name (DH0) or index (0)");
     println!();
     println!("EXIT CODES:");
     println!("    0  clean   1  faults   2  usage   3  unreadable   4  no volume");
@@ -197,40 +226,83 @@ fn info(path: &Path, format: Format) -> ExitCode {
     }
     let _ = out.flush();
 
-    ExitCode::from(if inspection.volume.is_none() {
-        EXIT_NO_VOLUME
-    } else if inspection.faults().is_empty() {
-        EXIT_CLEAN
-    } else {
-        EXIT_FAULTS
-    })
+    ExitCode::from(
+        if inspection.volume.is_none() && inspection.partitions.is_empty() {
+            EXIT_NO_VOLUME
+        } else if inspection.faults().is_empty() {
+            EXIT_CLEAN
+        } else {
+            EXIT_FAULTS
+        },
+    )
 }
 
 /// The human rendering.
 ///
 /// Faults come from the engine, so the two output formats cannot drift apart
 /// about what is wrong with an image.
-fn report_text(out: &mut impl Write, path: &Path, i: &Inspection) {
-    let mut lines: Vec<String> = vec![
-        format!("{}", path.display()),
-        format!("  container   {}", i.detection.kind),
-        format!("  size        {} bytes", i.size),
-    ];
-    if let Some(g) = i.geometry {
+/// The device sections of the text report: the Rigid Disk Block, and the
+/// partition table it points at.
+///
+/// Neither appears for a floppy, which is most images — a disk having no
+/// partition table is not a fault worth a line.
+fn device_lines(lines: &mut Vec<String>, i: &Inspection) {
+    if let Some(r) = &i.rdb {
+        lines.push("  rigid disk block".to_owned());
+        lines.push(format!("    at          block {}", r.block));
         lines.push(format!(
-            "  geometry    {} cylinders x {} heads x {} sectors x {} bytes = {} blocks",
-            g.cylinders(),
-            g.heads(),
-            g.sectors(),
-            g.block_size(),
-            g.total_blocks()
+            "    checksum    {}",
+            if r.checksum_valid { "valid" } else { "INVALID" }
         ));
-    }
-    lines.push("  evidence".to_owned());
-    for e in &i.detection.evidence {
-        lines.push(format!("    - {e}"));
+        lines.push(format!(
+            "    drive       {} cylinders x {} heads x {} sectors x {} bytes",
+            r.cylinders, r.heads, r.sectors, r.block_size
+        ));
+        lines.push(format!("    reserved    up to block {}", r.high_rdsk_block));
+        let drive = [r.vendor.as_str(), r.product.as_str(), r.revision.as_str()]
+            .into_iter()
+            .filter(|s| !s.is_empty())
+            .collect::<Vec<_>>()
+            .join(" ");
+        if !drive.is_empty() {
+            lines.push(format!("    identity    {drive:?}"));
+        }
     }
 
+    if !i.partitions.is_empty() {
+        lines.push(format!("  partitions  {}", i.partitions.len()));
+        for p in &i.partitions {
+            lines.push(format!(
+                "    {:<8} cylinders {}..{}, block {} + {} x {} bytes",
+                p.name, p.low_cylinder, p.high_cylinder, p.first_block, p.blocks, p.block_size
+            ));
+            lines.push(format!(
+                "             dostype {:#010x}{}{}",
+                p.dostype,
+                if p.bootable { ", bootable" } else { "" },
+                if p.checksum_valid {
+                    ""
+                } else {
+                    ", PART checksum INVALID"
+                }
+            ));
+            match (&p.volume_name, &p.mount_error) {
+                (Some(name), _) => lines.push(format!("             volume {name:?}")),
+                (None, Some(why)) => lines.push(format!("             does not mount — {why}")),
+                (None, None) => {}
+            }
+        }
+    }
+    for f in &i.partition_faults {
+        lines.push(format!("    ! partition table: {f}"));
+    }
+}
+
+/// The bootblock section of the text report.
+///
+/// Absent on a device, whose block 0 is a Rigid Disk Block rather than a
+/// bootblock — parsing one there produces a confident report about nothing.
+fn bootblock_lines(lines: &mut Vec<String>, i: &Inspection) {
     if let Some(bb) = &i.bootblock {
         lines.push("  bootblock".to_owned());
         match &bb.dostype {
@@ -259,9 +331,46 @@ fn report_text(out: &mut impl Write, path: &Path, i: &Inspection) {
                 bb.prefix_display()
             ));
         }
-    } else {
+    } else if i.rdb.is_none() {
         lines.push("  bootblock   absent — image too short".to_owned());
     }
+}
+
+fn report_text(out: &mut impl Write, path: &Path, i: &Inspection) {
+    let mut lines: Vec<String> = vec![
+        format!("{}", path.display()),
+        format!("  container   {}", i.detection.kind),
+        format!("  size        {} bytes", i.size),
+    ];
+    if let Some(g) = i.geometry {
+        if i.rdb.is_some() {
+            // A device is addressed linearly; the drive's own cylinder geometry
+            // is reported below, where it belongs, since only the partition
+            // extents are expressed in it.
+            lines.push(format!(
+                "  addressing  {} blocks x {} bytes, linear",
+                g.total_blocks(),
+                g.block_size()
+            ));
+        } else {
+            lines.push(format!(
+                "  geometry    {} cylinders x {} heads x {} sectors x {} bytes = {} blocks",
+                g.cylinders(),
+                g.heads(),
+                g.sectors(),
+                g.block_size(),
+                g.total_blocks()
+            ));
+        }
+    }
+    lines.push("  evidence".to_owned());
+    for e in &i.detection.evidence {
+        lines.push(format!("    - {e}"));
+    }
+
+    bootblock_lines(&mut lines, i);
+
+    device_lines(&mut lines, i);
 
     if let Some(v) = &i.volume {
         let r = &v.rootblock;
@@ -285,11 +394,14 @@ fn report_text(out: &mut impl Write, path: &Path, i: &Inspection) {
         ));
         lines.push(format!("    created     {}", r.created));
         lines.push(format!("    modified    {}", r.volume_altered));
-    } else {
+    } else if i.partitions.is_empty() {
         lines.push("  volume      none".to_owned());
         if let Some(why) = &i.volume_absent {
             lines.push(format!("              {why}"));
         }
+    } else {
+        // A partitioned device holds no volume of its own, by design.
+        lines.push("  volume      none — the volumes are in the partitions".to_owned());
     }
 
     let faults = i.faults();
@@ -314,7 +426,7 @@ fn report_text(out: &mut impl Write, path: &Path, i: &Inspection) {
 /// Faults found while walking are reported but do not stop the listing — a
 /// directory with one broken hash chain still has usable entries in its other
 /// slots.
-fn list(path: &Path, dir: Option<&str>, format: Format) -> ExitCode {
+fn list(path: &Path, dir: Option<&str>, format: Format, partition: Option<&str>) -> ExitCode {
     let image = match Image::open(path) {
         Ok(i) => i,
         Err(e) => {
@@ -322,7 +434,18 @@ fn list(path: &Path, dir: Option<&str>, format: Format) -> ExitCode {
             return ExitCode::from(EXIT_UNREADABLE);
         }
     };
-    let volume = match image.volume() {
+    let window = match select_partition(&image, partition) {
+        Ok(w) => w,
+        Err(e) => {
+            eprintln!("ade: {}: {e}", path.display());
+            return ExitCode::from(EXIT_NO_VOLUME);
+        }
+    };
+    let mounted = match &window {
+        Some(w) => Volume::mount(w),
+        None => image.volume(),
+    };
+    let volume = match mounted {
         Ok(v) => v,
         Err(e) => {
             eprintln!("ade: {}: {e}", path.display());
@@ -413,7 +536,7 @@ fn list(path: &Path, dir: Option<&str>, format: Format) -> ExitCode {
 }
 
 /// Extract one file to disk, or to stdout when no destination is given.
-fn extract(path: &Path, inner: &str, dest: Option<PathBuf>) -> ExitCode {
+fn extract(path: &Path, inner: &str, dest: Option<PathBuf>, partition: Option<&str>) -> ExitCode {
     let image = match Image::open(path) {
         Ok(i) => i,
         Err(e) => {
@@ -421,7 +544,18 @@ fn extract(path: &Path, inner: &str, dest: Option<PathBuf>) -> ExitCode {
             return ExitCode::from(EXIT_UNREADABLE);
         }
     };
-    let volume = match image.volume() {
+    let window = match select_partition(&image, partition) {
+        Ok(w) => w,
+        Err(e) => {
+            eprintln!("ade: {}: {e}", path.display());
+            return ExitCode::from(EXIT_NO_VOLUME);
+        }
+    };
+    let mounted = match &window {
+        Some(w) => Volume::mount(w),
+        None => image.volume(),
+    };
+    let volume = match mounted {
         Ok(v) => v,
         Err(e) => {
             eprintln!("ade: {}: {e}", path.display());
@@ -477,7 +611,7 @@ fn extract(path: &Path, inner: &str, dest: Option<PathBuf>) -> ExitCode {
 }
 
 /// Report an image's condition (F-010).
-fn check(path: &Path, format: Format) -> ExitCode {
+fn check(path: &Path, format: Format, partition: Option<&str>) -> ExitCode {
     let bytes = match std::fs::read(path) {
         Ok(b) => b,
         Err(e) => {
@@ -485,7 +619,7 @@ fn check(path: &Path, format: Format) -> ExitCode {
             return ExitCode::from(EXIT_UNREADABLE);
         }
     };
-    let health = examine(bytes);
+    let health = examine_partition(bytes, partition);
     let mut out = std::io::stdout().lock();
     match format {
         Format::Json => {
@@ -498,7 +632,9 @@ fn check(path: &Path, format: Format) -> ExitCode {
     ExitCode::from(match health.worst() {
         Some(Severity::Error) => EXIT_DATA_AT_RISK,
         Some(Severity::Warning) => EXIT_FAULTS,
-        _ if health.inspection.volume.is_none() => EXIT_NO_VOLUME,
+        // A device holds no volume at its own rootblock, so what matters is
+        // whether anything was examined, not whether the image itself mounted.
+        _ if health.examined.is_none() => EXIT_NO_VOLUME,
         _ => EXIT_CLEAN,
     })
 }
@@ -508,12 +644,19 @@ fn report_health(out: &mut impl Write, path: &Path, h: &Health) {
         format!("{}", path.display()),
         format!("  container   {}", h.inspection.detection.kind),
     ];
-    if let Some(v) = &h.inspection.volume {
-        lines.push(format!(
-            "  volume      {:?}  (rootblock {})",
-            v.rootblock.name_lossy(),
-            v.rootblock_at
-        ));
+    if let Some(e) = &h.examined {
+        // On a device this names the partition, so a report cannot be mistaken
+        // for one covering the whole disk.
+        match &e.partition {
+            Some(p) => lines.push(format!(
+                "  volume      {:?} on partition {p}  (rootblock {})",
+                e.volume, e.rootblock
+            )),
+            None => lines.push(format!(
+                "  volume      {:?}  (rootblock {})",
+                e.volume, e.rootblock
+            )),
+        }
         lines.push(format!(
             "  contents    {} files, {} directories, {} bytes recovered",
             h.files, h.directories, h.bytes_recovered
@@ -576,4 +719,49 @@ fn report_health(out: &mut impl Write, path: &Path, h: &Health) {
             return;
         }
     }
+}
+
+/// Resolve `--partition` against a device's partition table.
+///
+/// `None` means the image is a single volume, so nothing is selected. Naming a
+/// partition on an image with no table is an error rather than a silent
+/// fallback: the caller asked for something that does not exist.
+fn select_partition<'a>(
+    image: &'a Image,
+    wanted: Option<&str>,
+) -> Result<Option<Window<'a>>, String> {
+    let (parts, faults) = image.partitions().map_err(|e| e.to_string())?;
+    for f in &faults {
+        eprintln!("ade: partition table: {f}");
+    }
+    let Some(wanted) = wanted else {
+        // No selection: use the first partition if the device has one, since a
+        // partitioned device has no volume of its own.
+        if parts.is_empty() {
+            return Ok(None);
+        }
+        let first = parts.first().ok_or("no partitions")?;
+        return image
+            .partition_window(first)
+            .map(Some)
+            .map_err(|e| e.to_string());
+    };
+    if parts.is_empty() {
+        return Err(format!("no partition table, so no partition {wanted:?}"));
+    }
+    let found = parts
+        .iter()
+        .find(|p| p.name_lossy().eq_ignore_ascii_case(wanted))
+        .or_else(|| wanted.parse::<usize>().ok().and_then(|i| parts.get(i)))
+        .ok_or_else(|| {
+            let names: Vec<String> = parts.iter().map(Partition::name_lossy).collect();
+            format!(
+                "no partition {wanted:?}; this device has {}",
+                names.join(", ")
+            )
+        })?;
+    image
+        .partition_window(found)
+        .map(Some)
+        .map_err(|e| e.to_string())
 }

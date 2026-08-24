@@ -492,6 +492,19 @@ Non-AmigaDOS dostypes (`UNI\*`, `resv`) must be recognised and skipped rather th
 
 Id `'BADB'`, chained from `BadBlockList`, holding block-remap pairs. [FAQ §6.2]
 
+### The oracle is stricter than the format here
+
+*Observed 2026-08-24, building the RDB fixture generator.*
+
+FAQ §6.5 says the `LSEG` chain "isn't needed to reach partitions", and it is not: the partition list is reachable from `PartitionList` alone, and ADE mounts a device that has no `FileSysHdrList` at all. **ADFlib will not.** A device whose `FileSysHdrList` is `-1`, or whose `FSHD` names no valid `LSEG`, is rejected with a repeated `ReadLSEGblock : LSEG id not found` and no volume is reported.
+
+This is a divergence in *strictness*, not in reading — ADFlib demands a driver it never runs. It matters twice over:
+
+- A fixture built to the specification alone cannot be checked against the oracle, so the generator emits a minimal `FSHD` + `LSEG` pair. `Device::without_filesystem_driver()` builds the spec-legal-but-ADFlib-unmountable shape deliberately, so the difference stays visible rather than being quietly designed around.
+- A real device written by a tool that omits the driver would read in ADE and not in ADFlib. Which behaviour is *right* is not ours to settle; per D-012 the disagreement is recorded, not resolved in the oracle's favour.
+
+A second, narrower divergence: on a partition whose bitmap spans more than one block, ADFlib reports a fill percentage that direct byte inspection contradicts (94% for a partition with five blocks in use). Listing and extraction are unaffected, so this appears to be a display artefact in ADFlib rather than a disagreement about the disk. Recorded because it will otherwise be rediscovered as a suspected ADE bug.
+
 ## Hardfiles (HDF)
 
 A hardfile is a raw volume dump with no RDB — bootblock, rootblock, bitmap, exactly like a floppy but larger. Its first three bytes are therefore `'DOS'`. Typical UAE geometry is `heads = 1, sectors = 32`, cylinders derived from size. [FAQ §7]
@@ -634,6 +647,14 @@ Bootblock and filesystem must therefore be probed **independently**, and the res
 Extra-cylinder images are exact: 81, 82 and 83 cylinders land precisely on `cylinders × 2 × 11 × 512`. Drives could usually seek a few tracks past 80, and both protection schemes and ordinary "extra capacity" formats used them. Ten of the eleven extended-ADFs likewise declare 166 tracks — 83 cylinders.
 
 So the ADF size test is **`size % 11264 == 0` with a plausible cylinder count**, not `size == 901120`. The 901,121-byte image is a byte of trailing junk on an otherwise canonical image; the 90,112-byte one is a truncation. Both should be diagnosed and reported, not silently accepted or rejected — a truncated image is exactly the condition a forensic tool exists to name.
+
+### No corpus image carries an RDB
+
+*Measured 2026-08-24 across 4652 images.*
+
+The `RDSK` signature appears in the first 16 blocks of **0** of them. Every image held is a floppy, which is what makes the RDB search cheap — it never matches, and it never has to read past block 15 to find that out — and also what makes the RDB path the one area of Phase 2 with **no corpus material at all**. Its only external check is the D-002 oracle over generated devices (`oracle_fixtures.rs`), which is exactly the situation D-010's amendment was written to cover.
+
+The practical consequence: RDB reading is verified against the specification and against ADFlib, not against reality. Where real devices differ from both — as real floppies differ from the FAQ in seven documented ways above — that difference has not been measured and cannot be, until there is a device to measure.
 
 ### The reference implementation is not a safety benchmark
 

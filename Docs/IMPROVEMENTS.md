@@ -11,8 +11,12 @@ Effort vocabulary: trivial | small | medium | large.
 
 ## Suggested
 
+_None._
+
+## Applied
+
 ### IMP-004 The fixture generator cannot build file extension blocks
-**Status:** suggested
+**Status:** applied
 **Effort:** small
 **Found:** 2026-08-24, writing a hardfile test whose file needed 82 data blocks.
 **Where:** [tools/fixtures/src/lib.rs](../tools/fixtures/src/lib.rs), `Volume::add_file`.
@@ -35,7 +39,14 @@ It also caps what can be tested on hardfiles, where multi-megabyte files are the
 
 **Related.** D-010, AV-001, SPEC §Files.
 
-## Applied
+**Applied 2026-08-24.** `add_file` allocates one extension block per group of pointers beyond the header's table, chains them through `extension`, and numbers `seq_num` and `next_data` across the whole file rather than per header block — the file-wide numbering being what `read_file` already assumed.
+
+**Validated against ADFlib.** A 200 KB file spans six extension blocks past the header's 72 pointers, and both readers extract it byte-identically, for OFS and FFS alike. The oracle test now covers eleven generated volumes and four content round-trips, two of them across extension chains.
+
+**What it unlocked.** The visited set guarding the extension chain against loops (AV-001) had never been exercised by a fixture — only by whatever real disks happened to contain. Now `corrupt::extension_chain_loop` and `extension_chain_cycle` build both shapes, and the tests confirm each terminates with a reported cycle rather than spinning. Wild `extension` pointers (AV-004) and a chain block claiming the wrong primary type are covered too.
+
+The two-block cycle matters separately from the self-loop: a "next != self" check catches the first and misses the second, which is the same reasoning that shaped the hash-chain tests.
+
 
 ### IMP-003 `walk` and `read_file` are bounded only by their visited sets
 **Status:** applied

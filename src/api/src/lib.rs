@@ -9,10 +9,10 @@ pub mod health;
 pub mod inspect;
 pub mod json;
 
-pub use health::{BitmapHealth, Finding, Health, Severity, examine};
+pub use health::{BitmapHealth, Finding, Health, Severity, examine, examine_partition};
 pub use inspect::{
-    Fault, Image, Inspection, InspectionError, VolumeInfo, entry_to_json, inspect_bytes,
-    inspect_path,
+    Fault, Image, Inspection, InspectionError, PartitionInfo, RdbInfo, VolumeInfo, entry_to_json,
+    inspect_bytes, inspect_path,
 };
 
 /// The layer crates, re-exported so that front-ends depend on this crate alone.

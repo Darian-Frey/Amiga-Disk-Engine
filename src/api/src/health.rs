@@ -128,6 +128,23 @@ pub struct Health {
     pub bytes_recovered: u64,
     /// Everything found, worst first.
     pub findings: Vec<Finding>,
+    /// What was actually examined: the volume's label, and the partition it
+    /// came from where the image is a device.
+    ///
+    /// `None` means nothing mounted, which is why a report can be empty without
+    /// the image being sound.
+    pub examined: Option<Examined>,
+}
+
+/// The volume a health report describes.
+#[derive(Debug, Clone)]
+pub struct Examined {
+    /// The volume label from its rootblock.
+    pub volume: String,
+    /// The rootblock's block number, within the volume.
+    pub rootblock: u32,
+    /// The partition it came from, where the image is a partitioned device.
+    pub partition: Option<String>,
 }
 
 impl Health {
@@ -164,6 +181,20 @@ impl Health {
 /// not an error, which is the whole point of a health report.
 #[must_use]
 pub fn examine(bytes: Vec<u8>) -> Health {
+    examine_partition(bytes, None)
+}
+
+/// Examine one partition of a device, or the image's own volume.
+///
+/// `partition` names a partition by drive name or index. On a partitioned
+/// device `None` means the first partition, since a device holds no volume of
+/// its own — checking such an image without naming a partition should examine
+/// something rather than report that there is nothing there.
+///
+/// # Panics
+/// Never: an unreadable image is a finding, not a failure.
+#[must_use]
+pub fn examine_partition(bytes: Vec<u8>, partition: Option<&str>) -> Health {
     let inspection = inspect_bytes(bytes.clone());
     let mut findings: Vec<Finding> = inspection
         .faults()
@@ -180,14 +211,7 @@ pub fn examine(bytes: Vec<u8>) -> Health {
                 .clone()
                 .unwrap_or_else(|| "no geometry could be established".to_owned()),
         ));
-        return Health {
-            inspection,
-            bitmap: None,
-            directories: 0,
-            files: 0,
-            bytes_recovered: 0,
-            findings,
-        };
+        return barren(inspection, findings);
     };
 
     let Ok(image) = ade_container::RawImage::new(bytes, geometry) else {
@@ -196,16 +220,26 @@ pub fn examine(bytes: Vec<u8>) -> Health {
             Severity::Error,
             "the image is shorter than the geometry it claims",
         ));
-        return Health {
-            inspection,
-            bitmap: None,
-            directories: 0,
-            files: 0,
-            bytes_recovered: 0,
-            findings,
-        };
+        return barren(inspection, findings);
     };
-    let Ok(volume) = Volume::mount(&image) else {
+    // A partitioned device has no volume at its own rootblock; the volume to
+    // examine is inside a partition.
+    let window = select_window(&image, &inspection, partition, &mut findings);
+    let chosen_name = window.as_ref().ok().and_then(|w| w.as_ref()).and_then(|w| {
+        inspection
+            .partitions
+            .iter()
+            .find(|p| p.first_block == w.start())
+            .map(|p| p.name.clone())
+    });
+    let mounted = match &window {
+        Ok(Some(w)) => Volume::mount(w),
+        Ok(None) => Volume::mount(&image),
+        Err(()) => {
+            return barren(inspection, findings);
+        }
+    };
+    let Ok(volume) = mounted else {
         // Not an error: a quarter of real images are not AmigaDOS disks.
         findings.push(Finding::new(
             "no-volume",
@@ -215,28 +249,34 @@ pub fn examine(bytes: Vec<u8>) -> Health {
                 .clone()
                 .unwrap_or_else(|| "no AmigaDOS volume".to_owned()),
         ));
-        return Health {
-            inspection,
-            bitmap: None,
-            directories: 0,
-            files: 0,
-            bytes_recovered: 0,
-            findings,
-        };
+        return barren(inspection, findings);
     };
 
     let scan = scan_tree(&volume, &mut findings);
-    let bitmap = cross_check_bitmap(&volume, &image, &scan.referenced, &mut findings);
+    let source: &dyn ade_block::BlockSource = match &window {
+        Ok(Some(w)) => w,
+        _ => &image,
+    };
+    let bitmap = cross_check_bitmap(&volume, source, &scan.referenced, &mut findings);
 
     // Worst first, so the first line a reader sees is the one that matters.
     findings.sort_by_key(|f| core::cmp::Reverse(f.severity));
     Health {
-        inspection,
         bitmap,
         directories: scan.directories,
         files: scan.files,
         bytes_recovered: scan.bytes,
         findings,
+        examined: Some(Examined {
+            volume: volume.rootblock().name_lossy(),
+            rootblock: volume.root(),
+            partition: window
+                .as_ref()
+                .ok()
+                .and_then(|w| w.as_ref())
+                .and_then(|_| chosen_name.clone()),
+        }),
+        inspection,
     }
 }
 
@@ -382,7 +422,7 @@ fn scan_file(
 
 fn cross_check_bitmap(
     volume: &Volume<'_>,
-    image: &ade_container::RawImage,
+    image: &dyn ade_block::BlockSource,
     referenced: &HashSet<u32>,
     findings: &mut Vec<Finding>,
 ) -> Option<BitmapHealth> {
@@ -489,6 +529,16 @@ impl Health {
         Value::Obj(vec![
             ("image", self.inspection.to_json()),
             (
+                "examined",
+                Value::opt(self.examined.as_ref(), |e| {
+                    Value::Obj(vec![
+                        ("volume", Value::str(e.volume.clone())),
+                        ("rootblock", Value::Num(u64::from(e.rootblock))),
+                        ("partition", Value::opt(e.partition.as_ref(), Value::str)),
+                    ])
+                }),
+            ),
+            (
                 "tree",
                 Value::Obj(vec![
                     ("directories", Value::Num(self.directories as u64)),
@@ -578,5 +628,104 @@ fn summarise(blocks: &[u32]) -> String {
         )
     } else {
         head.join(", ")
+    }
+}
+
+/// Choose the window to examine, if the image is a partitioned device.
+///
+/// `Ok(None)` means the image is a single volume and should be examined as it
+/// stands. `Err(())` means the caller named a partition that is not there, so
+/// examining anything at all would answer a question nobody asked — a finding
+/// is pushed and the report stops.
+fn select_window<'a>(
+    image: &'a ade_container::RawImage,
+    inspection: &Inspection,
+    wanted: Option<&str>,
+    findings: &mut Vec<Finding>,
+) -> Result<Option<ade_container::Window<'a>>, ()> {
+    for fault in &inspection.partition_faults {
+        findings.push(Finding::new(
+            "partition-table-broken",
+            Severity::Error,
+            fault.clone(),
+        ));
+    }
+    if inspection.partitions.is_empty() {
+        if let Some(name) = wanted {
+            findings.push(Finding::new(
+                "no-partition-table",
+                Severity::Error,
+                format!("no partition table, so no partition {name:?}"),
+            ));
+            return Err(());
+        }
+        return Ok(None);
+    }
+
+    // A name is matched first, then an index, because a drive legitimately
+    // named "0" should reach itself rather than the first partition.
+    let index = match wanted {
+        None => 0,
+        Some(name) => {
+            let found = inspection
+                .partitions
+                .iter()
+                .position(|p| p.name.eq_ignore_ascii_case(name))
+                .or_else(|| {
+                    name.parse::<usize>()
+                        .ok()
+                        .filter(|i| *i < inspection.partitions.len())
+                });
+            let Some(i) = found else {
+                findings.push(Finding::new(
+                    "no-such-partition",
+                    Severity::Error,
+                    format!("this device has no partition {name:?}"),
+                ));
+                return Err(());
+            };
+            i
+        }
+    };
+    let Some(chosen) = inspection.partitions.get(index) else {
+        return Ok(None);
+    };
+
+    let blocks = u32::try_from(chosen.blocks).unwrap_or(u32::MAX);
+    match ade_container::Window::new(
+        image,
+        chosen.first_block,
+        blocks,
+        chosen.block_size,
+        chosen.reserved,
+    ) {
+        Ok(w) => Ok(Some(w)),
+        Err(e) => {
+            findings.push(Finding::new(
+                "partition-out-of-range",
+                Severity::Error,
+                format!(
+                    "partition {index} ({}) does not fit the device: {e}",
+                    chosen.name
+                ),
+            ));
+            Err(())
+        }
+    }
+}
+
+/// A report for an image that yielded no volume to examine.
+///
+/// The findings say why; everything a tree walk would have filled in is empty
+/// rather than zeroed-and-plausible.
+fn barren(inspection: Inspection, findings: Vec<Finding>) -> Health {
+    Health {
+        inspection,
+        bitmap: None,
+        directories: 0,
+        files: 0,
+        bytes_recovered: 0,
+        findings,
+        examined: None,
     }
 }
