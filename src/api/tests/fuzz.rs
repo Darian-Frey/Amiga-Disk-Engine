@@ -46,7 +46,8 @@ use ade_core::layers::{
     block::{self, Geometry},
     container::{RawImage, sniff},
     filesystem::{
-        bootblock::Bootblock, dostype::Dostype, entry::Entry, rootblock::Rootblock, volume::Volume,
+        bootblock::Bootblock, dircache, dostype::Dostype, entry::Entry, rootblock::Rootblock,
+        volume::Volume,
     },
 };
 use ade_fixtures::{Volume as Fixture, corrupt};
@@ -194,6 +195,7 @@ fn fuzz_block_parsers() {
             let _ = Rootblock::parse(&buf);
             let _ = Entry::parse(&buf, rng_block(&buf));
             let _ = Dostype::parse(&buf, 0);
+            let _ = dircache::parse(&buf, rng_block(&buf));
             let _ = block::checksum::normal(&buf);
             let _ = block::checksum::normal_valid(&buf);
         });
@@ -222,6 +224,7 @@ fn fuzz_parsers_on_arbitrary_lengths() {
             let _ = Entry::parse(&buf, 0);
             let _ = Dostype::parse(&buf, rng_offset(&buf));
             let _ = Bootblock::parse(&buf);
+            let _ = dircache::parse(&buf, 0);
             let _ = block::checksum::normal(&buf);
             let _ = block::checksum::boot(&buf);
             let _ = sniff(&buf, buf.len() as u64);

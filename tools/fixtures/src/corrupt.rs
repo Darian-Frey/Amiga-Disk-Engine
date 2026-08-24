@@ -210,3 +210,80 @@ fn rechecksum(img: &mut [u8], block: u32) {
     let ck = normal_checksum(&img[o..o + BSIZE]);
     put_u32(img, o + 20, ck);
 }
+
+/// Overwrite the size in a directory cache record, making the cache stale.
+///
+/// The cache duplicates the entry block, so this creates the one thing a
+/// dircache volume can suffer that no checksum catches: two internally
+/// consistent descriptions of the same file that disagree with each other.
+/// Both blocks still checksum correctly — that is the point. Only comparing
+/// them finds it (SPEC §Directory cache blocks).
+///
+/// `record` is the index within the block, not a byte offset.
+///
+/// # Panics
+/// If the block holds fewer records than `record + 1`.
+pub fn dircache_size(img: &mut [u8], block: u32, record: usize, size: u32) {
+    let offset = dircache_record_offset(img, block, record);
+    put_u32(img, offset + 4, size);
+    rechecksum(img, block);
+}
+
+/// Overwrite the name in a directory cache record, keeping its length.
+///
+/// A renamed cache entry is a subtler failure than a wrong size: a listing
+/// taken from the cache shows a file that a listing taken from the hash chains
+/// does not, and both look sound in isolation.
+///
+/// # Panics
+/// If the block holds too few records, or `name` is not the stored length.
+pub fn dircache_name(img: &mut [u8], block: u32, record: usize, name: &[u8]) {
+    let offset = dircache_record_offset(img, block, record);
+    let len = usize::from(img[offset + 23]);
+    assert_eq!(
+        len,
+        name.len(),
+        "replacement name must be the stored length, or the record shifts"
+    );
+    img[offset + 24..offset + 24 + len].copy_from_slice(name);
+    rechecksum(img, block);
+}
+
+/// Drop the last record from a directory cache block.
+///
+/// Decrements the count rather than erasing bytes, so the cache omits an entry
+/// the directory still holds — the `NotInCache` half of the comparison.
+///
+/// # Panics
+/// If the block declares no records.
+pub fn dircache_drop_last(img: &mut [u8], block: u32) {
+    let base = block as usize * BSIZE;
+    let count = get_u32(img, base + 12);
+    assert!(count > 0, "block declares no records to drop");
+    put_u32(img, base + 12, count - 1);
+    rechecksum(img, block);
+}
+
+/// Point a dircache block's `next` field at itself (AV-001).
+pub fn dircache_chain_loop(img: &mut [u8], block: u32) {
+    put_u32(img, block as usize * BSIZE + 16, block);
+    rechecksum(img, block);
+}
+
+/// Byte offset of one record within a dircache block.
+///
+/// Walks from the first record, because records are variable-length: the only
+/// way to the third is through the first two.
+fn dircache_record_offset(img: &[u8], block: u32, record: usize) -> usize {
+    let base = block as usize * BSIZE;
+    let count = get_u32(img, base + 12) as usize;
+    assert!(record < count, "block holds {count} records");
+    let mut offset = base + 24;
+    for _ in 0..record {
+        let name_len = usize::from(img[offset + 23]);
+        let comment_len = usize::from(img[offset + 24 + name_len]);
+        let len = 25 + name_len + comment_len;
+        offset += len + (len % 2);
+    }
+    offset
+}

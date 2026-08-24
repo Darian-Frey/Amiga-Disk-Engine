@@ -28,6 +28,7 @@ use ade_block::{BlockError, BlockIndex, BlockSource, Geometry, read_at};
 
 use crate::{
     bootblock::Bootblock,
+    dircache,
     dostype::{Dostype, FileSystem},
     entry::{Entry, EntryKind, T_DATA, T_LIST},
     rootblock::Rootblock,
@@ -182,6 +183,38 @@ impl<'a> Volume<'a> {
     #[must_use]
     pub const fn root(&self) -> u32 {
         self.root
+    }
+
+    /// The directory cache for a directory, on a volume that keeps one.
+    ///
+    /// Returns an empty chain when the volume is not `DOS\4`/`DOS\5`, or when
+    /// the directory has no cache — an empty directory needs none, so an empty
+    /// chain is not a fault.
+    ///
+    /// The cache duplicates what the hash chains already hold. It is read for
+    /// two reasons: its blocks are marked used and would otherwise be reported
+    /// as orphaned, and comparing it against the entries is a check on the
+    /// disk that nothing else performs (`dircache::compare`).
+    ///
+    /// # Errors
+    /// Whatever reading the directory block reports.
+    pub fn dircache(&self, dir: u32) -> Result<dircache::Chain, FsError> {
+        let start = if dir == self.root {
+            self.rootblock.dircache
+        } else {
+            self.entry_at(dir)?.extension
+        };
+        Ok(dircache::read_chain(self.source, &self.geometry, start))
+    }
+
+    /// Whether this volume keeps directory caches.
+    ///
+    /// From the dostype's dircache bit. A volume whose bootblock carried no
+    /// readable dostype is assumed not to, since reading a cache that is not
+    /// there would walk whatever the `extension` field happens to hold.
+    #[must_use]
+    pub fn has_dircache(&self) -> bool {
+        self.dostype.is_some_and(Dostype::has_dircache)
     }
 
     /// The geometry this volume was mounted with.

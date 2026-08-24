@@ -665,6 +665,27 @@ fn report_health(out: &mut impl Write, path: &Path, h: &Health) {
         lines.push("  volume      none".to_owned());
     }
 
+    if let Some(d) = &h.dircache {
+        // Stated even when it finds nothing: "compared and matched" is a
+        // different fact from "not checked", and only one of them is reassuring.
+        lines.push("  dircache".to_owned());
+        lines.push(format!(
+            "    cached      {} records in {} blocks across {} directories",
+            d.records, d.blocks, d.directories
+        ));
+        lines.push(format!(
+            "    cross-check {}",
+            if d.disagreements == 0 {
+                "agrees with the directory entries".to_owned()
+            } else {
+                format!(
+                    "{} DISAGREEMENTS with the directory entries",
+                    d.disagreements
+                )
+            }
+        ));
+    }
+
     if let Some(b) = &h.bitmap {
         lines.push("  bitmap".to_owned());
         lines.push(format!(

@@ -35,7 +35,7 @@ ADE never writes to an image: no image-write path exists in the codebase, and D-
 
 ## Status
 
-**Phases 0 and 1 are complete; Phase 2 is in progress.** ADE reads OFS and FFS on DD, HD and extra-cylinder floppies, on unpartitioned hardfiles, and on RDB-partitioned hard disks. All eight dostypes are identified and hashed correctly, including the international variants; the dircache and long-name *structures* of `DOS\4`–`DOS\7` are still to come. It lists, extracts, resolves hard links, and reports volume health including a bitmap cross-check.
+**Phases 0 and 1 are complete; Phase 2 is in progress.** ADE reads OFS and FFS on DD, HD and extra-cylinder floppies, on unpartitioned hardfiles, and on RDB-partitioned hard disks. All eight dostypes are identified and hashed correctly, including the international variants, and directory caches (`DOS\4`/`DOS\5`) are read and cross-checked against the directories they describe. Only the LNFS long-name structures of `DOS\6`/`DOS\7` are still to come. It lists, extracts, resolves hard links, and reports volume health including a bitmap cross-check.
 
 Measured rather than asserted:
 
@@ -43,7 +43,7 @@ Measured rather than asserted:
 - **99.36%** byte-identical agreement with ADFlib on extracted file contents (3875 of 3900 files). Every difference is attributed to a recorded disagreement (D-012) or to genuine damage on the disk.
 - **900,000 fuzz cases** across six targets, zero failures. AV-004 is enforced by the type system, not by discipline: `read_block` takes a `ValidBlock`, which only `Geometry::validate` can construct.
 
-Still to come in Phase 2: real dircache blocks, LNFS long names, and undelete — the last blocked on material rather than effort, since the corpus holds no recoverable deleted entries. Then containers (Phase 3), flux (Phase 4), and the GUI (Phase 5).
+Still to come in Phase 2: LNFS long names and undelete — the last blocked on material rather than effort, since the corpus holds no recoverable deleted entries. Then containers (Phase 3), flux (Phase 4), and the GUI (Phase 5).
 
 The two decisions that gated all implementation were settled on 2026-08-21:
 

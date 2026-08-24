@@ -9,7 +9,9 @@ pub mod health;
 pub mod inspect;
 pub mod json;
 
-pub use health::{BitmapHealth, Finding, Health, Severity, examine, examine_partition};
+pub use health::{
+    BitmapHealth, DirCacheHealth, Examined, Finding, Health, Severity, examine, examine_partition,
+};
 pub use inspect::{
     Fault, Image, Inspection, InspectionError, PartitionInfo, RdbInfo, VolumeInfo, entry_to_json,
     inspect_bytes, inspect_path,

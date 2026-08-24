@@ -47,6 +47,24 @@ fn oracle_list(image: &std::path::Path) -> Option<String> {
     oracle_list_volume(image, None)
 }
 
+/// Run `unadf -c -l`, which lists a directory **from its dircache** rather
+/// than by walking its hash chains.
+///
+/// This is the only oracle invocation that reads the cache at all, and so the
+/// only external check that a cache ADE wrote is well-formed.
+fn oracle_list_cached(image: &std::path::Path) -> Option<String> {
+    let script = format!("ulimit -v {MEM_KIB}; exec timeout {TIMEOUT_S} unadf -c -l \"$1\"");
+    let out = Command::new("sh")
+        .arg("-c")
+        .arg(&script)
+        .arg("sh")
+        .arg(image)
+        .output()
+        .ok()?;
+    out.status.code().filter(|c| *c == 0)?;
+    Some(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
 /// As [`oracle_list`], but mounting one volume of a partitioned device.
 ///
 /// ADFlib numbers partitions from zero in partition-list order, which is the
@@ -302,4 +320,77 @@ fn adflib_reads_our_generated_device() {
 
     let _ = fs::remove_file(&path);
     eprintln!("ADFlib agreed with ADE on both partitions of a generated device");
+}
+
+#[test]
+fn adflib_reads_our_generated_dircache() {
+    // `unadf -c` lists from the dircache instead of walking the hash chains,
+    // so it parses the cache records byte for byte. Nothing else does: the
+    // plain listing would pass even if every cache block were garbage.
+    //
+    // Worth its own test because the corpus holds no `DOS\4` at all, and the
+    // 21 `DOS\5` images it does hold are read-only evidence — they cannot
+    // check that a cache *we write* is well-formed.
+    if !have_unadf() {
+        eprintln!("unadf not installed — skipping (apt install unadf)");
+        return;
+    }
+
+    for dostype in [4u8, 5] {
+        let mut v = Fixture::dd(dostype).named("Cached");
+        v.add_file("startup", b"hello");
+        v.add_file("\u{e4}pfel", b"umlaut");
+        v.add_dir("Tools");
+        v.add_file("plain", b"x");
+        let path = write_temp(&v.build(), &format!("dircache{dostype}"));
+
+        let from_cache = oracle_list_cached(&path)
+            .unwrap_or_else(|| panic!("DOS\\{dostype}: ADFlib refused a cache we generated"));
+        let from_hash = oracle_list(&path)
+            .unwrap_or_else(|| panic!("DOS\\{dostype}: ADFlib refused the volume"));
+        let _ = fs::remove_file(&path);
+
+        // ADFlib says so explicitly when it uses the cache; without this the
+        // test would pass on a silent fallback to the hash chains and prove
+        // nothing at all.
+        assert!(
+            from_cache.contains("Using dir cache blocks"),
+            "DOS\\{dostype}: ADFlib did not use the cache\n{from_cache}"
+        );
+        assert!(
+            from_cache.contains("DIRCACHE"),
+            "DOS\\{dostype}: the volume was not identified as cached\n{from_cache}"
+        );
+
+        // The two listings describe the same directory, so they must agree —
+        // that is the whole premise of a cache.
+        let entries = |listing: &str| -> Vec<String> {
+            listing
+                .lines()
+                .map(str::trim)
+                .filter(|t| {
+                    !t.is_empty()
+                        && !t.starts_with("unADF")
+                        && !t.starts_with("Device")
+                        && !t.starts_with("Volume")
+                        && !t.starts_with("Warning")
+                        && !t.starts_with("Using dir cache")
+                })
+                .map(ToOwned::to_owned)
+                .collect()
+        };
+        let mut cached = entries(&from_cache);
+        let mut hashed = entries(&from_hash);
+        cached.sort();
+        hashed.sort();
+
+        assert_eq!(
+            cached, hashed,
+            "DOS\\{dostype}: the cache and the hash chains disagree, \
+             which means the cache we wrote is wrong\n{from_cache}\n{from_hash}"
+        );
+        assert_eq!(cached.len(), 4, "DOS\\{dostype}");
+    }
+
+    eprintln!("ADFlib read our generated dircache on both DOS\\4 and DOS\\5");
 }

@@ -201,6 +201,10 @@ pub struct Volume {
     bitmap_blocks: Vec<u32>,
     next_free: u32,
     name: String,
+    /// Every directory block, root first. Directory caches are built for these
+    /// and only these: a hard link to a directory has an `extension` field but
+    /// no cache of its own.
+    directories: Vec<Block>,
 }
 
 /// A logical block number within a fixture.
@@ -249,6 +253,7 @@ impl Volume {
             bitmap_blocks,
             next_free: RESERVED,
             name: "Fixture".to_owned(),
+            directories: vec![root],
         }
     }
 
@@ -415,6 +420,7 @@ impl Volume {
             put_u32(b, 20, ck);
         }
         self.link_into(self.root, blk, name.as_bytes());
+        self.directories.push(blk);
         blk
     }
 
@@ -491,10 +497,141 @@ impl Volume {
     /// image bytes.
     #[must_use]
     pub fn build(mut self) -> Vec<u8> {
+        // Before the bitmap, which must account for the blocks the caches take.
+        self.write_dircaches();
         self.write_rootblock();
         self.write_bitmap();
         self.write_bootblock();
         self.blocks
+    }
+
+    /// Build a directory cache for every directory, on a `DOS\4`/`DOS\5`
+    /// volume.
+    ///
+    /// The records are read back out of the entry blocks that were actually
+    /// written, rather than accumulated as the volume was built. That is
+    /// deliberate: a cache assembled from the generator's own bookkeeping could
+    /// agree with the generator while both disagreed with the disk. Reading the
+    /// blocks back means the cache describes what is really there.
+    ///
+    /// To build a *stale* cache on purpose — the case the health report exists
+    /// to catch — see `corrupt::stale_dircache`.
+    fn write_dircaches(&mut self) {
+        if !matches!(self.dostype, 4 | 5) {
+            return;
+        }
+        for dir in self.directories.clone() {
+            let entries = self.entries_of(dir);
+            if entries.is_empty() {
+                continue;
+            }
+            let blocks = self.write_dircache_chain(dir, &entries);
+            if let Some(&first) = blocks.first() {
+                // On a directory the `extension` field points at the cache.
+                let b = self.block_mut(dir);
+                put_u32(b, BSIZE - 8, first);
+                let ck = normal_checksum(b);
+                put_u32(b, 20, ck);
+            }
+        }
+    }
+
+    /// Every entry block a directory's hash table reaches, in slot order.
+    fn entries_of(&mut self, dir: Block) -> Vec<Block> {
+        let mut out = Vec::new();
+        for slot in 0..Self::HT_SIZE as usize {
+            let mut cur = get_u32(self.block_mut(dir), 24 + slot * 4);
+            while cur != 0 {
+                out.push(cur);
+                cur = get_u32(self.block_mut(cur), BSIZE - 16);
+            }
+        }
+        out
+    }
+
+    /// Write the cache blocks for one directory, returning them in chain order.
+    fn write_dircache_chain(&mut self, dir: Block, entries: &[Block]) -> Vec<Block> {
+        let mut chain: Vec<Block> = Vec::new();
+        let mut pending: Vec<Vec<u8>> = entries
+            .iter()
+            .map(|&e| self.dircache_record(e))
+            .collect::<Vec<_>>();
+        pending.reverse();
+
+        while !pending.is_empty() {
+            let blk = self.alloc();
+            chain.push(blk);
+            let mut body: Vec<u8> = Vec::new();
+            let mut count = 0u32;
+            // Fill until the next record will not fit. A record never spans
+            // two blocks: SPEC has no continuation, so a block simply ends.
+            while let Some(record) = pending.last() {
+                if 24 + body.len() + record.len() > BSIZE {
+                    break;
+                }
+                body.extend_from_slice(record);
+                count += 1;
+                pending.pop();
+            }
+            assert!(count > 0, "a single dircache record must fit in a block");
+
+            let b = self.block_mut(blk);
+            put_u32(b, 0, 33); // T_DIRCACHE
+            put_u32(b, 4, blk);
+            put_u32(b, 8, dir);
+            put_u32(b, 12, count);
+            b[24..24 + body.len()].copy_from_slice(&body);
+        }
+
+        // Chain them, then checksum: the checksum covers the `next` field.
+        for i in 0..chain.len() {
+            let next = chain.get(i + 1).copied().unwrap_or(0);
+            let blk = chain[i];
+            let b = self.block_mut(blk);
+            put_u32(b, 16, next);
+            let ck = normal_checksum_at(b, 20);
+            put_u32(b, 20, ck);
+        }
+        chain
+    }
+
+    /// One cache record, read back from the entry block it describes.
+    fn dircache_record(&mut self, entry: Block) -> Vec<u8> {
+        let b = self.block_mut(entry);
+        let size = get_u32(b, BSIZE - 188);
+        let protect = get_u32(b, BSIZE - 192);
+        let days = get_u32(b, BSIZE - 92) as u16;
+        let mins = get_u32(b, BSIZE - 88) as u16;
+        let ticks = get_u32(b, BSIZE - 84) as u16;
+        let sec_type = get_u32(b, BSIZE - 4);
+        let name_len = usize::from(b[BSIZE - 80]).min(30);
+        let name = b[BSIZE - 79..BSIZE - 79 + name_len].to_vec();
+        let comment_len = usize::from(b[BSIZE - 184]).min(22);
+        let comment = b[BSIZE - 183..BSIZE - 183 + comment_len].to_vec();
+
+        // The fixed part is 24 bytes; the name and comment follow it. Written
+        // through the C-001 seam like everything else, rather than by
+        // to_be_bytes at the call site.
+        let mut r = vec![0u8; 24];
+        put_u32(&mut r, 0, entry);
+        put_u32(&mut r, 4, size);
+        put_u32(&mut r, 8, protect);
+        put_u16(&mut r, 12, 0); // UID
+        put_u16(&mut r, 14, 0); // GID
+        put_u16(&mut r, 16, days);
+        put_u16(&mut r, 18, mins);
+        put_u16(&mut r, 20, ticks);
+        // The secondary type is one signed byte here against a word there.
+        r[22] = (sec_type & 0xFF) as u8;
+        r[23] = name_len as u8;
+        r.extend_from_slice(&name);
+        r.push(comment_len as u8);
+        r.extend_from_slice(&comment);
+        // Records are word-aligned.
+        if r.len() % 2 != 0 {
+            r.push(0);
+        }
+        r
     }
 
     fn write_bootblock(&mut self) {

@@ -390,6 +390,23 @@ Record layout, 26–77 bytes, **word-aligned with an optional trailing pad byte*
 
 The dircache is a *cache*: it duplicates information held in the entry blocks. ADE should treat disagreement between the two as a health finding (F-010), not silently prefer one.
 
+### Confirmed against real disks
+
+*Verified 2026-08-24 across the corpus's 21 `DOS\5` images — 1252 records in 133 cache blocks over 66 cached directories.*
+
+The layout above reads correctly with no amendment needed, including the awkward parts: records are variable-length, the trailing pad byte appears only when the record length is odd, and `days`/`mins`/`ticks` really are 16-bit here against the entry block's 32-bit fields. Every record matched the entry block it describes on name, size, protection, comment and secondary type — **zero disagreements across all 21 disks**. A byte-level error anywhere in the record walk would have desynchronised the rest of the block and shown up immediately, so this is a strong check on the layout as documented.
+
+Two details worth stating because they are easy to get wrong:
+
+- The **secondary type is one signed byte** here where the entry block holds a 32-bit word. `-3` becomes `0xFFFFFFFD` on widening; comparing the two without sign-extending reports every file on the disk as a mismatch.
+- A record **never spans two blocks**. There is no continuation mechanism, so a block simply ends early when the next record will not fit.
+
+### A cache block is a block something must reach
+
+Cache blocks are marked used in the bitmap. A reader that does not follow the chain therefore does not merely miss a feature — it reports the blocks as orphaned, and calls space lost that is not lost. This was live in ADE until 2026-08-24: 19 false orphans on the Workbench 3.1 install disk, 14 on Subwar 2050.
+
+Note also that **`DOS\4` occurs nowhere in the corpus** and `DOS\6`/`DOS\7` do not either (§Open questions). Only `DOS\5` has real material, so OFS-with-dircache rests on generated fixtures and the oracle — `unadf -c` lists from the cache rather than the hash chains, which is what makes it an independent check on a cache ADE wrote.
+
 ## Links
 
 Hard links are FFS-only and chain through `next_link`. Soft links were broken and support was removed in AmigaDOS 3.0. [FAQ §4.6]
@@ -695,6 +712,6 @@ Deliberately unresolved, each deferred to the phase that needs it:
 - **MFM track and sector framing** — [RKRM] Appendix C not yet consulted. Phase 4.
 - **muFS (MultiUser FS) variants** — [AFFS] says they are supported by the Linux driver; ADE's position is undecided. The `protect` field's bits 8–15 and 31 are muFS-related.
 - **5.25" DD geometry** — named in ROADMAP Phase 2; not covered by [FAQ §3], which documents only 3.5" DD and HD.
-- **`DOS\4`, `DOS\6` and `DOS\7` fixtures.** The 4288-image survey contains none of them, so OFS-with-dircache and both LNFS variants cannot be validated against it. `DOS\5` appears twenty times and was the case that exposed BUG-001, so the absent ones are not safely assumed unimportant — they need sourcing separately (D-010).
+- **`DOS\6` and `DOS\7` fixtures.** The survey contains neither, so both LNFS variants cannot be validated against real material. `DOS\5` appears twenty-one times and was the case that exposed BUG-001, so the absent ones are not safely assumed unimportant — they need sourcing separately (D-010). **`DOS\4` is resolved rather than sourced**: it is absent from the corpus too, but the generator builds it and `unadf -c` validates it (§Confirmed against real disks), which is the shape D-010's amendment describes.
 - **The 750 `DOS`-magic images with no rootblock at 880.** Custom formats wearing an AmigaDOS bootblock, unexamined so far. Worth a pass: some may place a rootblock elsewhere, and the distribution of what they *do* contain would sharpen the F-003 cascade.
 - **Non-`DOS` prefixes** — `PFS`, `SFS`, `KICK`. Detection and honest reporting are in scope; mounting is not, for v1.

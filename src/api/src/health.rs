@@ -25,7 +25,10 @@
 
 use std::collections::{HashMap, HashSet};
 
-use ade_filesystem::{bitmap::Bitmap, volume::Volume};
+/// How many cache disagreements to report before saying so in one line.
+const MAX_DIRCACHE_FINDINGS: usize = 20;
+
+use ade_filesystem::{bitmap::Bitmap, dircache, entry::EntryKind, volume::Volume};
 
 use crate::{
     inspect::{Inspection, inspect_bytes},
@@ -120,6 +123,8 @@ pub struct Health {
     pub inspection: Inspection,
     /// Bitmap cross-check, where a volume was mountable.
     pub bitmap: Option<BitmapHealth>,
+    /// Directory-cache cross-check, on a `DOS\4`/`DOS\5` volume only.
+    pub dircache: Option<DirCacheHealth>,
     /// Directories reached.
     pub directories: usize,
     /// Files reached.
@@ -134,6 +139,23 @@ pub struct Health {
     /// `None` means nothing mounted, which is why a report can be empty without
     /// the image being sound.
     pub examined: Option<Examined>,
+}
+
+/// What the directory-cache cross-check found.
+///
+/// Present only on a cached volume. `disagreements` of zero is the interesting
+/// case to state plainly: two independent descriptions of every directory were
+/// compared and matched.
+#[derive(Debug, Clone, Default)]
+pub struct DirCacheHealth {
+    /// Directories that carry a cache.
+    pub directories: usize,
+    /// Cache blocks across all of them.
+    pub blocks: usize,
+    /// Records across all of them.
+    pub records: usize,
+    /// How many ways the caches and the directories differ.
+    pub disagreements: usize,
 }
 
 /// The volume a health report describes.
@@ -262,6 +284,7 @@ pub fn examine_partition(bytes: Vec<u8>, partition: Option<&str>) -> Health {
     // Worst first, so the first line a reader sees is the one that matters.
     findings.sort_by_key(|f| core::cmp::Reverse(f.severity));
     Health {
+        dircache: scan.dircache.clone(),
         bitmap,
         directories: scan.directories,
         files: scan.files,
@@ -285,6 +308,7 @@ struct TreeScan {
     files: usize,
     bytes: u64,
     referenced: HashSet<u32>,
+    dircache: Option<DirCacheHealth>,
 }
 
 fn scan_tree(volume: &Volume<'_>, findings: &mut Vec<Finding>) -> TreeScan {
@@ -293,6 +317,7 @@ fn scan_tree(volume: &Volume<'_>, findings: &mut Vec<Finding>) -> TreeScan {
         files: 0,
         bytes: 0,
         referenced: HashSet::new(),
+        dircache: None,
     };
     scan.referenced.insert(volume.root());
 
@@ -330,7 +355,97 @@ fn scan_tree(volume: &Volume<'_>, findings: &mut Vec<Finding>) -> TreeScan {
         scan.files = scan.files.saturating_add(1);
         scan_file(volume, path, entry, &mut owner, &mut scan, findings);
     }
+
+    scan_dircaches(volume, &walked, &mut scan, findings);
     scan
+}
+
+/// Read every directory cache and account for the blocks it occupies.
+///
+/// Two jobs, and the first is the one that matters most. A dircache block is
+/// marked used in the bitmap; if nothing reaches it, the bitmap cross-check
+/// calls it orphaned. Before this ran, every `DOS\5` disk in the corpus
+/// reported lost space that was not lost — 19 blocks on the Workbench 3.1
+/// install disk alone.
+///
+/// The second job is the cross-check SPEC asks for: the cache duplicates what
+/// the hash chains hold, so a disagreement means the disk is damaged or the
+/// cache is stale. Neither side is preferred; the difference is reported.
+fn scan_dircaches(
+    volume: &Volume<'_>,
+    walked: &ade_filesystem::volume::Walk,
+    scan: &mut TreeScan,
+    findings: &mut Vec<Finding>,
+) {
+    if !volume.has_dircache() {
+        return;
+    }
+
+    // Only real directories carry a cache. A hard link to a directory has an
+    // `extension` field like anything else, but it does not point at one, and
+    // following it would walk whatever happens to be there.
+    let directories = core::iter::once(volume.root()).chain(
+        walked
+            .entries
+            .iter()
+            .filter(|(_, e)| e.kind == EntryKind::Directory)
+            .map(|(_, e)| e.block),
+    );
+
+    let mut summary = DirCacheHealth::default();
+    let mut disagreements = 0usize;
+    for dir in directories {
+        let Ok(chain) = volume.dircache(dir) else {
+            continue;
+        };
+        if !chain.blocks.is_empty() {
+            summary.directories = summary.directories.saturating_add(1);
+        }
+        summary.blocks = summary.blocks.saturating_add(chain.blocks.len());
+        summary.records = summary.records.saturating_add(chain.records().len());
+        for block in chain.block_numbers() {
+            scan.referenced.insert(block);
+        }
+        for fault in &chain.faults {
+            findings.push(Finding::new(
+                "dircache-chain-broken",
+                Severity::Error,
+                format!("directory cache for block {dir}: {fault}"),
+            ));
+        }
+
+        let Ok(listing) = volume.list(dir) else {
+            continue;
+        };
+        let differences = dircache::compare(&chain.records(), &listing.entries);
+        summary.disagreements = summary.disagreements.saturating_add(differences.len());
+        for difference in differences {
+            // Capped: a systematically stale cache would otherwise produce one
+            // finding per entry on the disk, burying everything else.
+            if disagreements >= MAX_DIRCACHE_FINDINGS {
+                continue;
+            }
+            disagreements = disagreements.saturating_add(1);
+            findings.push(Finding::new(
+                "dircache-disagrees",
+                Severity::Warning,
+                difference.to_string(),
+            ));
+        }
+    }
+
+    scan.dircache = Some(summary);
+
+    if disagreements >= MAX_DIRCACHE_FINDINGS {
+        findings.push(Finding::new(
+            "dircache-disagrees",
+            Severity::Warning,
+            format!(
+                "at least {MAX_DIRCACHE_FINDINGS} cache disagreements — \
+                 the directory cache is systematically stale, not locally damaged"
+            ),
+        ));
+    }
 }
 
 /// Everything one file contributes: its blocks, its cross-links, its contents.
@@ -547,6 +662,17 @@ impl Health {
                 ]),
             ),
             (
+                "dircache",
+                Value::opt(self.dircache.as_ref(), |d| {
+                    Value::Obj(vec![
+                        ("directories", Value::Num(d.directories as u64)),
+                        ("blocks", Value::Num(d.blocks as u64)),
+                        ("records", Value::Num(d.records as u64)),
+                        ("disagreements", Value::Num(d.disagreements as u64)),
+                    ])
+                }),
+            ),
+            (
                 "bitmap",
                 Value::opt(self.bitmap.as_ref(), |b| {
                     Value::Obj(vec![
@@ -722,6 +848,7 @@ fn barren(inspection: Inspection, findings: Vec<Finding>) -> Health {
     Health {
         inspection,
         bitmap: None,
+        dircache: None,
         directories: 0,
         files: 0,
         bytes_recovered: 0,

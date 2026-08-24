@@ -11,6 +11,7 @@
 pub mod bitmap;
 pub mod bootblock;
 pub mod datestamp;
+pub mod dircache;
 pub mod dostype;
 pub mod entry;
 pub mod hash;

@@ -46,6 +46,13 @@ pub struct Rootblock {
     pub bitmap_pages: Vec<u32>,
     /// First bitmap *extension* block, for volumes needing more than 25.
     pub bitmap_extension: u32,
+    /// First directory-cache block for the root directory, or 0.
+    ///
+    /// Only meaningful on a `DOS\4`/`DOS\5` volume; the field is present but
+    /// unused otherwise. This is the `extension` field the rest of the
+    /// filesystem uses for file extension blocks — on a directory it points at
+    /// the cache instead.
+    pub dircache: u32,
     /// Volume name, as bytes — Latin-1 on the Amiga, not UTF-8.
     pub name: Vec<u8>,
     /// Stored name length, which can disagree with what is readable.
@@ -102,6 +109,7 @@ impl Rootblock {
                 .map(|i| u32_at(block, end(196).saturating_add(i.saturating_mul(4))).unwrap_or(0))
                 .collect(),
             bitmap_extension: u32_at(block, end(96))?,
+            dircache: u32_at(block, end(8))?,
             name,
             declared_name_len,
             root_altered: Datestamp::new(
