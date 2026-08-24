@@ -58,9 +58,12 @@ Neither run is the F-001 bar, which requires a fuzz corpus rather than well-form
 **Status:** Not started
 **Features delivered:** F-009 (initial), F-010 *(largely delivered early, 2026-08-24)*, F-012, F-017, F-018
 **Deliverables:**
-- [ ] HD (1.76 MB) and 5.25" DD geometry; all dostypes (OFS/FFS × INTL × dircache) and LNFS long names.
+- [x] HD (1.76 MB) geometry — mounts, round-trips OFS and FFS, rootblock computed at 1760 rather than read (C-007). Extra-cylinder (81–83) geometries too. Cross-checked against ADFlib.
+- [x] Dostype identification and hashing across all eight, including the international variants, cross-checked against ADFlib on accented filenames (C-006).
+- [ ] 5.25" DD geometry — SPEC has no source for it; see §Open questions.
+- [ ] Real dircache blocks (`DOS\4`/`\5`) and LNFS long names (`DOS\6`/`\7`). Identification works; the structures do not exist yet.
 - [ ] HDF + RDB multi-partition images; configurable block sizes (C-002, C-005).
-- [ ] Links, comments, protection bits, datestamps.
+- [x] Links, comments, protection bits, datestamps. Hard links resolve through `real_entry` with a bounds check and a visited set; `ade ls` shows targets; a link to a directory is walked once rather than once per link. Fixed BUG-005 on the way — reading a hard link had silently returned an empty file. **Caveat:** `unadf` omits links from its listings, so this is the one Phase 2 area with neither an oracle nor corpus material.
 - [ ] Undelete/salvage (F-012); standalone bitmap rebuild (AV-003).
 **Acceptance:** All Phase-2 fixtures mount and enumerate correctly; a deleted-entry fixture is recovered.
 

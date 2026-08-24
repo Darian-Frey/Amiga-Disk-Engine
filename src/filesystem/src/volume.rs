@@ -29,7 +29,7 @@ use ade_block::{BlockError, BlockIndex, BlockSource, Geometry, read_at};
 use crate::{
     bootblock::Bootblock,
     dostype::{Dostype, FileSystem},
-    entry::{Entry, T_DATA, T_LIST},
+    entry::{Entry, EntryKind, T_DATA, T_LIST},
     rootblock::Rootblock,
 };
 
@@ -65,6 +65,13 @@ pub enum FsError {
         /// The component.
         name: String,
     },
+    /// A link could not be followed.
+    BrokenLink {
+        /// The link block.
+        block: u32,
+        /// What was wrong with it.
+        detail: String,
+    },
     /// The volume has no rootblock where one should be.
     NoRootblock {
         /// Where it was looked for.
@@ -82,6 +89,9 @@ impl core::fmt::Display for FsError {
             }
             Self::NotFound { name } => write!(f, "no such entry: {name}"),
             Self::NotADirectory { name } => write!(f, "not a directory: {name}"),
+            Self::BrokenLink { block, detail } => {
+                write!(f, "broken link at block {block}: {detail}")
+            }
             Self::NoRootblock { block } => write!(f, "no rootblock at block {block}"),
         }
     }
@@ -433,6 +443,12 @@ impl<'a> Volume<'a> {
                 name: entry.name_lossy(),
             });
         }
+        // A hard link holds no data of its own; reading its empty table would
+        // silently return nothing (BUG-005).
+        if entry.kind.is_link() {
+            let target = self.resolve(entry)?;
+            return self.read_file(&target);
+        }
         let ofs = self.filesystem() == FileSystem::Ofs;
         let payload = if ofs {
             (self.geometry.block_size() as usize).saturating_sub(OFS_HEADER)
@@ -550,6 +566,80 @@ impl<'a> Volume<'a> {
         })
     }
 
+    /// Follow a hard link to the entry it stands for.
+    ///
+    /// A hard-link block holds no data: `real_entry` names the block it points
+    /// at (ADF FAQ §4.6). Anything that is not a link resolves to itself, so
+    /// callers can resolve unconditionally.
+    ///
+    /// Carries a visited set. AmigaDOS points a link straight at its target, so
+    /// a chain should never occur — but `real_entry` comes off the disk, and a
+    /// pointer that loops must terminate the walk rather than the process
+    /// (AV-001). The target is bounds-checked before it is followed (AV-004).
+    ///
+    /// # Errors
+    /// [`FsError::BrokenLink`] if the target cannot be read, is not an entry,
+    /// or the chain loops. A soft link resolves to an error too: it stores a
+    /// *path* rather than a block, and AmigaDOS 3.0 removed support for them.
+    pub fn resolve(&self, entry: &Entry) -> Result<Entry, FsError> {
+        if !entry.kind.is_link() {
+            return Ok(entry.clone());
+        }
+        if entry.kind == EntryKind::SoftLink {
+            return Err(FsError::BrokenLink {
+                block: entry.block,
+                detail: "soft links name a path, not a block; support was \
+                         removed in AmigaDOS 3.0"
+                    .to_owned(),
+            });
+        }
+
+        let mut seen: HashSet<u32> = HashSet::from([entry.block]);
+        let mut target = entry.real_entry;
+        loop {
+            if target == 0 {
+                return Err(FsError::BrokenLink {
+                    block: entry.block,
+                    detail: "link names no target".to_owned(),
+                });
+            }
+            if !seen.insert(target) {
+                return Err(FsError::BrokenLink {
+                    block: entry.block,
+                    detail: format!("link chain loops at block {target}"),
+                });
+            }
+            if self
+                .geometry
+                .validate(BlockIndex(u64::from(target)))
+                .is_err()
+            {
+                return Err(FsError::BrokenLink {
+                    block: entry.block,
+                    detail: format!("target {target} is outside the volume"),
+                });
+            }
+            let raw = self.read_block(target)?;
+            let resolved = Entry::parse(&raw, target).map_err(|e| FsError::BrokenLink {
+                block: entry.block,
+                detail: e.to_string(),
+            })?;
+            if !resolved.looks_like_an_entry() {
+                return Err(FsError::BrokenLink {
+                    block: entry.block,
+                    detail: format!("target {target} is not a directory entry"),
+                });
+            }
+            if resolved.kind.is_link() {
+                // Should not happen on an AmigaDOS-written disk; follow it
+                // anyway rather than assuming the disk is well-formed.
+                target = resolved.real_entry;
+                continue;
+            }
+            return Ok(resolved);
+        }
+    }
+
     /// Every block a file occupies: its header, its extension blocks, and its
     /// data blocks.
     ///
@@ -656,14 +746,25 @@ impl<'a> Volume<'a> {
                 } else {
                     format!("{prefix}/{}", entry.name_lossy())
                 };
-                if entry.kind.is_directory() && visited.insert(entry.block) {
+                // A hard link to a directory is a directory: descend through
+                // it, but mark the *resolved* block as visited so the same
+                // directory is not walked once per link pointing at it. That
+                // is also the AV-001 cycle in its legitimate form.
+                let descend = if entry.kind.is_link() {
+                    self.resolve(&entry).ok().map(|t| t.block)
+                } else {
+                    Some(entry.block)
+                };
+                if entry.kind.is_directory() && descend.is_some_and(|b| visited.insert(b)) {
                     // A tree cannot nest deeper than it has directory blocks,
                     // and cannot have more pending than it has blocks.
                     if depth >= cap || stack.len() >= cap {
                         hit_limit = true;
                         break 'outer;
                     }
-                    stack.push((path.clone(), entry.block, depth.saturating_add(1)));
+                    if let Some(b) = descend {
+                        stack.push((path.clone(), b, depth.saturating_add(1)));
+                    }
                 }
                 out.push((path, entry));
             }

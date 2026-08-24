@@ -67,6 +67,12 @@ pub const ST_ROOT: u32 = 1;
 pub const ST_USERDIR: u32 = 2;
 /// Block secondary type `ST_FILE`, as an unsigned word (-3).
 pub const ST_FILE: u32 = 0xFFFF_FFFD;
+/// Block secondary type `ST_LINKFILE`, as an unsigned word (-4).
+pub const ST_LINKFILE: u32 = 0xFFFF_FFFC;
+/// Block secondary type `ST_LINKDIR`.
+pub const ST_LINKDIR: u32 = 4;
+/// Block secondary type `ST_SOFTLINK`.
+pub const ST_SOFTLINK: u32 = 3;
 
 // --- big-endian writers -----------------------------------------------------
 //
@@ -367,6 +373,47 @@ impl Volume {
             write_bcpl(b, BSIZE - 80, name.as_bytes(), 30);
             put_u32(b, BSIZE - 12, root);
             put_u32(b, BSIZE - 4, ST_USERDIR);
+            let ck = normal_checksum(b);
+            put_u32(b, 20, ck);
+        }
+        self.link_into(self.root, blk, name.as_bytes());
+        blk
+    }
+
+    /// Add a hard link to an existing entry.
+    ///
+    /// A link block carries no data of its own: `real_entry` names the block it
+    /// stands for, and the target's `next_link` chains the links pointing at
+    /// it. The secondary type distinguishes a link to a file (`ST_LINKFILE`,
+    /// -4) from one to a directory (`ST_LINKDIR`, 4).
+    ///
+    /// Links to directories are the reason traversal needs a visited set: they
+    /// are legal, and they make cycles reachable on an uncorrupted disk
+    /// (AV-001, ADF FAQ §4.6).
+    ///
+    /// # Panics
+    /// If the volume runs out of blocks, or the name exceeds 30 characters.
+    pub fn add_hardlink(&mut self, name: &str, target: Block, to_dir: bool) -> Block {
+        assert!(name.len() <= 30, "classic names are 30 characters at most");
+        let blk = self.alloc();
+        let root = self.root;
+        {
+            let b = self.block_mut(blk);
+            put_u32(b, 0, T_HEADER);
+            put_u32(b, 4, blk);
+            put_u32(b, BSIZE - 92, 1);
+            write_bcpl(b, BSIZE - 80, name.as_bytes(), 30);
+            // real_entry: the block this link stands for.
+            put_u32(b, BSIZE - 44, target);
+            put_u32(b, BSIZE - 12, root);
+            put_u32(b, BSIZE - 4, if to_dir { ST_LINKDIR } else { ST_LINKFILE });
+            let ck = normal_checksum(b);
+            put_u32(b, 20, ck);
+        }
+        // Chain this link onto the target's next_link list.
+        {
+            let b = self.block_mut(target);
+            put_u32(b, BSIZE - 40, blk);
             let ck = normal_checksum(b);
             put_u32(b, 20, ck);
         }

@@ -379,6 +379,17 @@ fn list(path: &Path, dir: Option<&str>, format: Format) -> ExitCode {
                     e.altered,
                     e.name_lossy()
                 );
+                if e.kind.is_link() {
+                    use std::fmt::Write as _;
+                    match volume.resolve(e) {
+                        Ok(t) => {
+                            let _ = write!(line, "  -> {}", t.name_lossy());
+                        }
+                        Err(err) => {
+                            let _ = write!(line, "  -> BROKEN ({err})");
+                        }
+                    }
+                }
                 if !e.comment.is_empty() {
                     use std::fmt::Write as _;
                     let _ = write!(line, "   ; {}", e.comment_lossy());

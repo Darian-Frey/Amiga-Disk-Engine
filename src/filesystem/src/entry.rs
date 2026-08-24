@@ -189,6 +189,9 @@ pub struct Entry {
     pub high_seq: u32,
     /// For a hard link, the entry it points at.
     pub real_entry: u32,
+    /// On a *target*, the newest hard link pointing at it; on a link, the next
+    /// one in that chain. Zero when nothing links here (ADF FAQ §4.6).
+    pub next_link: u32,
     /// Whether the checksum matched.
     pub checksum_valid: bool,
 }
@@ -239,6 +242,7 @@ impl Entry {
             first_data: u32_at(block, 16)?,
             high_seq: u32_at(block, 8)?,
             real_entry: u32_at(block, end(44))?,
+            next_link: u32_at(block, end(40))?,
             checksum_valid: ade_block::checksum::normal_valid(block),
         })
     }

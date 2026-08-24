@@ -398,6 +398,24 @@ Hard links are FFS-only and chain through `next_link`. Soft links were broken an
 
 **This extends AV-001.** Directory traversal can cycle on a structurally valid, non-corrupt disk, because AmigaDOS permits hard links to directories. Cycle detection is therefore a correctness requirement for ordinary images, not merely a defence against hostile input — a visited-set over block numbers, not a depth limit.
 
+### Link block layout
+
+A link block holds **no data of its own**. It is shaped like a file header, but the fields that would describe content are unused and `real_entry` names the block it stands for.
+
+| offset | field | meaning |
+|---|---|---|
+| BSIZE-44 | real_entry | the file or directory this link points at |
+| BSIZE-40 | next_link | on a target, the newest link pointing at it; on a link, the next in that chain |
+| BSIZE-4 | sec_type | `ST_LINKFILE` (-4) or `ST_LINKDIR` (4) |
+
+Reading a link's own data-block table therefore yields nothing — the mistake ADE made until BUG-005. A reader must follow `real_entry`, bounds-checking it like any other pointer off the disk (AV-004) and carrying a visited set, since a looping `real_entry` would otherwise not terminate.
+
+### The oracle cannot check links
+
+`unadf` **omits link entries from its listings entirely**: given a generated volume with four entries of which two are links, it reports two. The link blocks match the layout above field for field, so this is a limitation of ADFlib — the FAQ calls the whole link implementation "a mess" — not a fault in the fixtures.
+
+Link support is therefore validated against this specification alone. There is no independent implementation checking it and no link anywhere in the 4652-image corpus, which makes it the one area of Phase 2 where D-010's two mechanisms both come up empty.
+
 ## Hard disks — RDB
 
 The Rigid Disk Block must lie within the first 16 blocks of the media. It is 256 bytes regardless of `BSIZE`. [FAQ §6.1]

@@ -13,6 +13,27 @@ _None._
 
 ## Fixed
 
+### BUG-005 Reading a hard link returned an empty file, silently
+**Severity:** high
+**Status:** fixed
+**Found:** 2026-08-24, on the first Phase 2 task — before writing link support, checking what the existing code already did with one.
+**Where:** [src/filesystem/src/volume.rs](../src/filesystem/src/volume.rs), `Volume::read_file`.
+
+**What was wrong.** `EntryKind::HardLinkFile.is_file()` returns true, and `read_file` accepted anything for which it did. But a hard-link block holds **no data of its own**: its `real_entry` field names the block it stands for (ADF FAQ §4.6). `read_file` therefore read the link block's own — empty — data-block table and returned `Ok("")`.
+
+`real_entry` was parsed into `Entry` and never read by anything.
+
+```
+real.txt: kind=file     -> Ok("the actual contents")
+link.txt: kind=linkfile -> Ok("")
+```
+
+No error, no shortfall, no fault. A caller extracting a hard link got a zero-byte file and nothing to suggest it was wrong — the silent wrong answer this project treats as the worst failure shape, and worse here than a refusal would have been.
+
+**Why nothing caught it.** The corpus contains no links at all — none in 8865 entries sampled — because they are FFS-only and rare on floppies. The fixture generator could not build one either, so neither mechanism had material. It surfaced only because the Phase 2 task was "links" and the first step was to look at what already happened.
+
+**Fixed 2026-08-24** as part of link support: `Volume::resolve` follows `real_entry` with a visited set and a bounds check, `read_file` resolves before reading, and `ade ls` shows link targets. See the Phase 2 entry in CHANGELOG.
+
 ### BUG-004 The fixture generator wrote the bitmap checksum into the map
 **Severity:** medium
 **Status:** fixed
