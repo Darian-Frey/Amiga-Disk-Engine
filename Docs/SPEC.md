@@ -869,11 +869,33 @@ Two thousand sectors agreeing on two independent checksums is not something a wr
 
 That third check matters because two disks do *not* do this — every raw track in `Deep Space` and `Terrorpods` claims to be track 0, with checksums fully valid. That is a property of those disks, not a decoding error, and it is why reconstructing an ADF by physical position fails on them.
 
-### What this decoder does not check
+### Clock bits and the encoding rule
 
-Clock bits are **masked off, not verified**. That is correct for decoding — the data bits are all that carry information — but it means ADE cannot currently detect an MFM encoding violation. Some copy protection is exactly that: bit patterns that are illegal MFM and therefore unwritable by a normal drive. Detecting those needs the clock bits examined rather than discarded, and is not yet done.
+*Verified 2026-08-25.* In MFM each data bit is preceded by a clock bit, and the clock is set **only when both the previous and the current data bit are zero** — its job is to keep a run of zeros from losing its timing. In the Amiga's byte layout the clock bits are the odd positions (`0xAA`) and the data bits the even ones (`0x55`).
 
-Nor is track length or bit-cell timing considered. Long tracks, variable-rate tracks and weak bits are all protection techniques that live in the timing rather than the data, and reading them needs flux, not MFM.
+Measured on a real Terrorpods sector, the rule holds exactly:
+
+| region | clock bits wrong |
+|---|---|
+| data (1024 MFM bytes) | **0** of 4095 |
+| header (40 MFM bytes) | **0** of 1279 |
+| the two sync words | **2** of 191 |
+
+The last row is the point. `0x4489` is *deliberately* illegal MFM — one violation per sync word — and that is exactly what makes it findable in a stream where ordinary data cannot produce it.
+
+**The clock/data phase is only knowable from a sync word.** A track's byte boundaries say nothing about where its bit pairs begin, so a track with no sync at all cannot be checked; ADE reports that rather than guessing a phase.
+
+Across the corpus, **every one of the 2095 sound sectors is legally encoded**. There is no illegal MFM inside sectors in this material: these disks protect themselves structurally — sync marks in the gaps, non-standard sector layouts — rather than by encoding bytes a drive could not write.
+
+### A violation count is not a protection score
+
+It is tempting to subtract the sync-word count from a track's total violations and call the remainder deliberate illegal MFM. **That was tried and it does not work.** A sync word does not contribute exactly one violation: the transitions into and out of a sync region contribute their own, so a known-good Terrorpods track has 22 sync words and 27 violations.
+
+Counting the baseline two different ways produced two contradictory pictures of which disks were protected — the first made the *most* heavily protected ones look cleanest. ADE therefore reports the raw counts, which are facts, and derives no score from their difference. Isolating deliberate illegal MFM needs the sync boundaries modelled properly, and that is not done.
+
+### What this decoder still does not check
+
+Track length and bit-cell timing are not considered. Long tracks, variable-rate tracks and weak bits are all protection techniques that live in the *timing* rather than in the data, and reading them needs flux rather than MFM — which is what SCP and IPF carry and extended ADF does not.
 
 ## Flux formats
 

@@ -251,6 +251,7 @@ fn read_track_table(bytes: &[u8], kind: Kind) -> Option<TrackTable> {
     let mut standard_tracks = 0usize;
     let mut sound_sectors = 0usize;
     let mut stray_syncs = 0usize;
+    let mut illegally_encoded_sectors = 0usize;
     for track in &parsed.tracks {
         if track.kind != extended::TrackKind::RawMfm {
             continue;
@@ -264,12 +265,15 @@ fn read_track_table(bytes: &[u8], kind: Kind) -> Option<TrackTable> {
         }
         sound_sectors = sound_sectors.saturating_add(decoded.sound());
         stray_syncs = stray_syncs.saturating_add(decoded.stray_syncs);
+        illegally_encoded_sectors = illegally_encoded_sectors
+            .saturating_add(decoded.sectors.iter().filter(|s| !s.clock_valid()).count());
     }
 
     Some(TrackTable {
         standard_tracks,
         sound_sectors,
         stray_syncs,
+        illegally_encoded_sectors,
         declared: parsed.tracks.len(),
         sectors,
         raw_mfm,
@@ -306,6 +310,12 @@ pub struct TrackTable {
     /// Sync marks leading to no sector — a protection signature rather than a
     /// fault. See [`ade_track::TrackDecode::stray_syncs`].
     pub stray_syncs: usize,
+    /// Sectors that decode soundly but are not legal MFM.
+    ///
+    /// Zero across the whole corpus. A non-zero count would mean bytes no
+    /// standard drive wrote — damage, or protection encoded rather than
+    /// structured.
+    pub illegally_encoded_sectors: usize,
 }
 
 /// The most of a `FILE_ID.DIZ` to read.
@@ -1062,6 +1072,10 @@ impl TrackTable {
             ("standard_tracks", Value::Num(self.standard_tracks as u64)),
             ("sound_sectors", Value::Num(self.sound_sectors as u64)),
             ("stray_syncs", Value::Num(self.stray_syncs as u64)),
+            (
+                "illegally_encoded_sectors",
+                Value::Num(self.illegally_encoded_sectors as u64),
+            ),
             (
                 "faults",
                 Value::Arr(self.faults.iter().map(|f| Value::str(f.clone())).collect()),

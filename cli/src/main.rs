@@ -277,6 +277,12 @@ fn track_lines(lines: &mut Vec<String>, i: &Inspection) {
                 "    decoded     {} of {} raw tracks are ordinary, {} sound sectors",
                 t.standard_tracks, t.raw_mfm, t.sound_sectors
             ));
+            if t.illegally_encoded_sectors > 0 {
+                lines.push(format!(
+                    "    encoding    {} sectors are not legal MFM",
+                    t.illegally_encoded_sectors
+                ));
+            }
             if t.stray_syncs > 0 {
                 // Not a fault: a sync mark with nothing behind it is how a
                 // custom loader finds its own data.

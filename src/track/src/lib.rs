@@ -85,6 +85,13 @@ pub struct Sector {
     pub header_checksum_valid: bool,
     /// Whether the data checksum agrees.
     pub data_checksum_valid: bool,
+    /// Clock bits in the header and data that break the MFM encoding rule.
+    ///
+    /// Zero on an ordinary sector — measured at exactly zero across 4095 data
+    /// bits and 1279 header bits of a real one. A non-zero count means the
+    /// bytes were never written by a standard drive, which is either damage or
+    /// deliberate: illegal MFM is a protection technique in its own right.
+    pub clock_violations: usize,
     /// The 512 decoded bytes.
     pub data: Vec<u8>,
 }
@@ -99,6 +106,15 @@ impl Sector {
     pub const fn is_sound(&self) -> bool {
         self.header_checksum_valid && self.data_checksum_valid && self.format == FORMAT_AMIGADOS
     }
+
+    /// Whether the sector's bytes are legal MFM as well as correct data.
+    ///
+    /// A separate question from [`Self::is_sound`]: a sector can checksum
+    /// perfectly and still be encoded in a way no drive would produce.
+    #[must_use]
+    pub const fn clock_valid(&self) -> bool {
+        self.clock_violations == 0
+    }
 }
 
 /// What a raw track yielded.
@@ -106,6 +122,37 @@ impl Sector {
 pub struct TrackDecode {
     /// Sectors found, in the order they appear on the track.
     pub sectors: Vec<Sector>,
+    /// Every sync word on the track, not only those that begin a sector.
+    ///
+    /// Counted by scanning the whole track at its clock phase, because a sync
+    /// in a gap is just as illegal as one before a sector and contributes the
+    /// same violation. Counting only sector-leading syncs undercounts the
+    /// baseline and makes ordinary tracks look like they carry illegal MFM —
+    /// which is exactly the wrong way round.
+    pub sync_words: usize,
+    /// Clock-bit violations across the whole track.
+    ///
+    /// Measured from the first sync word, because that is the only place the
+    /// clock/data phase is known: a track's byte boundaries say nothing about
+    /// where its bit pairs begin. `None` when the track has no sync at all and
+    /// the phase is therefore unknowable.
+    ///
+    /// # This is an observation, not a protection score
+    ///
+    /// It is tempting to subtract [`Self::sync_words`] and call the remainder
+    /// illegal MFM, since a sync word is deliberately illegal. **That does not
+    /// work**, and it was tried: a sync word does not contribute exactly one
+    /// violation, because the transitions into and out of a sync region
+    /// contribute their own. A known-good Terrorpods track has 22 sync words
+    /// and 27 violations.
+    ///
+    /// Counting the baseline two different ways produced two different and
+    /// contradictory pictures of which disks were protected — the first made
+    /// the heavily-protected ones look clean. The raw counts are reported
+    /// because they are facts; the difference is not, and no score is derived
+    /// from it. Isolating deliberate illegal MFM needs the sync boundaries
+    /// modelled properly, which is not done.
+    pub clock_violations: Option<usize>,
     /// Sync marks that lead to no sector at all.
     ///
     /// **This is a protection signature, not an error.** A sync mark written
@@ -147,6 +194,48 @@ impl TrackDecode {
         }
         true
     }
+}
+
+/// Count clock bits that break the MFM encoding rule.
+///
+/// In MFM each data bit is preceded by a clock bit, and the clock is set
+/// **only when both the previous and the current data bit are zero** — its
+/// whole job is to keep a run of zeros from losing its timing. In the Amiga's
+/// byte layout the clock bits are the odd positions (`0xAA`) and the data bits
+/// the even ones (`0x55`).
+///
+/// The first pair is skipped: its clock depends on the data bit before the
+/// slice, which is not in the slice.
+///
+/// # What a violation means
+///
+/// Legal MFM is what a drive can write. A violation is therefore either damage
+/// or intent, and the format's own sync word is the proof that intent happens:
+/// `0x4489` is deliberately illegal — measured here at exactly **2 violations
+/// across two sync words** — which is precisely what makes it findable in a
+/// stream where ordinary data cannot produce it.
+#[must_use]
+pub fn clock_violations(mfm: &[u8]) -> usize {
+    let mut violations = 0usize;
+    let mut previous: Option<u8> = None;
+
+    for (index, byte) in mfm.iter().enumerate() {
+        let _ = index;
+        // Four (clock, data) pairs per byte, most significant first.
+        for pair in 0..4u32 {
+            let shift = 7u32.saturating_sub(pair.saturating_mul(2));
+            let clock = byte.checked_shr(shift).unwrap_or(0) & 1;
+            let data = byte.checked_shr(shift.saturating_sub(1)).unwrap_or(0) & 1;
+            if let Some(prior) = previous {
+                let expected = u8::from(prior == 0 && data == 0);
+                if clock != expected {
+                    violations = violations.saturating_add(1);
+                }
+            }
+            previous = Some(data);
+        }
+    }
+    violations
 }
 
 /// Decode the odd/even halves of an MFM field.
@@ -219,6 +308,10 @@ fn decode_sector_at(track: &[u8], sync_bit: usize, body: usize) -> Option<Sector
         label,
         header_checksum_valid: header_stored == header_calculated,
         data_checksum_valid: data_stored == data_calculated,
+        // The checksummed regions only: the gap between them is not the
+        // sector's to be legal about.
+        clock_violations: clock_violations(mfm.get(field::INFO..field::HEADER_CHECKSUM)?)
+            .saturating_add(clock_violations(data_mfm)),
         data: decode_field(mfm, field::DATA, SECTOR_BYTES)?,
     })
 }
@@ -270,6 +363,7 @@ fn bytes_at_bit(track: &[u8], bit: usize, len: usize) -> Option<Vec<u8>> {
 pub fn decode_track(track: &[u8]) -> TrackDecode {
     let mut sectors = Vec::new();
     let mut stray_syncs = 0usize;
+    let mut first_sync: Option<usize> = None;
 
     let total_bits = track.len().saturating_mul(8);
     // A rolling 32-bit window over the bit stream.
@@ -285,6 +379,9 @@ pub fn decode_track(track: &[u8]) -> TrackDecode {
             let bit = position.saturating_sub(32);
             // Sectors carry two sync words, but some tracks carry more; the
             // body starts after the last of them.
+            if first_sync.is_none() {
+                first_sync = Some(bit);
+            }
             let mut body = bit.saturating_add(32);
             while sync_at(track, body) {
                 body = body.saturating_add(16);
@@ -318,10 +415,59 @@ pub fn decode_track(track: &[u8]) -> TrackDecode {
         position = position.saturating_add(1);
     }
 
+    // The clock/data phase is only knowable from a sync word, so a track with
+    // no sync cannot be checked at all — its byte boundaries say nothing about
+    // where its bit pairs begin.
+    let clock_violations = first_sync.map(|at| clock_violations_from(track, at));
+    let sync_words = first_sync.map_or(0, |at| count_sync_words(track, at));
+
     TrackDecode {
         sectors,
+        sync_words,
+        clock_violations,
         stray_syncs,
     }
+}
+
+/// Count every sync word on the track, at the track's clock phase.
+///
+/// Phase-aligned because a sync word is eight (clock, data) pairs: one that
+/// straddled the phase would not be a sync word as the hardware sees it.
+fn count_sync_words(track: &[u8], phase: usize) -> usize {
+    let total_bits = track.len().saturating_mul(8);
+    let mut count = 0usize;
+    let mut at = phase;
+    while at.saturating_add(16) <= total_bits {
+        if sync_at(track, at) {
+            count = count.saturating_add(1);
+            at = at.saturating_add(16);
+        } else {
+            at = at.saturating_add(2);
+        }
+    }
+    count
+}
+
+/// Count clock violations across a track, starting from a known clock bit.
+fn clock_violations_from(track: &[u8], start_bit: usize) -> usize {
+    let total_bits = track.len().saturating_mul(8);
+    let mut violations = 0usize;
+    let mut previous: Option<u8> = None;
+    let mut at = start_bit;
+
+    while at.saturating_add(1) < total_bits {
+        let clock = bit_at(track, at);
+        let data = bit_at(track, at.saturating_add(1));
+        if let Some(prior) = previous {
+            let expected = u8::from(prior == 0 && data == 0);
+            if clock != expected {
+                violations = violations.saturating_add(1);
+            }
+        }
+        previous = Some(data);
+        at = at.saturating_add(2);
+    }
+    violations
 }
 
 /// One bit of the track, zero past the end.
