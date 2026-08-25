@@ -369,6 +369,19 @@ fn report_text(out: &mut impl Write, path: &Path, i: &Inspection) {
             ));
         }
     }
+    if let Some(c) = &i.compression {
+        match (c.decompressed_size, &c.error) {
+            (Some(n), _) => lines.push(format!(
+                "  compressed  {}, {} bytes on disk -> {n} bytes",
+                c.kind, c.compressed_size
+            )),
+            (None, Some(why)) => lines.push(format!(
+                "  compressed  {} — could not be decompressed: {why}",
+                c.kind
+            )),
+            (None, None) => {}
+        }
+    }
     lines.push("  evidence".to_owned());
     for e in &i.detection.evidence {
         lines.push(format!("    - {e}"));

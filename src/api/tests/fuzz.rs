@@ -44,7 +44,7 @@ use std::time::{Duration, Instant};
 
 use ade_core::layers::{
     block::{self, Geometry},
-    container::{RawImage, sniff},
+    container::{RawImage, inflate, sniff},
     filesystem::{
         bootblock::Bootblock, dircache, dostype::Dostype, entry::Entry, rootblock::Rootblock,
         volume::Volume,
@@ -412,4 +412,93 @@ fn fuzz_truncated_and_extended_images() {
             let _ = ade_core::inspect_bytes(img.clone());
         });
     }
+}
+
+#[test]
+fn fuzz_the_inflater() {
+    // A decompressor is the AV-005 surface: every length it acts on comes from
+    // the input, and a few bytes can ask for gigabytes. The output cap here is
+    // deliberately small, so a case that tries to run away is caught as a
+    // failed assertion rather than by the OOM killer — which is what happened
+    // to this session twice with `unadf`.
+    //
+    // 64 KiB is far above anything a mutated 900 KB stream legitimately
+    // produces, and small enough that a case which *tries* to run away is cut
+    // off cheaply. Decompression costs far more per case than parsing a block,
+    // so the default count is lower than the other targets' — `ADE_FUZZ_ITERS`
+    // raises it for a deep sweep.
+    const CAP: usize = 64 * 1024;
+
+    let mut rng = Rng::new(0x5EED_0007);
+    // Real gzip streams as bases, so mutation lands on plausible structure
+    // rather than being rejected at the magic bytes every time.
+    let bases: Vec<Vec<u8>> = vec![
+        gzip_of(&Fixture::dd(1).named("Fuzz").build()),
+        gzip_of(&[0u8; 4096]),
+        gzip_of(b"the quick brown fox jumps over the lazy dog"),
+        vec![0x1F, 0x8B, 0x08, 0, 0, 0, 0, 0, 0, 0],
+    ];
+
+    for i in 0..iterations(2_000) {
+        let seed = u64::from(i);
+        let mut buf = bases[rng.below(bases.len())].clone();
+        for _ in 0..=rng.below(8) {
+            mutate(&mut buf, &mut rng);
+        }
+        timed(seed, "inflater", || {
+            // Must return, never panic, on any input at all.
+            if let Ok(out) = inflate::gunzip(&buf, CAP) {
+                assert!(out.len() <= CAP, "the cap was exceeded, not enforced");
+            }
+            let _ = inflate::inflate(&buf, CAP);
+            let _ = inflate::crc32(&buf);
+        });
+    }
+}
+
+#[test]
+fn fuzz_the_inflater_on_arbitrary_bytes() {
+    // The other half: no plausible structure at all. Most cases die at the
+    // magic, but the ones that do not reach the block decoder with nonsense
+    // code lengths, which is where an unchecked shift or index would live.
+    const CAP: usize = 64 * 1024;
+
+    let mut rng = Rng::new(0x5EED_0008);
+    for i in 0..iterations(5_000) {
+        let len = rng.below(2048);
+        let mut buf = vec![0u8; len];
+        for b in &mut buf {
+            *b = rng.nasty_byte();
+        }
+        // Half the cases wear a valid gzip header, so the body is reached.
+        if len >= 10 && rng.below(2) == 0 {
+            let header = [0x1F, 0x8B, 0x08, 0, 0, 0, 0, 0, 0, 0];
+            buf.get_mut(..10)
+                .unwrap_or(&mut [])
+                .copy_from_slice(&header);
+        }
+        timed(u64::from(i), "inflater arbitrary", || {
+            let _ = inflate::gunzip(&buf, CAP);
+            let _ = inflate::inflate(&buf, CAP);
+        });
+    }
+}
+
+/// gzip some bytes using the system tool, so the fuzz bases are real streams
+/// rather than ones this crate produced.
+fn gzip_of(data: &[u8]) -> Vec<u8> {
+    use std::io::Write as _;
+    let mut child = std::process::Command::new("gzip")
+        .arg("-c")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn gzip");
+    child
+        .stdin
+        .take()
+        .expect("stdin")
+        .write_all(data)
+        .expect("write");
+    child.wait_with_output().expect("gzip").stdout
 }

@@ -217,6 +217,10 @@ pub fn examine(bytes: Vec<u8>) -> Health {
 /// Never: an unreadable image is a finding, not a failure.
 #[must_use]
 pub fn examine_partition(bytes: Vec<u8>, partition: Option<&str>) -> Health {
+    // The inspection unwraps an ADZ for itself; everything below reads blocks
+    // directly, so it needs the same bytes the inspection saw. Passing the
+    // still-compressed ones reported a truncated image on a sound disk.
+    let (bytes, _) = crate::inspect::unwrap_container(bytes);
     let inspection = inspect_bytes(bytes.clone());
     let mut findings: Vec<Finding> = inspection
         .faults()

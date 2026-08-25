@@ -672,11 +672,50 @@ Large volumes also need **more than one bitmap block**: a 512-byte bitmap block 
 | Extended-ADF | `UAE-1ADF` | 0 | [CORPUS] |
 | HDF (unpartitioned) | `DOS` | 0 | [FAQ §7] |
 | HDF (RDB) | `RDSK` | within first 16 blocks | [FAQ §6.1] |
-| ADZ / HDZ | `1F 8B` (gzip) | 0 | — |
+| ADZ / HDZ | `1F 8B` (gzip) | 0 | [RFC 1952], implemented |
 | SCP | `SCP` + version byte | 0 | [SCP] |
 | DMS | `DMS!` *(unverified)* | 0 | Phase 3 |
 | IPF | `CAPS` *(unverified)* | 0 | Phase 4 |
 | FDI | `FDI` *(unverified)* | 0 | not scheduled — see below |
+
+### ADZ and HDZ (gzip)
+
+An ADZ is a gzip-wrapped ADF and an HDZ a gzip-wrapped HDF. There is no Amiga-specific structure at all: the wrapper is ordinary gzip ([RFC 1952]) around ordinary DEFLATE ([RFC 1951]), and what comes out is the image.
+
+| offset | field | meaning |
+|---|---|---|
+| 0x00 | ID1, ID2 | `1F 8B` |
+| 0x02 | CM | compression method; **8** is DEFLATE and the only one gzip defines |
+| 0x03 | FLG | bit 1 FHCRC, bit 2 FEXTRA, bit 3 FNAME, bit 4 FCOMMENT |
+| 0x04 | MTIME | modification time, little-endian |
+| 0x08 | XFL, OS | compression hint and source OS |
+| 0x0a | *optional fields* | FEXTRA (length-prefixed), then FNAME and FCOMMENT (NUL-terminated), then FHCRC |
+| … | DEFLATE stream | |
+| end−8 | CRC32 | of the **uncompressed** data |
+| end−4 | ISIZE | uncompressed length, modulo 2³² |
+
+Note gzip's framing is **little-endian**, unlike everything on an Amiga disk. C-001 governs disk data and routes it through `ade-endian`; the gzip header is not disk data and is read directly, which is a deliberate exception rather than an oversight.
+
+**The trailer is a verification, not a size hint.** `ISIZE` states the decompressed length, and reserving it before decompressing would be BUG-003 again with the attacker holding the pen. Both fields are checked *after* the fact: a caller gets bytes that provably match what was compressed, or an error.
+
+### Decompression is the AV-005 surface
+
+DEFLATE is where a few kilobytes of input legitimately becomes gigabytes of output — that is the format working, not a corruption. Three rules follow, and they are the reason the inflater is written the way it is:
+
+- **The output cap is checked before every write, never after.** A limit tested afterwards has already allocated. Measured: a 970 KB stream expanding to 1 GB is refused with a peak RSS of 515 MB against a 512 MiB cap, rather than being decompressed and then complained about.
+- **Nothing is sized from a declared length.** Every length in the stream is the input's, including `ISIZE`.
+- **A back-reference before the start of the output is an error**, not a wrap or a clamp. This is AV-004's equivalent inside the decompressor, and it is what stops a crafted stream reading memory it should not. Measured on a corrupted real ADZ: `back-reference 27392 bytes back, with only 6569 bytes decompressed`.
+
+The cap is **policy, not format**: `MAX_DECOMPRESSED` is 512 MiB because everything here reads whole images into memory, so an unbounded expansion is an OOM kill rather than a slow read. A legitimate image larger than that would be refused, which is why the error names the limit rather than calling the file corrupt.
+
+### The oracle for gzip is stronger than the one for ADF
+
+D-002's ADF oracle compares two *interpretations* of a disk, so a disagreement needs adjudicating (D-012). gzip has no such gap: the system `gzip` compresses, ADE decompresses, and the result is either byte-identical to the input or wrong. Every image in the corpus is therefore a test case with an unambiguous answer, and `compressed.rs` runs a deterministic sample of them.
+
+That also makes the *absence* of DMS material sting less than it might: ADZ/HDZ is the compressed path that can be verified completely, and it is done. DMS remains blocked on test data (D-009).
+
+[RFC 1951]: https://www.rfc-editor.org/rfc/rfc1951
+[RFC 1952]: https://www.rfc-editor.org/rfc/rfc1952
 
 ### FDI is the licence-free flux format
 

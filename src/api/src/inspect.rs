@@ -17,7 +17,7 @@ use std::{fs, io, path::Path};
 
 use ade_block::{BlockError, BlockSource as _};
 use ade_block::{Geometry, GeometryError, read_at};
-use ade_container::{Detection, Kind, RawImage, Window, sniff};
+use ade_container::{Detection, Kind, RawImage, Window, inflate, sniff};
 use ade_filesystem::{
     bootblock::Bootblock,
     datestamp::DateFault,
@@ -34,6 +34,68 @@ use crate::json::Value;
 /// to scan sixteen blocks for an RDB.
 const HEAD_BYTES: usize = 512 * 16;
 
+/// The most a compressed image may expand to (AV-005).
+///
+/// A policy cap, not a format limit. Everything here reads a whole image into
+/// memory, so an unbounded expansion is an out-of-memory kill rather than a
+/// slow read — and a few kilobytes of crafted gzip can ask for terabytes. Half
+/// a gigabyte covers any real ADZ or HDZ by a wide margin; the largest plain
+/// hardfile in ordinary use is a fraction of it.
+pub const MAX_DECOMPRESSED: usize = 512 * 1024 * 1024;
+
+/// A compressed wrapper found around an image.
+///
+/// Reported rather than hidden: an ADZ that decompresses to a sound ADF is a
+/// sound disk *and* a compressed file, and a user who asked about their file
+/// should learn both.
+#[derive(Debug, Clone)]
+pub struct Compression {
+    /// The wrapper — [`Kind::Gzip`] today.
+    pub kind: Kind,
+    /// Bytes as stored.
+    pub compressed_size: u64,
+    /// Bytes after decompression, where it succeeded.
+    pub decompressed_size: Option<u64>,
+    /// Why it could not be decompressed, where it could not.
+    pub error: Option<String>,
+}
+
+/// Decompress a wrapped image, returning the inner bytes and what was unwrapped.
+///
+/// A container that is not compressed passes straight through. A wrapper that
+/// fails to decompress yields the *original* bytes and a recorded error, so the
+/// caller still reports something truthful about the file rather than nothing.
+pub(crate) fn unwrap_container(bytes: Vec<u8>) -> (Vec<u8>, Option<Compression>) {
+    let size = bytes.len() as u64;
+    let head = bytes.get(..HEAD_BYTES.min(bytes.len())).unwrap_or(&[]);
+    if sniff(head, size).kind != Kind::Gzip {
+        return (bytes, None);
+    }
+    match inflate::gunzip(&bytes, MAX_DECOMPRESSED) {
+        Ok(inner) => {
+            let decompressed_size = inner.len() as u64;
+            (
+                inner,
+                Some(Compression {
+                    kind: Kind::Gzip,
+                    compressed_size: size,
+                    decompressed_size: Some(decompressed_size),
+                    error: None,
+                }),
+            )
+        }
+        Err(e) => (
+            bytes,
+            Some(Compression {
+                kind: Kind::Gzip,
+                compressed_size: size,
+                decompressed_size: None,
+                error: Some(e.to_string()),
+            }),
+        ),
+    }
+}
+
 /// Everything an inspection could determine.
 #[derive(Debug, Clone)]
 pub struct Inspection {
@@ -49,6 +111,8 @@ pub struct Inspection {
     pub volume: Option<VolumeInfo>,
     /// Why no volume was found, when none was.
     pub volume_absent: Option<String>,
+    /// The compressed wrapper this image came out of, if any.
+    pub compression: Option<Compression>,
     /// The Rigid Disk Block, where the device has one.
     pub rdb: Option<RdbInfo>,
     /// The partitions the device declares, empty for an unpartitioned image.
@@ -175,6 +239,9 @@ pub fn inspect_path(path: &Path) -> Result<Inspection, InspectionError> {
 /// Inspect an image already in memory.
 #[must_use]
 pub fn inspect_bytes(bytes: Vec<u8>) -> Inspection {
+    // ADZ and HDZ are gzip-wrapped ADF and HDF; everything below this line
+    // sees the image itself, and the wrapper is reported separately.
+    let (bytes, compression) = unwrap_container(bytes);
     let size = bytes.len() as u64;
     let head = bytes.get(..HEAD_BYTES.min(bytes.len())).unwrap_or(&[]);
     let detection = sniff(head, size);
@@ -202,6 +269,7 @@ pub fn inspect_bytes(bytes: Vec<u8>) -> Inspection {
             bootblock,
             volume: None,
             volume_absent: Some(reason),
+            compression: compression.clone(),
             rdb: None,
             partitions: Vec::new(),
             partition_faults: Vec::new(),
@@ -218,6 +286,7 @@ pub fn inspect_bytes(bytes: Vec<u8>) -> Inspection {
                 bootblock,
                 volume: None,
                 volume_absent: Some(e.to_string()),
+                compression: compression.clone(),
                 rdb: None,
                 partitions: Vec::new(),
                 partition_faults: Vec::new(),
@@ -233,6 +302,7 @@ pub fn inspect_bytes(bytes: Vec<u8>) -> Inspection {
             bootblock,
             volume: None,
             volume_absent: Some("image is shorter than its geometry".to_owned()),
+            compression: compression.clone(),
             rdb: None,
             partitions: Vec::new(),
             partition_faults: Vec::new(),
@@ -241,6 +311,7 @@ pub fn inspect_bytes(bytes: Vec<u8>) -> Inspection {
     let (volume, volume_absent) = read_volume(&image, geometry);
     let (rdb, partitions, partition_faults) = read_partition_table(&image);
     Inspection {
+        compression,
         detection,
         size,
         geometry: Some(geometry),
@@ -472,6 +543,20 @@ impl Inspection {
                         .collect(),
                 ),
             ),
+            (
+                "compression",
+                Value::opt(self.compression.as_ref(), |c| {
+                    Value::Obj(vec![
+                        ("kind", Value::str(c.kind.to_string())),
+                        ("compressed_size", Value::Num(c.compressed_size)),
+                        (
+                            "decompressed_size",
+                            c.decompressed_size.map_or(Value::Null, Value::Num),
+                        ),
+                        ("error", Value::opt(c.error.as_ref(), Value::str)),
+                    ])
+                }),
+            ),
             ("geometry", Value::opt(geometry, |g| g)),
             ("bootblock", Value::opt(bootblock, |b| b)),
             ("volume", Value::opt(volume, |v| v)),
@@ -596,6 +681,8 @@ impl Image {
     /// # Errors
     /// [`InspectionError::Geometry`] if the size matches no usable geometry.
     pub fn from_bytes(bytes: Vec<u8>) -> Result<Self, InspectionError> {
+        // An ADZ mounts exactly like the ADF inside it.
+        let (bytes, _) = unwrap_container(bytes);
         let size = bytes.len() as u64;
         let head = bytes.get(..HEAD_BYTES.min(bytes.len())).unwrap_or(&[]);
         let geometry = geometry_for(sniff(head, size).kind, size)

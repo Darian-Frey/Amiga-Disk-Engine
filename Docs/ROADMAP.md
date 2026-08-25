@@ -73,13 +73,17 @@ Neither run is the F-001 bar, which requires a fuzz corpus rather than well-form
 
 ## Phase 3 — Containers & compression
 **Goal:** Absorb the compressed and packaged formats transparently, with honest lossiness reporting.
-**Status:** Not started
+**Status:** In progress
 **Features delivered:** F-003 (DMS/HDZ), F-011, F-016
 **Deliverables:**
-- [ ] DMS (all modes + encrypted) by whichever route D-009 settles on; ADZ/HDZ gzip at the container front-end.
+- [x] **ADZ / HDZ gzip at the container front-end** — a DEFLATE decoder ([RFC 1951]) and gzip wrapper ([RFC 1952]) written from the specifications, since the workspace has no dependencies. An ADZ now inspects, mounts, lists, extracts and health-checks exactly as the ADF inside it, with the wrapper reported rather than hidden. Verified against the system `gzip` on real corpus images — byte-identical, which is a stronger oracle than D-002's, because there is no interpretive gap to adjudicate. AV-005 is discharged for this path: a 970 KB stream expanding to 1 GB is refused at a peak RSS of 515 MB against a 512 MiB cap, and the cap is checked before every write rather than after.
+- [ ] DMS (all modes + encrypted) by whichever route D-009 settles on. **Still blocked on test data** — there is not one DMS file to work from, and D-009 records why writing a decompressor with nothing to decompress is the failure D-002 and D-010 exist to prevent.
 - [ ] FILEID.DIZ / banner extraction; bootblock virus scanning (F-011, AV-002).
 - [ ] Conversion matrix with lossy-conversion warnings (F-016, C-003, C-004).
-**Acceptance:** DMS fixtures decompress to byte-correct ADFs where the source permits; `errdms` cases fail loudly, not silently.
+**Acceptance:** DMS fixtures decompress to byte-correct ADFs where the source permits; `errdms` cases fail loudly, not silently. **Met for gzip already**: real images round-trip byte-identically, and corrupt ones fail with a named reason rather than yielding plausible bytes.
+
+[RFC 1951]: https://www.rfc-editor.org/rfc/rfc1951
+[RFC 1952]: https://www.rfc-editor.org/rfc/rfc1952
 
 ## Phase 4 — Track / flux level
 **Goal:** Handle the copy-protection frontier — the Amiga analogue of STX/Pasti — on the open flux path.
