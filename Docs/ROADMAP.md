@@ -92,11 +92,14 @@ Neither run is the F-001 bar, which requires a fuzz corpus rather than well-form
 
 ## Phase 4 — Track / flux level
 **Goal:** Handle the copy-protection frontier — the Amiga analogue of STX/Pasti — on the open flux path.
-**Status:** Not started
+**Status:** In progress — the extended-ADF container reads; MFM decoding is next
 **Features delivered:** F-003 (SCP/ext-ADF/IPF-read), F-005 (initial), F-007, F-008
 **Deliverables:**
-- [ ] Internal MFM track model populated (designed-for since Phase 0 per D-005); MFM encode/decode; sync-word handling.
-- [ ] Extended-ADF read/write; SCP read/write (D-007); optional read-only IPF behind a licence-gated feature flag (C-003).
+- [x] **Extended-ADF reading** — the track table parses, each track's kind and extent are reported, and damage is a fault rather than a failure. All eleven corpus images parse; `Demolition.adf` is genuinely truncated 25,732 bytes short and yields 163 of its 166 tracks instead of nothing.
+  Two readings a plausible implementation gets wrong, both now measured and pinned: **`space` is the file allocation and `length` the meaningful extent** — `length` is 45056 bits for all 428 type-0 tracks while `space` is 5632, 12650 or 12668 depending on the writer — and **a track may be empty**, 154 having both fields zero.
+  Verified rather than merely fitted: assembling the type-0 tracks of `Demolition` into a plain ADF produces a mountable volume named `Demolition`, and `Realm of the Trolls` likewise. Arithmetic can be satisfied by a wrong reading; a legible rootblock at block 880 cannot.
+- [ ] **MFM decode**, and the internal track model it populates (D-005). The raw tracks are reachable but not yet decoded. SPEC has no MFM section: [RKRM] Appendix C is the source and has not been consulted (§Open questions). The verification story is unusually good — an Amiga sector carries its own header and data checksums, so a correct decode is self-evidencing.
+- [ ] Extended-ADF write; SCP read/write (D-007); optional read-only IPF behind a licence-gated feature flag (C-003).
 - [ ] **Consider FDI** as a second licence-free flux format alongside SCP. It stores raw low-level track data like IPF, but its specification is public and its tools are open source, where C-003 forbids ADE from ever emitting IPF — so it is the only route to *writing* an interchange format that carries copy protection. Not committed; see SPEC §FDI is the licence-free flux format. Its magic bytes need verifying first.
 - [ ] Multi-read consolidation with confidence reporting (F-008); raw-track + filesystem dual view (F-007).
 **Acceptance:** A protected disk survives capture → SCP → write-back and boots in an emulator; consolidation resolves a marginal multi-read fixture.

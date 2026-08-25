@@ -16,7 +16,7 @@ pub use health::{
 };
 pub use inspect::{
     Compression, Description, Fault, Image, Inspection, InspectionError, MAX_DECOMPRESSED,
-    MAX_DESCRIPTION, PartitionInfo, RdbInfo, VolumeInfo, entry_to_json, inspect_bytes,
+    MAX_DESCRIPTION, PartitionInfo, RdbInfo, TrackTable, VolumeInfo, entry_to_json, inspect_bytes,
     inspect_path,
 };
 

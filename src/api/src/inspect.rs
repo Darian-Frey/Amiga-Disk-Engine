@@ -17,7 +17,7 @@ use std::{fs, io, path::Path};
 
 use ade_block::{BlockError, BlockSource as _};
 use ade_block::{Geometry, GeometryError, read_at};
-use ade_container::{Detection, Kind, RawImage, Window, inflate, sniff};
+use ade_container::{Detection, Kind, RawImage, Window, extended, inflate, sniff};
 use ade_filesystem::{
     bootblock::{BootText, Bootblock},
     datestamp::DateFault,
@@ -111,6 +111,8 @@ pub struct Inspection {
     pub volume: Option<VolumeInfo>,
     /// Why no volume was found, when none was.
     pub volume_absent: Option<String>,
+    /// The track table, where the container carries raw tracks.
+    pub tracks: Option<TrackTable>,
     /// The disk's own description of itself, from `FILE_ID.DIZ`.
     pub description: Option<Description>,
     /// Printable text found in the boot code (F-011).
@@ -191,6 +193,87 @@ pub struct PartitionInfo {
     pub volume_name: Option<String>,
     /// Why it did not mount, where it did not.
     pub mount_error: Option<String>,
+}
+
+/// Report a container ADE identified but cannot read as blocks.
+///
+/// Not a failure: a raw-track container genuinely has no volume, and saying so
+/// precisely beats calling the whole format unimplemented.
+fn unreadable_container(
+    detection: Detection,
+    size: u64,
+    bootblock: Option<Bootblock>,
+    tracks: Option<TrackTable>,
+    compression: Option<Compression>,
+) -> Inspection {
+    let reason = match detection.kind {
+        Kind::Unknown => "reading an unrecognised container is not implemented yet".to_owned(),
+        // A raw-track container holds tracks, not a volume. Its ordinary
+        // tracks could be assembled into one and its raw tracks could not,
+        // which is the whole reason it is not an ADF.
+        Kind::ExtendedAdf { .. } => match &tracks {
+            Some(t) => format!(
+                "a raw-track container holds tracks, not a volume — {} of its {} tracks \
+                 hold ordinary sectors, {} hold raw MFM",
+                t.sectors, t.declared, t.raw_mfm
+            ),
+            None => "the track table could not be read".to_owned(),
+        },
+        other => format!("reading {other} is not implemented yet"),
+    };
+    Inspection {
+        detection,
+        size,
+        geometry: None,
+        bootblock,
+        volume: None,
+        volume_absent: Some(reason),
+        tracks,
+        description: None,
+        boot_text: Vec::new(),
+        compression,
+        rdb: None,
+        partitions: Vec::new(),
+        partition_faults: Vec::new(),
+    }
+}
+
+/// Read the track table of a raw-track container, if this is one.
+fn read_track_table(bytes: &[u8], kind: Kind) -> Option<TrackTable> {
+    if !matches!(kind, Kind::ExtendedAdf { .. }) {
+        return None;
+    }
+    let parsed = extended::ExtendedAdf::parse(bytes).ok()?;
+    let (sectors, raw_mfm, empty) = parsed.counts();
+    Some(TrackTable {
+        declared: parsed.tracks.len(),
+        sectors,
+        raw_mfm,
+        empty,
+        present: parsed.tracks.iter().filter(|t| t.present).count(),
+        faults: parsed.faults,
+    })
+}
+
+/// A raw-track container's table, summarised for reporting.
+///
+/// Mixed track kinds within one image are the **signature of copy protection**,
+/// not a defect: a disk with one standard track and 165 raw ones is a protected
+/// disk that was captured properly.
+#[derive(Debug, Clone)]
+pub struct TrackTable {
+    /// Tracks the table declares.
+    pub declared: usize,
+    /// Tracks holding ordinary AmigaDOS sectors.
+    pub sectors: usize,
+    /// Tracks holding raw MFM — the reason the container exists.
+    pub raw_mfm: usize,
+    /// Tracks holding nothing: unformatted, or never captured.
+    pub empty: usize,
+    /// Tracks whose data the file actually reaches.
+    pub present: usize,
+    /// Problems found walking the table.
+    pub faults: Vec<String>,
 }
 
 /// The most of a `FILE_ID.DIZ` to read.
@@ -332,29 +415,10 @@ pub fn inspect_bytes(bytes: Vec<u8>) -> Inspection {
         Vec::new()
     };
 
+    let tracks = read_track_table(&bytes, detection.kind);
     let Some(geometry) = geometry_for(detection.kind, size) else {
-        // Every other container is a later phase. Report what was identified
-        // and stop, rather than guessing at a geometry.
-        let reason = match detection.kind {
-            Kind::Unknown => "reading an unrecognised container is not implemented yet".to_owned(),
-            other => format!("reading {other} is not implemented yet"),
-        };
-        return Inspection {
-            detection,
-            size,
-            geometry: None,
-            bootblock,
-            volume: None,
-            volume_absent: Some(reason),
-            description: None,
-            boot_text: Vec::new(),
-            compression: compression.clone(),
-            rdb: None,
-            partitions: Vec::new(),
-            partition_faults: Vec::new(),
-        };
+        return unreadable_container(detection, size, bootblock, tracks, compression);
     };
-
     let geometry = match geometry {
         Ok(g) => g,
         Err(e) => {
@@ -365,6 +429,7 @@ pub fn inspect_bytes(bytes: Vec<u8>) -> Inspection {
                 bootblock,
                 volume: None,
                 volume_absent: Some(e.to_string()),
+                tracks: None,
                 description: None,
                 boot_text: Vec::new(),
                 compression: compression.clone(),
@@ -383,6 +448,7 @@ pub fn inspect_bytes(bytes: Vec<u8>) -> Inspection {
             bootblock,
             volume: None,
             volume_absent: Some("image is shorter than its geometry".to_owned()),
+            tracks: None,
             description: None,
             boot_text: Vec::new(),
             compression: compression.clone(),
@@ -400,6 +466,7 @@ pub fn inspect_bytes(bytes: Vec<u8>) -> Inspection {
         .and_then(|v| read_description(&v));
     let (rdb, partitions, partition_faults) = read_partition_table(&image);
     Inspection {
+        tracks,
         description,
         boot_text,
         compression,
@@ -651,30 +718,16 @@ impl Inspection {
             ("geometry", Value::opt(geometry, |g| g)),
             ("bootblock", Value::opt(bootblock, |b| b)),
             (
+                "tracks",
+                Value::opt(self.tracks.as_ref(), TrackTable::to_json),
+            ),
+            (
                 "description",
-                Value::opt(self.description.as_ref(), |d| {
-                    Value::Obj(vec![
-                        ("file", Value::str(d.file.clone())),
-                        ("block", Value::Num(u64::from(d.block))),
-                        ("text", Value::str(d.text.clone())),
-                        ("declared_size", Value::Num(u64::from(d.declared_size))),
-                        ("truncated", Value::Bool(d.truncated)),
-                    ])
-                }),
+                Value::opt(self.description.as_ref(), Description::to_json),
             ),
             (
                 "boot_text",
-                Value::Arr(
-                    self.boot_text
-                        .iter()
-                        .map(|t| {
-                            Value::Obj(vec![
-                                ("offset", Value::Num(t.offset as u64)),
-                                ("text", Value::str(t.text.clone())),
-                            ])
-                        })
-                        .collect(),
-                ),
+                Value::Arr(self.boot_text.iter().map(boot_text_json).collect()),
             ),
             ("volume", Value::opt(volume, |v| v)),
             (
@@ -962,6 +1015,46 @@ impl PartitionInfo {
             ),
         ])
     }
+}
+
+impl TrackTable {
+    /// The track table as JSON (F-015).
+    #[must_use]
+    pub fn to_json(&self) -> Value {
+        Value::Obj(vec![
+            ("declared", Value::Num(self.declared as u64)),
+            ("sectors", Value::Num(self.sectors as u64)),
+            ("raw_mfm", Value::Num(self.raw_mfm as u64)),
+            ("empty", Value::Num(self.empty as u64)),
+            ("present", Value::Num(self.present as u64)),
+            (
+                "faults",
+                Value::Arr(self.faults.iter().map(|f| Value::str(f.clone())).collect()),
+            ),
+        ])
+    }
+}
+
+impl Description {
+    /// The disk's own description as JSON (F-015).
+    #[must_use]
+    pub fn to_json(&self) -> Value {
+        Value::Obj(vec![
+            ("file", Value::str(self.file.clone())),
+            ("block", Value::Num(u64::from(self.block))),
+            ("text", Value::str(self.text.clone())),
+            ("declared_size", Value::Num(u64::from(self.declared_size))),
+            ("truncated", Value::Bool(self.truncated)),
+        ])
+    }
+}
+
+/// One run of boot text as JSON (F-015).
+fn boot_text_json(text: &BootText) -> Value {
+    Value::Obj(vec![
+        ("offset", Value::Num(text.offset as u64)),
+        ("text", Value::str(text.text.clone())),
+    ])
 }
 
 #[cfg(test)]

@@ -17,6 +17,7 @@
 //! never rejects an image for failing a test that real disks routinely fail.
 //! The caller reports both.
 
+pub mod extended;
 pub mod inflate;
 pub mod sniff;
 

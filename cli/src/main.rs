@@ -252,6 +252,32 @@ fn info(path: &Path, format: Format) -> ExitCode {
 /// Neither appears for a floppy, which is most images — a disk having no
 /// partition table is not a fault worth a line.
 fn device_lines(lines: &mut Vec<String>, i: &Inspection) {
+    if let Some(t) = &i.tracks {
+        // A mix of kinds is the signature of copy protection, not a defect:
+        // the raw tracks are what a plain ADF could not have carried.
+        lines.push(format!("  tracks      {} declared", t.declared));
+        lines.push(format!(
+            "    sectors     {} ordinary AmigaDOS tracks",
+            t.sectors
+        ));
+        lines.push(format!("    raw MFM     {} tracks", t.raw_mfm));
+        if t.empty > 0 {
+            lines.push(format!(
+                "    empty       {} tracks (unformatted or not captured)",
+                t.empty
+            ));
+        }
+        if t.present < t.declared {
+            lines.push(format!(
+                "    present     {} of {} — the file does not reach the rest",
+                t.present, t.declared
+            ));
+        }
+        for fault in t.faults.iter().take(4) {
+            lines.push(format!("    ! {fault}"));
+        }
+    }
+
     if let Some(d) = &i.description {
         // The disk's own words about itself, usually ASCII art from whoever
         // released it. Indented rather than quoted, because the layout is the

@@ -761,7 +761,9 @@ Size alone cannot be decisive either: a truncated or padded ADF is exactly the s
 
 ## Extended-ADF (`UAE-1ADF`)
 
-Carries raw MFM track data for non-standard and protected disks, which plain ADF cannot. Layout below was **derived empirically** from eleven images in the survey corpus and then checked arithmetically: for all eleven, `12 + tracks × 12 + Σ space` equals the file size exactly.
+Carries raw MFM track data for non-standard and protected disks, which plain ADF cannot. Layout below was **derived empirically** from the eleven extended ADFs in the corpus — there is no published specification — and re-verified by implementation on 2026-08-25.
+
+**Correction (2026-08-25).** This section previously claimed that `12 + tracks × 12 + Σ space` equals the file size for all eleven. It does not: it holds for ten, and `Demolition.adf` is **25,732 bytes short**, ending inside track 163 of a declared 166. The arithmetic is still the right check — it is what found the truncation — but it is a test the file can fail, not an invariant. A reader must treat a short file as a fault and keep the tracks that are present; 163 good tracks are not worth discarding.
 
 | offset | type | count | name | meaning |
 |---|---|---|---|---|
@@ -780,9 +782,26 @@ Then `tracks` track headers of 12 bytes each, from 0x0c:
 
 Track data follows the header array in track order, each occupying its `space` bytes.
 
-`length` is in bits, not bytes: a type-0 track reads `space = 5632` (11 × 512, one DD track) with `length = 45056`, exactly 5632 × 8. Type-1 tracks in the same image read `space = 12768` with `length ≈ 102138` bits, which is under `space × 8` — so `space` is the allocation and `length` the meaningful extent.
+**`space` is the file allocation; `length` is the meaningful extent, in bits.** Measured across all 428 type-0 tracks in the corpus, `length` is **45056 in every one** — 5632 bytes, one standard DD track of 11 × 512. `space` for those same tracks is 5632, 12650 or 12668 depending on the writer, so a reader that takes `space` as the data size reads up to seven kilobytes of padding as sectors.
 
-Mixed track types within one image are normal and are the signature of copy protection: *Deep Space* carries track 0 as type 0 (a standard, mountable bootblock track) and the remaining 165 as raw MFM. A reader that assumes a uniform track type across the image will mis-parse the common case.
+That correction matters more than it sounds: the earlier note here said "a type-0 track reads `space = 5632`", which is true of only one writer in three. Advance through the file by `space`; read data by `length`.
+
+**A track may hold nothing.** 154 observed type-1 tracks have `space` and `length` both zero — an unformatted or never-captured track, which is a fact about the disk rather than damage to the file. `Terrorpods` has 69 such tracks and `Deep Space` 55.
+
+Mixed track types within one image are normal and are the signature of copy protection: *Deep Space* carries one type-0 track and 110 raw MFM ones. A reader that assumes a uniform track type across the image will mis-parse the common case.
+
+### The sector tracks really are sectors
+
+*Verified 2026-08-25.* Assembling the type-0 tracks of an extended ADF into a plain ADF, at their track positions with the rest zeroed, produces a mountable volume where enough of the disk is ordinary:
+
+| Image | type-0 tracks | reconstructed volume |
+|---|---|---|
+| `Demolition` | 160 of 166 | mounts as `Demolition` |
+| `Realm of the Trolls` | 80 of 166 | mounts as `REALM OF THE TROLLS` |
+| `Champ, The` | 159 of 160 | no volume — the one raw track is where the rootblock would be |
+| `Deep Space` | 1 of 166 | no volume, as expected |
+
+This is what confirms the layout rather than merely fitting it: the arithmetic could be satisfied by a wrong reading, but a wrong reading does not produce a rootblock with a legible name at block 880. It also shows what the type mix means in practice — `Champ` is a disk protected by making exactly the track that matters unreadable to a plain reader.
 
 ## Flux formats
 
