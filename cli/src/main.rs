@@ -42,7 +42,8 @@ use std::{
 };
 
 use ade_core::{
-    Health, Image, Inspection, Severity, entry_to_json, examine_partition, inspect_path,
+    Conversion, Health, Image, Inspection, Severity, conversion, entry_to_json, examine_partition,
+    inspect_path,
     layers::{
         container::Window,
         filesystem::{rdb::Partition, volume::Volume},
@@ -173,6 +174,8 @@ fn main() -> ExitCode {
             Some(PathBuf::from(p(2))),
             args.partition.as_deref(),
         ),
+        ("convert", 2) => convert(Path::new(p(0)), Path::new(p(1))),
+        ("formats", 0) => formats(),
         ("--version" | "-V", 0) => {
             println!("ade {}", ade_core::version());
             ExitCode::from(EXIT_CLEAN)
@@ -196,6 +199,8 @@ fn usage() {
     println!("    ade check <image>                  full health report (F-010)");
     println!("    ade ls <image> [path]              list a directory");
     println!("    ade extract <image> <path> [dest]  extract a file");
+    println!("    ade convert <in> <out>             convert between containers (F-016)");
+    println!("    ade formats                        what converts to what, and what it costs");
     println!("    ade --version");
     println!();
     println!("OPTIONS:");
@@ -814,4 +819,121 @@ fn select_partition<'a>(
         .partition_window(found)
         .map(Some)
         .map_err(|e| e.to_string())
+}
+
+/// Guess the container a path names, from its extension.
+///
+/// Only used for the **output**, which does not exist yet and so cannot be
+/// sniffed. Inputs are always identified by their content — an extension is a
+/// claim, and C-008's habit of trusting evidence over labels applies here too.
+fn kind_from_extension(path: &Path) -> Option<ade_core::layers::container::Kind> {
+    use ade_core::layers::container::Kind;
+    let ext = path.extension()?.to_str()?.to_ascii_lowercase();
+    match ext.as_str() {
+        "adf" => Some(Kind::Adf {
+            cylinders: 80,
+            sectors: 11,
+        }),
+        "hdf" | "hda" => Some(Kind::Hardfile),
+        "adz" | "hdz" | "gz" => Some(Kind::Gzip),
+        "dms" => Some(Kind::Dms),
+        "scp" => Some(Kind::Scp),
+        "ipf" => Some(Kind::Ipf),
+        _ => None,
+    }
+}
+
+/// Convert one container into another, refusing anything that would lose data
+/// silently (F-016).
+fn convert(input: &Path, output: &Path) -> ExitCode {
+    let bytes = match std::fs::read(input) {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("ade: {}: {e}", input.display());
+            return ExitCode::from(EXIT_UNREADABLE);
+        }
+    };
+
+    // The input is identified by content; only the output is taken on trust,
+    // because it does not exist yet.
+    let from = ade_core::layers::container::sniff(
+        bytes.get(..bytes.len().min(512 * 16)).unwrap_or(&[]),
+        bytes.len() as u64,
+    )
+    .kind;
+    let Some(to) = kind_from_extension(output) else {
+        eprintln!(
+            "ade: {}: cannot tell what format to write from that name — \
+             use .adf, .hdf, .adz or .hdz",
+            output.display()
+        );
+        return ExitCode::from(EXIT_USAGE);
+    };
+
+    let verdict = conversion(from, to);
+    println!("{from}  ->  {to}");
+    println!("  {verdict}");
+
+    if !verdict.is_possible() {
+        return ExitCode::from(EXIT_USAGE);
+    }
+    if let Conversion::Lossy { lost } = &verdict {
+        // Refused rather than warned. A lossy conversion that runs anyway is
+        // exactly the silence F-016 exists to break, and the loss is not
+        // recoverable afterwards.
+        eprintln!("ade: refusing to convert: this would discard {lost}");
+        eprintln!("ade: lossy conversion is not available yet — no flag enables it");
+        return ExitCode::from(EXIT_USAGE);
+    }
+
+    // The only lossless path with a proven reader: decompression (D-004).
+    let out_bytes = if matches!(from, ade_core::layers::container::Kind::Gzip) {
+        match ade_core::layers::container::inflate::gunzip(&bytes, ade_core::MAX_DECOMPRESSED) {
+            Ok(b) => b,
+            Err(e) => {
+                eprintln!("ade: {}: {e}", input.display());
+                return ExitCode::from(EXIT_UNREADABLE);
+            }
+        }
+    } else {
+        bytes
+    };
+
+    // Never overwrite. A conversion that silently replaces a source image is
+    // the irreversible damage D-004 is about.
+    if output.exists() {
+        eprintln!(
+            "ade: {}: already exists, refusing to overwrite",
+            output.display()
+        );
+        return ExitCode::from(EXIT_USAGE);
+    }
+    if let Err(e) = std::fs::write(output, &out_bytes) {
+        eprintln!("ade: {}: {e}", output.display());
+        return ExitCode::from(EXIT_UNREADABLE);
+    }
+    println!("  wrote {} bytes to {}", out_bytes.len(), output.display());
+    ExitCode::from(EXIT_CLEAN)
+}
+
+/// Print the conversion matrix (F-016).
+fn formats() -> ExitCode {
+    let kinds = ade_core::convert::known_formats();
+    println!("What ADE can convert, and what it would cost.");
+    println!();
+    for from in &kinds {
+        println!("  from {from}:");
+        for to in &kinds {
+            let verdict = conversion(*from, *to);
+            // A format to itself is a copy; saying so for every row is noise.
+            if std::mem::discriminant(from) == std::mem::discriminant(to) {
+                continue;
+            }
+            println!("    -> {:<32} {verdict}", to.to_string());
+        }
+        println!();
+    }
+    println!("Lossy conversions are refused outright, not warned about: the loss");
+    println!("is not recoverable, and a warning nobody reads is how it happens.");
+    ExitCode::from(EXIT_CLEAN)
 }

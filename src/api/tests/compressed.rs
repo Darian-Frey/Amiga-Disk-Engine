@@ -387,3 +387,16 @@ fn the_corpus_round_trips_through_gzip() {
     eprintln!("gzip round-trip: {checked} real images, byte-identical");
     assert!(checked >= 10, "expected a real sample, got {checked}");
 }
+
+#[test]
+fn converting_an_adz_reproduces_the_adf_exactly() {
+    // The end-to-end claim `ade convert` makes: what comes out is what went
+    // in. Checked here at the library level; `cli/tests/convert.rs` checks the
+    // command, including the refusals.
+    let image = Fixture::dd(1).named("Converted").build();
+    let compressed = gzip(&image, "-9");
+
+    let out = inflate::gunzip(&compressed, MAX_DECOMPRESSED).unwrap();
+
+    assert_eq!(out, image);
+}

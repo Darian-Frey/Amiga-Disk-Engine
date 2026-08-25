@@ -717,6 +717,23 @@ That also makes the *absence* of DMS material sting less than it might: ADZ/HDZ 
 [RFC 1951]: https://www.rfc-editor.org/rfc/rfc1951
 [RFC 1952]: https://www.rfc-editor.org/rfc/rfc1952
 
+### Conversion is mostly a question about loss
+
+Containers divide into two kinds, and the division is what makes a conversion matrix worth having.
+
+**Sector containers** — ADF, HDF, a whole-device image — are the same thing: a flat run of sectors distinguished by naming convention rather than structure (§A raw volume has no geometry). Converting between them is a byte copy and can lose nothing. ADZ and HDZ are these wrapped in gzip, so unwrapping is also lossless, and provably so.
+
+**Flux and raw-MFM containers** — extended ADF, SCP, IPF — hold what a sector image cannot: track timings, weak bits, and the deliberate irregularities that constitute copy protection. Flattening one into a sector image is not a conversion so much as a discard, and it is silent: the output is a perfectly valid ADF, and nothing about it records that the protection is gone.
+
+That silence is what F-016 addresses. ADE's matrix gives every pair an answer with a reason attached, and separates two things that look alike from outside:
+
+- **Refused** is a decision that does not expire. IPF output is refused because authoring is SPS-only (C-003), and no amount of future work changes that.
+- **Not implemented** is a gap with a cause. DMS input waits on test material (D-009), flux writing on Phase 4 (D-005).
+
+Reporting them identically would tell a user to wait for something that is never coming, or to give up on something that is merely pending.
+
+**Lossy conversions are refused rather than warned about.** The loss is not recoverable and a warning nobody reads is precisely how it occurs.
+
 ### FDI is the licence-free flux format
 
 *Found 2026-08-24 surveying formats.*
