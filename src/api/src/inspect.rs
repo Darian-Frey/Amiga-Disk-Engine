@@ -245,7 +245,31 @@ fn read_track_table(bytes: &[u8], kind: Kind) -> Option<TrackTable> {
     }
     let parsed = extended::ExtendedAdf::parse(bytes).ok()?;
     let (sectors, raw_mfm, empty) = parsed.counts();
+
+    // Decoding every raw track is what turns "166 tracks" into a statement
+    // about how much of the disk is ordinary and how much is protection.
+    let mut standard_tracks = 0usize;
+    let mut sound_sectors = 0usize;
+    let mut stray_syncs = 0usize;
+    for track in &parsed.tracks {
+        if track.kind != extended::TrackKind::RawMfm {
+            continue;
+        }
+        let Some(data) = parsed.track_data(bytes, track.index) else {
+            continue;
+        };
+        let decoded = ade_track::decode_track(data);
+        if decoded.is_standard() {
+            standard_tracks = standard_tracks.saturating_add(1);
+        }
+        sound_sectors = sound_sectors.saturating_add(decoded.sound());
+        stray_syncs = stray_syncs.saturating_add(decoded.stray_syncs);
+    }
+
     Some(TrackTable {
+        standard_tracks,
+        sound_sectors,
+        stray_syncs,
         declared: parsed.tracks.len(),
         sectors,
         raw_mfm,
@@ -274,6 +298,14 @@ pub struct TrackTable {
     pub present: usize,
     /// Problems found walking the table.
     pub faults: Vec<String>,
+    /// Raw tracks that decode as an ordinary track: eleven sectors, numbered
+    /// 0 to 10, every checksum agreeing.
+    pub standard_tracks: usize,
+    /// Sectors decoded from raw tracks whose own two checksums agree.
+    pub sound_sectors: usize,
+    /// Sync marks leading to no sector — a protection signature rather than a
+    /// fault. See [`ade_track::TrackDecode::stray_syncs`].
+    pub stray_syncs: usize,
 }
 
 /// The most of a `FILE_ID.DIZ` to read.
@@ -1027,6 +1059,9 @@ impl TrackTable {
             ("raw_mfm", Value::Num(self.raw_mfm as u64)),
             ("empty", Value::Num(self.empty as u64)),
             ("present", Value::Num(self.present as u64)),
+            ("standard_tracks", Value::Num(self.standard_tracks as u64)),
+            ("sound_sectors", Value::Num(self.sound_sectors as u64)),
+            ("stray_syncs", Value::Num(self.stray_syncs as u64)),
             (
                 "faults",
                 Value::Arr(self.faults.iter().map(|f| Value::str(f.clone())).collect()),

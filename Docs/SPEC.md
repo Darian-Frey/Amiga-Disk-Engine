@@ -16,6 +16,7 @@ Cited inline by key. These are ground truth; this document records ADE's working
 | **[FAQ]** | Laurent Clévy, *The .ADF (Amiga Disk File) format FAQ* — <http://lclevy.free.fr/adflib/adf_info.html>. Section numbers refer to that document. |
 | **[AFFS]** | Linux kernel AFFS driver documentation — <https://www.kernel.org/doc/html/latest/filesystems/affs.html> |
 | **[AOS-LNFS]** | *DCFS and LNFS Low Level Data Structures*, AmigaOS Documentation Wiki — <https://wiki.amigaos.net/wiki/DCFS_and_LNFS_Low_Level_Data_Structures> |
+| **[MDFS]** | *Amiga disk format*, mdfs.net — <https://mdfs.net/Docs/Comp/Disk/Format/Amiga>. MFM sector layout. |
 | **[SCP]** | Jim Drew, *SuperCard Pro Image File Specification v2.5* — <https://www.cbmstuff.com/downloads/scp/scp_image_specs.txt> |
 | **[AMIGAWIKI]** | *Filesystem*, amiga-wiki — <https://www.amigawiki.org/doku.php?id=en:system:filesystem>. Dostype table. |
 | **[DISKTYPE]** | `disktype`, `amiga.c` — the filesystem-identifier table of a working detector, consulted as a second opinion on the registry. Read as data, never as an implementation to copy (D-002 applies to it as it does to ADFlib). |
@@ -809,7 +810,72 @@ This is what confirms the layout rather than merely fitting it: the arithmetic c
 - **SCP** — the open, documented flux container and ADE's write target (D-007). Header magic `SCP` at 0x00 with a version byte at 0x03; track data headers carry `TRK`. [SCP]
 - **IPF** — stores flux-transition timings. Reading requires the closed CAPS library; creation is SPS-only. Read-only, optional, licence-gated; ADE **cannot emit IPF** (C-003).
 
-MFM encoding, sync words (0x4489), and track/sector framing are Phase 4 and not yet written up — [RKRM] Appendix C is the source to work from. [FAQ §2] also covers it and should be revisited then.
+## MFM
+
+*Written 2026-08-25, implementing it. Derived from [FAQ §2] and [MDFS], then **confirmed against the corpus's 1235 raw tracks** — see §The decode is self-evidencing.*
+
+A raw track is what the drive actually read: a continuous **bit** stream carrying data bits interleaved with clock bits, punctuated by sync marks. Decoding it is what turns a protected disk's capture back into data, and — just as usefully — shows where it cannot be turned back, because that is where the protection is.
+
+### Sector layout
+
+One sector is **1088 MFM bytes**. Eleven of them plus a gap is 12668 bytes, which is exactly the per-track allocation observed in the corpus (§Extended-ADF) — a satisfying independent check on both structures.
+
+| offset | MFM bytes | decoded | field |
+|---|---|---|---|
+| 0x000 | 4 | 2 | two sync words, `0x4489 0x4489` |
+| 0x004 | 8 | 4 | info: `0xFF`, track, sector, sectors-to-gap |
+| 0x00c | 32 | 16 | sector label — zero in practice |
+| 0x02c | 8 | 4 | header checksum |
+| 0x034 | 8 | 4 | data checksum |
+| 0x03c | 1024 | 512 | data |
+
+Offsets are from the start of the sync words. The header checksum covers the 40 MFM bytes of info and label; the data checksum covers the 1024 MFM bytes of data. Both are the **XOR of the big-endian longs, masked with `0x55555555`** — computed over the *encoded* bytes, with clock bits excluded by the mask rather than by decoding first.
+
+### The odd/even split
+
+Each MFM byte carries four data bits in its even positions. A field of *n* decoded bytes occupies *2n* MFM bytes: **the odd half first, then the even half**.
+
+```
+decoded[i] = ((odd[i] & 0x55) << 1) | (even[i] & 0x55)
+```
+
+**Which half comes first is not agreed between sources.** [MDFS] says even first; other descriptions say odd. Rather than choose, both were tried against a real track and only one produced agreeing checksums — odd first. This is recorded because the wrong choice does not fail loudly: it yields plausible-looking bytes and a silently wrong disk.
+
+### A track is a bit stream, not a byte stream
+
+**Sectors do not begin on byte boundaries.** There is no reason they should: the Amiga writes a track continuously, and where a sync happens to land in the file that stores it is arbitrary. Measured across the corpus, most do not — in one `Realm of the Trolls` track every sync sits at bit offset ≡ 7 (mod 8).
+
+A byte-aligned scan therefore finds nothing at all on most tracks. The first implementation here did exactly that and decoded 8% of the corpus's sectors, which looked like a disappointing disk rather than a broken reader. Sync must be searched at **bit** granularity and the sector read from that bit offset.
+
+### Sync marks are not sector marks
+
+Two sync words is the norm; **three occurs throughout the corpus**, and the body begins after the last of them. Miscounting lands in the gap, which decodes to a header claiming format `0xAA` and track 168 — nonsense that a reader must not report as a sector.
+
+More importantly, **a sync mark need not have a sector behind it**. Writing sync marks into the gap is how a custom loader finds its own data: the hardware syncs to them and a standard reader finds nothing. Every raw track in `Wings of Death` and `Realm of the Trolls` is like this — three sync words followed by gap.
+
+A run of gap decodes to all zeros, and **zero satisfies its own checksum**, so a checksum test cannot distinguish a gap from a sector. The format byte `0xFF` is the only reliable marker, and is what ADE requires before reporting a sector at all.
+
+### The decode is self-evidencing
+
+Every sector carries two checksums of its own, so a correct decode needs no oracle: it produces sectors whose own arithmetic agrees, and an incorrect one does not. Measured across the corpus's 1235 raw tracks:
+
+| | count |
+|---|---|
+| sectors decoding with **both** checksums agreeing | 2095 |
+| raw tracks that are fully ordinary (11 sectors, 0–10) | 95 |
+| sync marks leading to no sector | 38573 |
+
+Two thousand sectors agreeing on two independent checksums is not something a wrong decoder reaches by accident. The reading was confirmed a third way as well: `Superman - The Man of Steel_Disk2` track 80 decodes as ten sectors that all say **track 80**, matching their physical position.
+
+That third check matters because two disks do *not* do this — every raw track in `Deep Space` and `Terrorpods` claims to be track 0, with checksums fully valid. That is a property of those disks, not a decoding error, and it is why reconstructing an ADF by physical position fails on them.
+
+### What this decoder does not check
+
+Clock bits are **masked off, not verified**. That is correct for decoding — the data bits are all that carry information — but it means ADE cannot currently detect an MFM encoding violation. Some copy protection is exactly that: bit patterns that are illegal MFM and therefore unwritable by a normal drive. Detecting those needs the clock bits examined rather than discarded, and is not yet done.
+
+Nor is track length or bit-cell timing considered. Long tracks, variable-rate tracks and weak bits are all protection techniques that live in the timing rather than the data, and reading them needs flux, not MFM.
+
+## Flux formats
 
 ## Corpus observations
 
@@ -929,7 +995,7 @@ Deliberately unresolved, each deferred to the phase that needs it:
 
 - **DMS and IPF magic bytes** — asserted from memory in the table above, not yet confirmed against a primary source. Phase 3 and Phase 4 respectively.
 - ~~**LNFS block layout**~~ — **done 2026-08-24** (§Field-level pass). The entry block, `TYPE_COMMENT` block and root block are now at field level. What replaces this question is narrower and harder: [AOS-LNFS] declares **no long-name file header**, so the three file-only fields are placed by inference from the canonical block shape (§The file header is inferred, not documented), and LNFS has no oracle to check that inference against (§The oracle cannot check LNFS).
-- **MFM track and sector framing** — [RKRM] Appendix C not yet consulted. Phase 4.
+- ~~**MFM track and sector framing**~~ — **done 2026-08-25** (§MFM), from [FAQ §2] and [MDFS] and confirmed against 1235 real raw tracks. [RKRM] Appendix C was not needed and remains unconsulted. What replaces this question is narrower: **clock bits are masked off, not verified**, so MFM encoding violations — a real protection technique — cannot currently be detected.
 - **muFS (MultiUser FS) variants** — [AFFS] says they are supported by the Linux driver; ADE's position is undecided. The `protect` field's bits 8–15 and 31 are muFS-related. The 2026-08-24 survey pinned down the identifiers (`muFS`, `muF\0`–`muF\5` — the OFS/FFS matrix again with ownership added), so what remains undecided is scope, not identification. None occur in the corpus.
 - **5.25" DD geometry** — named in ROADMAP Phase 2; not covered by [FAQ §3], which documents only 3.5" DD and HD.
 - **`DOS\6` and `DOS\7` fixtures.** The survey contains neither, so both LNFS variants cannot be validated against real material. `DOS\5` appears twenty-one times and was the case that exposed BUG-001, so the absent ones are not safely assumed unimportant — they need sourcing separately (D-010). **`DOS\4` is resolved rather than sourced**: it is absent from the corpus too, but the generator builds it and `unadf -c` validates it (§Confirmed against real disks), which is the shape D-010's amendment describes.

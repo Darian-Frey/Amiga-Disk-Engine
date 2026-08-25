@@ -251,7 +251,12 @@ fn info(path: &Path, format: Format) -> ExitCode {
 ///
 /// Neither appears for a floppy, which is most images — a disk having no
 /// partition table is not a fault worth a line.
-fn device_lines(lines: &mut Vec<String>, i: &Inspection) {
+/// The track-table section: what a raw-track container holds, and how much
+/// of it is ordinary.
+///
+/// A mix of kinds is the signature of copy protection rather than a defect —
+/// the raw tracks are what a plain ADF could not have carried.
+fn track_lines(lines: &mut Vec<String>, i: &Inspection) {
     if let Some(t) = &i.tracks {
         // A mix of kinds is the signature of copy protection, not a defect:
         // the raw tracks are what a plain ADF could not have carried.
@@ -267,6 +272,20 @@ fn device_lines(lines: &mut Vec<String>, i: &Inspection) {
                 t.empty
             ));
         }
+        if t.raw_mfm > 0 {
+            lines.push(format!(
+                "    decoded     {} of {} raw tracks are ordinary, {} sound sectors",
+                t.standard_tracks, t.raw_mfm, t.sound_sectors
+            ));
+            if t.stray_syncs > 0 {
+                // Not a fault: a sync mark with nothing behind it is how a
+                // custom loader finds its own data.
+                lines.push(format!(
+                    "    protection  {} sync marks lead to no sector",
+                    t.stray_syncs
+                ));
+            }
+        }
         if t.present < t.declared {
             lines.push(format!(
                 "    present     {} of {} — the file does not reach the rest",
@@ -277,6 +296,10 @@ fn device_lines(lines: &mut Vec<String>, i: &Inspection) {
             lines.push(format!("    ! {fault}"));
         }
     }
+}
+
+fn device_lines(lines: &mut Vec<String>, i: &Inspection) {
+    track_lines(lines, i);
 
     if let Some(d) = &i.description {
         // The disk's own words about itself, usually ASCII art from whoever
