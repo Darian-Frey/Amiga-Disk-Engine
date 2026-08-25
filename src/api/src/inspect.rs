@@ -19,7 +19,7 @@ use ade_block::{BlockError, BlockSource as _};
 use ade_block::{Geometry, GeometryError, read_at};
 use ade_container::{Detection, Kind, RawImage, Window, inflate, sniff};
 use ade_filesystem::{
-    bootblock::Bootblock,
+    bootblock::{BootText, Bootblock},
     datestamp::DateFault,
     dostype::FileSystem,
     entry::Entry,
@@ -111,6 +111,11 @@ pub struct Inspection {
     pub volume: Option<VolumeInfo>,
     /// Why no volume was found, when none was.
     pub volume_absent: Option<String>,
+    /// Printable text found in the boot code (F-011).
+    ///
+    /// Descriptive, never a verdict — see [`Bootblock::text`] for why matching
+    /// virus names here would report the opposite of the truth.
+    pub boot_text: Vec<BootText>,
     /// The compressed wrapper this image came out of, if any.
     pub compression: Option<Compression>,
     /// The Rigid Disk Block, where the device has one.
@@ -254,6 +259,13 @@ pub fn inspect_bytes(bytes: Vec<u8>) -> Inspection {
     } else {
         None
     };
+    // Text is extracted from the bytes rather than the parse, because a
+    // bootblock too damaged to parse can still carry a legible banner.
+    let boot_text = if detection.kind.has_bootblock() {
+        Bootblock::text(&bytes)
+    } else {
+        Vec::new()
+    };
 
     let Some(geometry) = geometry_for(detection.kind, size) else {
         // Every other container is a later phase. Report what was identified
@@ -269,6 +281,7 @@ pub fn inspect_bytes(bytes: Vec<u8>) -> Inspection {
             bootblock,
             volume: None,
             volume_absent: Some(reason),
+            boot_text: Vec::new(),
             compression: compression.clone(),
             rdb: None,
             partitions: Vec::new(),
@@ -286,6 +299,7 @@ pub fn inspect_bytes(bytes: Vec<u8>) -> Inspection {
                 bootblock,
                 volume: None,
                 volume_absent: Some(e.to_string()),
+                boot_text: Vec::new(),
                 compression: compression.clone(),
                 rdb: None,
                 partitions: Vec::new(),
@@ -302,6 +316,7 @@ pub fn inspect_bytes(bytes: Vec<u8>) -> Inspection {
             bootblock,
             volume: None,
             volume_absent: Some("image is shorter than its geometry".to_owned()),
+            boot_text: Vec::new(),
             compression: compression.clone(),
             rdb: None,
             partitions: Vec::new(),
@@ -311,6 +326,7 @@ pub fn inspect_bytes(bytes: Vec<u8>) -> Inspection {
     let (volume, volume_absent) = read_volume(&image, geometry);
     let (rdb, partitions, partition_faults) = read_partition_table(&image);
     Inspection {
+        boot_text,
         compression,
         detection,
         size,
@@ -559,6 +575,20 @@ impl Inspection {
             ),
             ("geometry", Value::opt(geometry, |g| g)),
             ("bootblock", Value::opt(bootblock, |b| b)),
+            (
+                "boot_text",
+                Value::Arr(
+                    self.boot_text
+                        .iter()
+                        .map(|t| {
+                            Value::Obj(vec![
+                                ("offset", Value::Num(t.offset as u64)),
+                                ("text", Value::str(t.text.clone())),
+                            ])
+                        })
+                        .collect(),
+                ),
+            ),
             ("volume", Value::opt(volume, |v| v)),
             (
                 "volume_absent",

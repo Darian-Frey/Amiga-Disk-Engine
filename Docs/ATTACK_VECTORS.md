@@ -66,6 +66,6 @@ The rebuild is **computed, never applied**. D-004 defers write paths to Phase 4 
 ### AV-002 Malicious bootblock code
 **Severity:** Major
 **Description.** Bootblocks may contain historical viruses (e.g. the "Saddam"/"Lazarus" strains). Executing guest boot code would be a serious breach.
-**Detection.** Not implemented (would require: never executing bootblock code — enforced structurally by the flux/block layers — plus a signature scan flagging known strains, per F-011).
+**Detection.** **Primary defence holds structurally** (2026-08-25): ADE has no interpreter, no emulator and no execution path of any kind, so boot code is only ever bytes to be read, filtered and displayed. `boot_text.rs` pins this with boot code written to be hostile to a reader — `BRA` to self, `TRAP #0`, all-ones, all-zeros. Signature scanning is **deferred by D-014**: no checkable signature database is published, and matching strain names is measurably *inverted* — all 107 corpus disks naming a virus carry anti-virus bootblocks, not infections. Bootblock text is reported instead, with no verdict drawn.
 **Related decisions.** D-006. **Related features.** F-011.
 **History.** Identified 2026-08-21 during initial scaffolding.

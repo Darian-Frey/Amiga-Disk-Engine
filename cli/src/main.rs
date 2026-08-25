@@ -247,6 +247,16 @@ fn info(path: &Path, format: Format) -> ExitCode {
 /// Neither appears for a floppy, which is most images — a disk having no
 /// partition table is not a fault worth a line.
 fn device_lines(lines: &mut Vec<String>, i: &Inspection) {
+    if !i.boot_text.is_empty() {
+        // Shown as found, not interpreted. Some of it is a publisher banner,
+        // some a copy-protection notice, some a virus killer's menu — telling
+        // them apart is a reader's job, not a scanner's (D-014).
+        lines.push("  boot text".to_owned());
+        for t in &i.boot_text {
+            lines.push(format!("    {:>4}  {:?}", t.offset, t.text));
+        }
+    }
+
     if let Some(r) = &i.rdb {
         lines.push("  rigid disk block".to_owned());
         lines.push(format!("    at          block {}", r.block));

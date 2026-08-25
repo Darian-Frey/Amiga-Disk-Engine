@@ -11,6 +11,8 @@
 //! perfectly. So nothing here is a gate. [`Bootblock::parse`] succeeds on any
 //! two blocks and reports what it found.
 
+use std::collections::BTreeSet;
+
 use ade_block::checksum;
 use ade_endian::{OutOfBounds, u32_at};
 
@@ -172,4 +174,186 @@ mod tests {
         }
         assert!(Bootblock::parse(&vec![0u8; 1024]).is_ok());
     }
+}
+
+/// Bytes of header before the boot code: magic, checksum, rootblock pointer.
+const HEADER_BYTES: usize = 12;
+
+/// Shortest run of printable characters worth reporting as text.
+///
+/// Ten, measured against the corpus: shorter runs are dominated by fragments
+/// of 68k opcodes that land in the printable range — `NqNqNq` is three `NOP`s
+/// (0x4E71) — and longer ones start dropping real banners like `MINI-NUKE!`.
+const MIN_RUN: usize = 10;
+
+/// The percentage of characters that must look like prose rather than code.
+///
+/// 85, measured: with the other filters, 895 raw runs across a 665-disk sample
+/// reduce to 356, of which 70% contain a space.
+const MIN_TEXTY: usize = 85;
+
+/// Longest repeating unit that marks a run as padding rather than text.
+///
+/// `NqNqNq…` has period 2 and `UUUU` period 1. `(W)XCOPY(W)XCOPY…` has period
+/// 9 and is real, which is why this is small.
+const MAX_PERIOD: usize = 4;
+
+/// Distinct characters a run must contain to be text rather than a separator.
+const MIN_DISTINCT: usize = 4;
+
+/// The most text runs to report from one bootblock.
+const MAX_RUNS: usize = 12;
+
+/// The most characters to keep from any one run.
+const MAX_RUN_LEN: usize = 200;
+
+/// A run of printable text found in the boot code.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BootText {
+    /// Byte offset within the bootblock.
+    pub offset: usize,
+    /// The text, Latin-1 decoded and trimmed.
+    pub text: String,
+}
+
+impl Bootblock {
+    /// Printable text embedded in the boot code.
+    ///
+    /// Seventy per cent of the corpus has some, and it is the most
+    /// human-legible thing on a great many disks: publisher banners, the
+    /// Copylock notice, cracker signatures, virus-protector menus. Extracting
+    /// it is the "banner extraction" half of F-011.
+    ///
+    /// # This reports text, not verdicts
+    ///
+    /// It is tempting to match virus names here and call the result a scan.
+    /// **The corpus says that gets the answer backwards.** Every disk mentioning
+    /// a virus by name turned out to be carrying an *anti-virus* bootblock —
+    /// "CANNOT BE INFECTED BY THE SCA-VIRUS", "PROTECT AGAINST: BYTEWARRIOR,
+    /// LAMER Extermin.", and one virus killer whose menu lists nine strains. A
+    /// name-matching scanner would flag precisely the protected disks. So the
+    /// text is surfaced for a person to read, and identification is deferred
+    /// (D-014).
+    ///
+    /// Library and device names are dropped: every bootblock opens
+    /// `dos.library`, so reporting it is noise rather than information.
+    #[must_use]
+    pub fn text(boot: &[u8]) -> Vec<BootText> {
+        let mut out: Vec<BootText> = Vec::new();
+        let mut run_start: Option<usize> = None;
+
+        let end = boot.len().min(FLOPPY_BYTES);
+        for offset in HEADER_BYTES..=end {
+            let printable = boot
+                .get(offset)
+                .is_some_and(|&b| (0x20..0x7F).contains(&b) || b == b'\t');
+            match (printable, run_start) {
+                (true, None) => run_start = Some(offset),
+                (false, Some(start)) => {
+                    if out.len() < MAX_RUNS {
+                        if let Some(found) = run_at(boot, start, offset) {
+                            out.push(found);
+                        }
+                    }
+                    run_start = None;
+                }
+                _ => {}
+            }
+        }
+        out
+    }
+}
+
+/// Turn one printable range into a reportable run, or `None` if it is noise.
+fn run_at(boot: &[u8], start: usize, end: usize) -> Option<BootText> {
+    if end.checked_sub(start)? < MIN_RUN {
+        return None;
+    }
+    let bytes = boot.get(start..end)?;
+    let text: String = bytes
+        .iter()
+        .take(MAX_RUN_LEN)
+        .map(|&b| char::from(b))
+        .collect();
+    // Several bootblocks store BCPL-style length-prefixed strings, and a length
+    // in the 32..126 range is itself printable, so it joins the run. Dropping
+    // it is exact rather than a guess: the byte goes only when its value is
+    // precisely the length of what follows.
+    let text = match text.chars().next() {
+        Some(first) if usize::from(first as u8) == text.len().saturating_sub(1) => {
+            text.get(1..).unwrap_or(&text).to_owned()
+        }
+        _ => text,
+    };
+    let trimmed = text.trim();
+    if trimmed.len() < MIN_RUN {
+        return None;
+    }
+
+    // Every bootblock opens dos.library and most touch a resource; naming
+    // what it opens says nothing about the disk.
+    if [".library", ".device", ".resource"]
+        .iter()
+        .any(|suffix| trimmed.ends_with(suffix))
+    {
+        return None;
+    }
+    if repeats_within(trimmed, MAX_PERIOD) {
+        return None;
+    }
+    if trimmed.chars().collect::<BTreeSet<_>>().len() < MIN_DISTINCT {
+        return None;
+    }
+    let texty = trimmed.chars().filter(|c| is_texty(*c)).count();
+    if texty.saturating_mul(100) < trimmed.len().saturating_mul(MIN_TEXTY) {
+        return None;
+    }
+
+    Some(BootText {
+        offset: start,
+        text: trimmed.to_owned(),
+    })
+}
+
+/// Whether a string is one short unit repeated — padding, not text.
+fn repeats_within(text: &str, max_period: usize) -> bool {
+    let bytes = text.as_bytes();
+    (1..=max_period).any(|period| {
+        bytes.len() >= period.saturating_mul(3)
+            && bytes
+                .iter()
+                .enumerate()
+                .all(|(i, b)| bytes.get(i.checked_rem(period).unwrap_or(0)) == Some(b))
+    })
+}
+
+/// Whether a character is the kind that appears in prose rather than in code.
+const fn is_texty(c: char) -> bool {
+    c.is_ascii_alphanumeric()
+        || matches!(
+            c,
+            ' ' | '.'
+                | ','
+                | '!'
+                | '?'
+                | '\''
+                | '"'
+                | '('
+                | ')'
+                | '-'
+                | ':'
+                | ';'
+                | '/'
+                | '&'
+                | '*'
+                | '+'
+                | '='
+                | '@'
+                | '#'
+                | '%'
+                | '$'
+                | '_'
+                | '['
+                | ']'
+        )
 }

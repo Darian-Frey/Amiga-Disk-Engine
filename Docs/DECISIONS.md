@@ -391,3 +391,41 @@ This is the same standard D-010 set, applied where it bites. D-010's amendment p
 The corpus's silence is evidence of rarity, not of unimportance — `DOS\5` appears twenty-one times and is the case that exposed BUG-001.
 
 **Reversal conditions.** A single verified real `DOS\6` or `DOS\7` image reverses this: with one real disk, the fixture generator can be checked against reality and the inferred file header confirmed or corrected. An LNFS implementation appearing in ADFlib would reverse it too, by restoring the oracle. Neither is expected soon; both are cheap to act on, because SPEC already holds the layout.
+
+---
+
+### D-014 Bootblock text is reported; virus identification is deferred
+**Decided:** 2026-08-25
+**Recorded:** 2026-08-25
+**Status:** Accepted
+**Authors:** Darian-Frey (decision); Claude (analysis)
+**Related:** F-011, F-013, AV-002, D-002, D-010, D-013
+
+**Context.** F-011 asks for bootblocks to be scanned against a signature set for known historical viruses. Two things were established before writing any of it.
+
+**No signature database is publicly available.** The established Amiga method is a CRC of the bootblock matched against a "brainfile" — the mechanism `bootblock.library` and `xvs.library` use, with multiple CRCs per entry to absorb minor variants. The mechanism is documented; the data is not. Nothing found publishes the CRCs, and the surviving tools ship them as opaque binaries.
+
+**Naive string matching returns the opposite of the truth.** Scanning all 4652 corpus bootblocks for the names of known strains found 100 disks mentioning "VIRUS", 6 naming "Byte Bandit", and one naming nine strains at once. **Every single one is an anti-virus bootblock**, not an infection:
+
+- `ANOTHER VIRUS PROTECTOR V5.0 PROTECT AGAINST: BYTEWARRIOR LAMER Extermin. etc.`
+- `BOOTBLOCK CANNOT BE INFECTED BY THE SCA-VIRUS, BECAUSE IT WAS GENERATED WITH THE VIRUS-PROTECTOR V1.0`
+- `F6: Boot Sectors. Obelisk. North Star. SCA. Byte Bandit. Byte Warrior. Revenge. IRQ. Pentagon Circle. Lamer Exterminator. H.C.S.` — a virus killer's menu
+
+Cracking groups routinely installed virus-killer bootblocks, so the disks that name viruses are disproportionately the *protected* ones. A name-matching scanner would flag precisely the disks that were cleaned, and would do it confidently.
+
+**Options.**
+- **A. Ship a signature scanner built from names found in descriptions.** Rejected outright. It is not merely unverified, it is measurably inverted, and a false "virus detected" on a preservation tool's report is worse than silence: it invites someone to destroy a sound disk.
+- **B. Invent CRCs from reasoning about how the strains behave.** Rejected. There is no way to check them, and a scanner that matches nothing looks identical to a clean corpus.
+- **C. Report the bootblock's text and let a person judge; defer identification.** Chosen.
+
+**Decision.** Option C. ADE extracts and reports printable text from the boot code, filtered so it is text rather than opcodes, and **draws no conclusion from it**. `ade info` shows what the bootblock says; whether "NO VIRUS ON BOOTBLOCK!" is a reassurance or a lie is a question the tool declines to answer.
+
+This is the same standard D-013 applied to LNFS: the work is not hard, it is *uncheckable*, and shipping an uncheckable verdict is worse than shipping none. Here it is stronger still, because the one cheap heuristic available has been measured and found backwards.
+
+**AV-002's real defence is structural and already holds.** The vector is *executing* guest boot code. ADE has no interpreter, no emulator and no execution path of any kind — boot code is bytes to be read, filtered and displayed. That is not a mitigation to be implemented but a property of the design, and `boot_text.rs` pins it with boot code written to be hostile to a reader (`BRA` to self, `TRAP #0`, all-ones, all-zeros).
+
+**Consequences.** F-011 is delivered in the half that can be verified — banner extraction — and deferred in the half that cannot. AV-002's detection line stays "not implemented" for signatures while its primary defence is recorded as structural. The extracted text turns out to be worth having on its own: it carries publisher banners, Copylock notices, cracker signatures and virus-protector menus, which is catalogue material (F-013, F-014) rather than merely a security by-product.
+
+Roughly 20% of corpus disks yield reportable text after filtering, and 91% of the runs kept contain a space — the measure used to distinguish prose from 68k opcodes that happen to land in the printable range.
+
+**Reversal conditions.** A published, checkable signature set — CRCs or byte patterns with provenance — reverses this immediately; the extraction and reporting path is already in place and a matcher would sit on top of it. Acquiring real infected disks would also reverse it, by making a scanner testable against true positives instead of against descriptions. **Neither is a reason to ship a matcher before then.**
