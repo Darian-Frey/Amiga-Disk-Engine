@@ -15,8 +15,9 @@ pub use health::{
     BitmapHealth, DirCacheHealth, Examined, Finding, Health, Severity, examine, examine_partition,
 };
 pub use inspect::{
-    Compression, Fault, Image, Inspection, InspectionError, MAX_DECOMPRESSED, PartitionInfo,
-    RdbInfo, VolumeInfo, entry_to_json, inspect_bytes, inspect_path,
+    Compression, Description, Fault, Image, Inspection, InspectionError, MAX_DECOMPRESSED,
+    MAX_DESCRIPTION, PartitionInfo, RdbInfo, VolumeInfo, entry_to_json, inspect_bytes,
+    inspect_path,
 };
 
 /// The layer crates, re-exported so that front-ends depend on this crate alone.

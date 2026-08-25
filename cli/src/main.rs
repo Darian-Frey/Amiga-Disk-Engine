@@ -252,6 +252,22 @@ fn info(path: &Path, format: Format) -> ExitCode {
 /// Neither appears for a floppy, which is most images — a disk having no
 /// partition table is not a fault worth a line.
 fn device_lines(lines: &mut Vec<String>, i: &Inspection) {
+    if let Some(d) = &i.description {
+        // The disk's own words about itself, usually ASCII art from whoever
+        // released it. Indented rather than quoted, because the layout is the
+        // content.
+        lines.push(format!(
+            "  description {} ({} bytes)",
+            d.file, d.declared_size
+        ));
+        for line in d.text.lines() {
+            lines.push(format!("    | {}", line.trim_end()));
+        }
+        if d.truncated {
+            lines.push("    | ... (truncated)".to_owned());
+        }
+    }
+
     if !i.boot_text.is_empty() {
         // Shown as found, not interpreted. Some of it is a publisher banner,
         // some a copy-protection notice, some a virus killer's menu — telling

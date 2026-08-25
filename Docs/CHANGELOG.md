@@ -194,3 +194,9 @@ Format follows [Keep a Changelog](https://keepachangelog.com). Reference F-, D-,
   - **An existing output is never overwritten.** A conversion that replaces a file is the irreversible damage D-004 is about, and a source image is what someone points this at by accident.
   - The output format is taken from the extension because the file does not exist yet; **inputs are always identified by content**, keeping C-008's habit of trusting evidence over labels.
 - **SPEC §Conversion is mostly a question about loss** — why the matrix exists: sector containers are interchangeable byte-for-byte, flux containers are not, and flattening one is a discard that produces a perfectly valid ADF with no record that anything went missing.
+
+- **`FILE_ID.DIZ` surfacing** (Phase 3, F-011). `ade info` reads the disk's own description and prints it; `Inspection` gains `description`, and the JSON carries the text, the stored filename, the block and whether it was truncated.
+  - Rare — 0.6% of a 500-disk sample — but disproportionately informative, because it says what the volume name often does not. One corpus disk is labelled `Empty`; its description reads `TEST MATCH CRiCKET SAVE DISK (NEEDED) [2/2]`.
+  - Found **case-insensitively**: `file_id.diz`, `FILE_ID.DIZ` and `File_ID.Diz` all occur on real disks, and AmigaDOS filenames are not case sensitive (C-006). The name is reported **as stored**, since what is on the disk is a fact about the disk.
+  - Read from the root directory only — the BBS convention puts it there, and searching a whole disk by name is a different feature with a different cost — and capped at 8 KB, because the length comes off the disk (AV-005, BUG-003). The declared size is still reported in full: the cap is on what is read, not on what is claimed.
+  - Decoded as Latin-1, so the high-bit box-drawing characters that make up release art survive rather than being mangled as UTF-8. A directory of that name is ignored rather than read as text.

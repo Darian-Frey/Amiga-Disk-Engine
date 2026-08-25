@@ -111,6 +111,8 @@ pub struct Inspection {
     pub volume: Option<VolumeInfo>,
     /// Why no volume was found, when none was.
     pub volume_absent: Option<String>,
+    /// The disk's own description of itself, from `FILE_ID.DIZ`.
+    pub description: Option<Description>,
     /// Printable text found in the boot code (F-011).
     ///
     /// Descriptive, never a verdict — see [`Bootblock::text`] for why matching
@@ -189,6 +191,69 @@ pub struct PartitionInfo {
     pub volume_name: Option<String>,
     /// Why it did not mount, where it did not.
     pub mount_error: Option<String>,
+}
+
+/// The most of a `FILE_ID.DIZ` to read.
+///
+/// The BBS convention is ten lines of forty-five characters, and the largest
+/// in the corpus is 356 bytes. Eight kilobytes is far above anything real and
+/// well below anything that matters — but it is a cap rather than a guess,
+/// because the size comes off the disk (AV-005, BUG-003).
+pub const MAX_DESCRIPTION: usize = 8192;
+
+/// The filename BBS releases use, matched case-insensitively.
+///
+/// All three spellings occur in the corpus — `file_id.diz`, `FILE_ID.DIZ` and
+/// `File_ID.Diz` — which is why this is a case-insensitive lookup rather than
+/// a list. AmigaDOS filenames are not case sensitive (C-006).
+const DESCRIPTION_FILE: &str = "FILE_ID.DIZ";
+
+/// A disk's own description of itself.
+///
+/// `FILE_ID.DIZ` is a BBS-era convention: a short description written by
+/// whoever released the disk, and in practice usually ASCII art naming the
+/// group, the title and which disk of the set this is. It is the closest thing
+/// a floppy has to a label, and worth surfacing rather than leaving as one file
+/// among many (F-011, and catalogue material for F-013/F-014).
+#[derive(Debug, Clone)]
+pub struct Description {
+    /// The filename as stored, preserving its original case.
+    pub file: String,
+    /// The block the file header occupies.
+    pub block: u32,
+    /// The contents, Latin-1 decoded.
+    pub text: String,
+    /// What the header said the file's length was.
+    pub declared_size: u32,
+    /// Whether the text was cut at [`MAX_DESCRIPTION`].
+    pub truncated: bool,
+}
+
+/// Read a volume's `FILE_ID.DIZ`, if it has one.
+///
+/// The root directory only: the BBS convention puts it there, and searching a
+/// whole disk for a file by name would be a different feature with a different
+/// cost.
+fn read_description(volume: &Volume<'_>) -> Option<Description> {
+    let entry = volume.lookup(DESCRIPTION_FILE).ok()?;
+    if !entry.kind.is_file() {
+        return None;
+    }
+    let contents = volume.read_file(&entry).ok()?;
+    let truncated = contents.bytes.len() > MAX_DESCRIPTION;
+    let text = contents
+        .bytes
+        .iter()
+        .take(MAX_DESCRIPTION)
+        .map(|&b| char::from(b))
+        .collect();
+    Some(Description {
+        file: entry.name_lossy(),
+        block: entry.block,
+        text,
+        declared_size: entry.byte_size,
+        truncated,
+    })
 }
 
 /// A mounted-enough volume: what the rootblock says about itself.
@@ -281,6 +346,7 @@ pub fn inspect_bytes(bytes: Vec<u8>) -> Inspection {
             bootblock,
             volume: None,
             volume_absent: Some(reason),
+            description: None,
             boot_text: Vec::new(),
             compression: compression.clone(),
             rdb: None,
@@ -299,6 +365,7 @@ pub fn inspect_bytes(bytes: Vec<u8>) -> Inspection {
                 bootblock,
                 volume: None,
                 volume_absent: Some(e.to_string()),
+                description: None,
                 boot_text: Vec::new(),
                 compression: compression.clone(),
                 rdb: None,
@@ -316,6 +383,7 @@ pub fn inspect_bytes(bytes: Vec<u8>) -> Inspection {
             bootblock,
             volume: None,
             volume_absent: Some("image is shorter than its geometry".to_owned()),
+            description: None,
             boot_text: Vec::new(),
             compression: compression.clone(),
             rdb: None,
@@ -324,8 +392,15 @@ pub fn inspect_bytes(bytes: Vec<u8>) -> Inspection {
         };
     };
     let (volume, volume_absent) = read_volume(&image, geometry);
+    // Needs a real mount rather than the rootblock parse above, because it is
+    // a file. Cheap: one hash lookup and a short read, on a volume that is
+    // already in memory.
+    let description = Volume::mount(&image)
+        .ok()
+        .and_then(|v| read_description(&v));
     let (rdb, partitions, partition_faults) = read_partition_table(&image);
     Inspection {
+        description,
         boot_text,
         compression,
         detection,
@@ -575,6 +650,18 @@ impl Inspection {
             ),
             ("geometry", Value::opt(geometry, |g| g)),
             ("bootblock", Value::opt(bootblock, |b| b)),
+            (
+                "description",
+                Value::opt(self.description.as_ref(), |d| {
+                    Value::Obj(vec![
+                        ("file", Value::str(d.file.clone())),
+                        ("block", Value::Num(u64::from(d.block))),
+                        ("text", Value::str(d.text.clone())),
+                        ("declared_size", Value::Num(u64::from(d.declared_size))),
+                        ("truncated", Value::Bool(d.truncated)),
+                    ])
+                }),
+            ),
             (
                 "boot_text",
                 Value::Arr(
