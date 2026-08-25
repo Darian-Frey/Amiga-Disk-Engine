@@ -163,6 +163,9 @@ fn the_matrix_lists_every_format_with_a_reason() {
 
     assert_eq!(out.status.code().unwrap_or(-1), 0);
     // Each verdict class must be visible, and every refusal must carry a why.
+    // Each verdict class must be visible, and the refusals must name the
+    // register entry behind them. D-005 is deliberately not on this list any
+    // more: raw-MFM writing is implemented, so nothing defers to it.
     for expected in [
         "lossless",
         "lossy",
@@ -170,7 +173,7 @@ fn the_matrix_lists_every_format_with_a_reason() {
         "not implemented",
         "C-003",
         "D-009",
-        "D-005",
+        "D-004",
     ] {
         assert!(text.contains(expected), "missing {expected:?}\n{text}");
     }

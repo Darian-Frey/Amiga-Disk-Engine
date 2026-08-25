@@ -13,12 +13,19 @@
 //!
 //! # What can actually be converted today
 //!
-//! Only the decompression direction: ADZ to ADF and HDZ to HDF. That is not an
-//! arbitrary stopping point. D-004 requires a read path to be proven before its
-//! write path ships, and gunzip is proven byte-identically against real corpus
-//! images — the strongest verification anything in ADE has. Nothing else
-//! qualifies yet: DMS has no reader (D-009), flux formats are Phase 4, and IPF
-//! may never be written at all (C-003).
+//! Two directions, and both are proven byte-identically, which is what
+//! D-004 asks for before a write path ships.
+//!
+//! **Decompression** — ADZ to ADF, HDZ to HDF. gunzip round-trips real corpus
+//! images byte for byte.
+//!
+//! **Encoding to raw MFM** — a sector image to an extended ADF. Every track is
+//! MFM-encoded, and reading the result back reassembles the original exactly:
+//! 1760 of 1760 sectors, byte-identical, mounting under its own name.
+//!
+//! Nothing else qualifies yet: DMS has no reader (D-009), flux cannot be
+//! reconstructed from a sector image at all, and IPF may never be written
+//! (C-003).
 
 use ade_container::Kind;
 
@@ -91,11 +98,22 @@ pub fn conversion(from: Kind, to: Kind) -> Conversion {
             why: "IPF authoring is SPS-only and ADE will never emit it (C-003)",
         };
     }
-    // Everything below Phase 4 has no writer, and flux cannot be reconstructed
-    // from a sector image in any case.
-    if matches!(to, Scp | ExtendedAdf { .. }) {
+    if matches!(to, Scp) {
         return Conversion::NotImplemented {
-            why: "flux and raw-MFM writing is Phase 4 (D-005)",
+            why: "flux writing is not implemented; flux cannot be reconstructed from a \
+                  sector image in any case",
+        };
+    }
+    // Writing raw MFM works, and loses nothing: the sectors are encoded, not
+    // discarded, and decode back byte-identically. What it cannot do is invent
+    // protection that the source never had.
+    if matches!(to, ExtendedAdf { .. }) {
+        return match from {
+            // A sector image encodes; an extended ADF is already one.
+            Adf { .. } | Hardfile | Gzip | ExtendedAdf { .. } => Conversion::Lossless,
+            _ => Conversion::NotImplemented {
+                why: "only a sector image can be encoded as raw MFM",
+            },
         };
     }
     if matches!(to, Gzip) {

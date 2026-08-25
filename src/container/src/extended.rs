@@ -25,7 +25,7 @@
 //! copy protection — `Deep Space` carries track 0 as standard sectors and the
 //! remaining 165 as raw MFM.
 
-use ade_endian::{u16_at, u32_at};
+use ade_endian::{put_u16, put_u32, u16_at, u32_at};
 
 /// The magic every extended ADF opens with.
 pub const MAGIC: &[u8; 8] = b"UAE-1ADF";
@@ -259,4 +259,98 @@ impl ExtendedAdf {
         }
         (sectors, raw, empty)
     }
+}
+
+/// What to write for one track.
+#[derive(Debug, Clone, Copy)]
+pub enum TrackSource<'a> {
+    /// Decoded AmigaDOS sectors, stored as they are.
+    Sectors(&'a [u8]),
+    /// Raw MFM, stored as captured. `length_bits` is the meaningful extent.
+    RawMfm {
+        /// The MFM bytes.
+        data: &'a [u8],
+        /// Meaningful extent in bits.
+        length_bits: u32,
+    },
+    /// Nothing at all — unformatted, or not captured.
+    Empty,
+}
+
+impl TrackSource<'_> {
+    /// The type field this source writes.
+    const fn type_field(&self) -> u16 {
+        match self {
+            // An empty track keeps the raw type, which is what the corpus does
+            // for its 154 empty ones.
+            Self::Sectors(_) => 0,
+            Self::RawMfm { .. } | Self::Empty => 1,
+        }
+    }
+
+    /// The bytes stored for this track.
+    const fn data(&self) -> &[u8] {
+        match self {
+            Self::Sectors(data) | Self::RawMfm { data, .. } => data,
+            Self::Empty => &[],
+        }
+    }
+
+    /// The `length` field, in bits.
+    fn length_bits(&self) -> u32 {
+        match self {
+            // Always 45056 for a standard track — measured across all 428
+            // type-0 tracks in the corpus, whatever their allocation.
+            Self::Sectors(_) => {
+                u32::try_from(STANDARD_TRACK_BYTES.saturating_mul(8)).unwrap_or(u32::MAX)
+            }
+            Self::RawMfm { length_bits, .. } => *length_bits,
+            Self::Empty => 0,
+        }
+    }
+}
+
+/// Write an extended ADF.
+///
+/// `space` is set to exactly what each track stores, which is the tidiest of
+/// the three allocations seen in the corpus — writers that pad to 12668 are
+/// reserving room they do not use, and a reader must not care either way
+/// (SPEC §Extended-ADF).
+///
+/// # Errors
+/// [`ExtendedError::TooManyTracks`] if given more tracks than any disk has.
+pub fn write(tracks: &[TrackSource<'_>]) -> Result<Vec<u8>, ExtendedError> {
+    if tracks.len() > MAX_TRACKS {
+        return Err(ExtendedError::TooManyTracks {
+            declared: tracks.len(),
+        });
+    }
+
+    let table_bytes = tracks.len().saturating_mul(ENTRY_BYTES);
+    let body: usize = tracks.iter().map(|t| t.data().len()).sum();
+    let mut out = vec![0u8; HEADER_BYTES.saturating_add(table_bytes)];
+    out.reserve(body);
+
+    out.get_mut(..8)
+        .ok_or(ExtendedError::Truncated)?
+        .copy_from_slice(MAGIC);
+    let count = u16::try_from(tracks.len()).map_err(|_| ExtendedError::TooManyTracks {
+        declared: tracks.len(),
+    })?;
+    put_u16(&mut out, 10, count).map_err(|_| ExtendedError::Truncated)?;
+
+    for (index, track) in tracks.iter().enumerate() {
+        let at = HEADER_BYTES.saturating_add(index.saturating_mul(ENTRY_BYTES));
+        let space = u32::try_from(track.data().len()).unwrap_or(u32::MAX);
+        put_u16(&mut out, at.saturating_add(2), track.type_field())
+            .map_err(|_| ExtendedError::Truncated)?;
+        put_u32(&mut out, at.saturating_add(4), space).map_err(|_| ExtendedError::Truncated)?;
+        put_u32(&mut out, at.saturating_add(8), track.length_bits())
+            .map_err(|_| ExtendedError::Truncated)?;
+    }
+
+    for track in tracks {
+        out.extend_from_slice(track.data());
+    }
+    Ok(out)
 }

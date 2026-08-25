@@ -104,14 +104,22 @@ struct Args {
     format: Format,
     /// Which partition of a hard disk to act on, by name or index.
     partition: Option<String>,
+    /// Write tracks as raw MFM rather than as sectors.
+    ///
+    /// A flag rather than an output extension because an extended ADF is also
+    /// called `.adf`: the format has no distinct one, and inventing a
+    /// convention would be presumptuous.
+    raw: bool,
 }
 
 fn parse_args(raw: Vec<String>) -> Result<Args, String> {
     let mut positional: Vec<String> = Vec::new();
     let mut format = Format::Text;
     let mut partition: Option<String> = None;
+    let mut raw_output = false;
     for arg in raw {
         match arg.as_str() {
+            "--raw" => raw_output = true,
             "--format=json" | "--json" => format = Format::Json,
             "--format=text" => format = Format::Text,
             other if other.starts_with("--format=") => {
@@ -138,6 +146,7 @@ fn parse_args(raw: Vec<String>) -> Result<Args, String> {
         positional,
         format,
         partition,
+        raw: raw_output,
     })
 }
 
@@ -174,7 +183,7 @@ fn main() -> ExitCode {
             Some(PathBuf::from(p(2))),
             args.partition.as_deref(),
         ),
-        ("convert", 2) => convert(Path::new(p(0)), Path::new(p(1))),
+        ("convert", 2) => convert(Path::new(p(0)), Path::new(p(1)), args.raw),
         ("formats", 0) => formats(),
         ("--version" | "-V", 0) => {
             println!("ade {}", ade_core::version());
@@ -207,6 +216,7 @@ fn usage() {
     println!("    --format=text   human-readable (default); layout is not stable");
     println!("    --format=json   machine-readable; field names and fault codes are stable");
     println!("    --partition=P   which partition of a hard disk, by name (DH0) or index (0)");
+    println!("    --raw           convert writes raw MFM tracks (an extended ADF)");
     println!();
     println!("EXIT CODES:");
     println!("    0  clean   1  faults   2  usage   3  unreadable   4  no volume");
@@ -938,7 +948,7 @@ fn kind_from_extension(path: &Path) -> Option<ade_core::layers::container::Kind>
 
 /// Convert one container into another, refusing anything that would lose data
 /// silently (F-016).
-fn convert(input: &Path, output: &Path) -> ExitCode {
+fn convert(input: &Path, output: &Path, raw: bool) -> ExitCode {
     let bytes = match std::fs::read(input) {
         Ok(b) => b,
         Err(e) => {
@@ -954,7 +964,13 @@ fn convert(input: &Path, output: &Path) -> ExitCode {
         bytes.len() as u64,
     )
     .kind;
-    let Some(to) = kind_from_extension(output) else {
+    // An extended ADF is also called `.adf`, so the extension cannot say which
+    // was meant; `--raw` does.
+    let Some(to) = (if raw {
+        Some(ade_core::layers::container::Kind::ExtendedAdf { tracks: 0 })
+    } else {
+        kind_from_extension(output)
+    }) else {
         eprintln!(
             "ade: {}: cannot tell what format to write from that name — \
              use .adf, .hdf, .adz or .hdz",
@@ -964,7 +980,12 @@ fn convert(input: &Path, output: &Path) -> ExitCode {
     };
 
     let verdict = conversion(from, to);
-    println!("{from}  ->  {to}");
+    let target = if raw {
+        "extended ADF (raw MFM tracks)".to_owned()
+    } else {
+        to.to_string()
+    };
+    println!("{from}  ->  {target}");
     println!("  {verdict}");
 
     if !verdict.is_possible() {
@@ -979,8 +1000,8 @@ fn convert(input: &Path, output: &Path) -> ExitCode {
         return ExitCode::from(EXIT_USAGE);
     }
 
-    // The only lossless path with a proven reader: decompression (D-004).
-    let out_bytes = if matches!(from, ade_core::layers::container::Kind::Gzip) {
+    // Decompression first, so `--raw` works on an ADZ as well as an ADF.
+    let sectors = if matches!(from, ade_core::layers::container::Kind::Gzip) {
         match ade_core::layers::container::inflate::gunzip(&bytes, ade_core::MAX_DECOMPRESSED) {
             Ok(b) => b,
             Err(e) => {
@@ -990,6 +1011,18 @@ fn convert(input: &Path, output: &Path) -> ExitCode {
         }
     } else {
         bytes
+    };
+
+    let out_bytes = if raw {
+        match encode_raw_mfm(&sectors) {
+            Ok(b) => b,
+            Err(e) => {
+                eprintln!("ade: {}: {e}", input.display());
+                return ExitCode::from(EXIT_UNREADABLE);
+            }
+        }
+    } else {
+        sectors
     };
 
     // Never overwrite. A conversion that silently replaces a source image is
@@ -1029,4 +1062,60 @@ fn formats() -> ExitCode {
     println!("Lossy conversions are refused outright, not warned about: the loss");
     println!("is not recoverable, and a warning nobody reads is how it happens.");
     ExitCode::from(EXIT_CLEAN)
+}
+
+/// Encode a sector image as an extended ADF of raw MFM tracks.
+///
+/// Lossless, and provably so: reading the result back reassembles the input
+/// byte for byte. What it cannot do is invent protection the source never had
+/// — the output is an extended ADF holding an ordinary disk, which is a
+/// container change rather than a preservation upgrade.
+fn encode_raw_mfm(sectors: &[u8]) -> Result<Vec<u8>, String> {
+    use ade_core::layers::container::extended::{self, TrackSource};
+    use ade_core::layers::track::{SECTOR_BYTES, encode_track};
+
+    // The sectors-per-track comes from the image's own geometry rather than
+    // being assumed: an HD image has 22 where a DD one has 11.
+    let inspection = ade_core::inspect_bytes(sectors.to_vec());
+    let geometry = inspection
+        .geometry
+        .ok_or("cannot establish a geometry for this image")?;
+    let per_track = usize::try_from(geometry.sectors()).unwrap_or(11).max(1);
+    let track_bytes = per_track.saturating_mul(SECTOR_BYTES);
+    let remainder = sectors
+        .len()
+        .checked_rem(track_bytes)
+        .ok_or("a track cannot be zero bytes")?;
+    if remainder != 0 {
+        return Err(format!(
+            "not a whole number of {per_track}-sector tracks — {} bytes",
+            sectors.len()
+        ));
+    }
+    let track_count = sectors
+        .len()
+        .checked_div(track_bytes)
+        .ok_or("a track cannot be zero bytes")?;
+
+    let mut encoded: Vec<Vec<u8>> = Vec::with_capacity(track_count);
+    for index in 0..track_count {
+        let base = index.saturating_mul(track_bytes);
+        let mut slices: Vec<&[u8]> = Vec::with_capacity(per_track);
+        for s in 0usize..per_track {
+            let at = base.saturating_add(s.saturating_mul(SECTOR_BYTES));
+            let end = at.saturating_add(SECTOR_BYTES);
+            slices.push(sectors.get(at..end).ok_or("image ends mid-track")?);
+        }
+        let number = u8::try_from(index).unwrap_or(u8::MAX);
+        encoded.push(encode_track(number, &slices).ok_or("a sector was the wrong size")?);
+    }
+
+    let sources: Vec<TrackSource<'_>> = encoded
+        .iter()
+        .map(|data| TrackSource::RawMfm {
+            data,
+            length_bits: u32::try_from(data.len().saturating_mul(8)).unwrap_or(u32::MAX),
+        })
+        .collect();
+    extended::write(&sources).map_err(|e| e.to_string())
 }

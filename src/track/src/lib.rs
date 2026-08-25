@@ -486,3 +486,146 @@ fn sync_at(track: &[u8], bit: usize) -> bool {
         .and_then(|b| Some(u16::from(*b.first()?) << 8 | u16::from(*b.get(1)?)))
         .is_some_and(|word| word == SYNC)
 }
+
+/// Bytes of gap written before each sector.
+///
+/// The Amiga's own format leaves roughly this much between sectors; what
+/// matters for a reader is that it is non-zero and decodes to nothing, so the
+/// sync mark stands alone.
+const GAP_BYTES: usize = 32;
+
+/// Encode one sector as MFM, sync words included.
+///
+/// The inverse of [`decode_track`], and verified against it: a sector encoded
+/// here decodes back to the same bytes with both checksums agreeing and no
+/// clock violations.
+///
+/// # Clock bits are computed, not left clear
+///
+/// This is the part a test helper can skip and a real encoder cannot. A clock
+/// bit depends on the data bit *before* it, so the body is written as one
+/// continuous stream and the clock bits are filled in afterwards — they cannot
+/// be computed field by field. The sync words are deliberately excluded: their
+/// illegality is what makes them findable (SPEC §Clock bits and the encoding
+/// rule).
+///
+/// # Panics
+/// Never. A `data` slice that is not [`SECTOR_BYTES`] long yields `None`.
+#[must_use]
+pub fn encode_sector(track: u8, sector: u8, sectors_to_gap: u8, data: &[u8]) -> Option<Vec<u8>> {
+    if data.len() != SECTOR_BYTES {
+        return None;
+    }
+
+    // Fields first with data bits only; clock bits go on at the end, once the
+    // whole stream exists to compute them from.
+    let mut body = Vec::with_capacity(field::END);
+    body.extend(encode_halves(&[
+        FORMAT_AMIGADOS,
+        track,
+        sector,
+        sectors_to_gap,
+    ]));
+    body.extend(encode_halves(&[0u8; 16]));
+
+    // The checksums mask clock bits off, so they can be computed now and are
+    // unaffected by the clock pass below.
+    let header_sum = checksum(body.get(..field::HEADER_CHECKSUM)?);
+    body.extend(encode_halves(&be_bytes(header_sum)));
+
+    let encoded_data = encode_halves(data);
+    let data_sum = checksum(&encoded_data);
+    body.extend(encode_halves(&be_bytes(data_sum)));
+    body.extend(encoded_data);
+
+    if body.len() != field::END {
+        return None;
+    }
+    // The last data bit of the sync word seeds the first clock bit: 0x4489
+    // ends in 1, so the body's opening clock bit is clear.
+    apply_clock_bits(&mut body, 1);
+
+    // 1088 bytes: four of lead-in, four of sync, 1080 of body. The lead-in is
+    // part of the sector as SPEC counts it, not part of the gap.
+    let mut out = Vec::with_capacity(SECTOR_MFM_BYTES);
+    out.extend_from_slice(&[0xAA; 4]);
+    out.extend_from_slice(&be_bytes_u16(SYNC));
+    out.extend_from_slice(&be_bytes_u16(SYNC));
+    out.extend_from_slice(&body);
+    debug_assert_eq!(out.len(), SECTOR_MFM_BYTES);
+    Some(out)
+}
+
+/// Encode a whole track: eleven sectors, each preceded by a gap.
+///
+/// `sectors` are taken in order and numbered from zero, as a standard track
+/// numbers them.
+///
+/// # Panics
+/// Never. `None` if any sector is not [`SECTOR_BYTES`] long.
+#[must_use]
+pub fn encode_track(track: u8, sectors: &[&[u8]]) -> Option<Vec<u8>> {
+    let count = u8::try_from(sectors.len()).ok()?;
+    let mut out = Vec::new();
+    for (index, data) in sectors.iter().enumerate() {
+        let number = u8::try_from(index).ok()?;
+        // Gap is 0xAA — clock set, data clear — which is legal MFM and decodes
+        // to nothing.
+        out.extend(core::iter::repeat_n(0xAAu8, GAP_BYTES));
+        out.extend(encode_sector(
+            track,
+            number,
+            count.saturating_sub(number),
+            data,
+        )?);
+    }
+    out.extend(core::iter::repeat_n(0xAAu8, GAP_BYTES));
+    Some(out)
+}
+
+/// Split a field into odd and even MFM halves, clock bits left clear.
+///
+/// The inverse of [`decode_halves`]: the odd half carries each byte's odd data
+/// bits and the even half its even ones, and **the odd half comes first**.
+fn encode_halves(data: &[u8]) -> Vec<u8> {
+    let mut out: Vec<u8> = data.iter().map(|b| (b >> 1) & 0x55).collect();
+    out.extend(data.iter().map(|b| b & 0x55));
+    out
+}
+
+/// A `u32` as big-endian bytes, through the C-001 seam.
+fn be_bytes(value: u32) -> [u8; 4] {
+    let mut out = [0u8; 4];
+    let _ = ade_endian::put_u32(&mut out, 0, value);
+    out
+}
+
+/// A `u16` as big-endian bytes, through the C-001 seam.
+fn be_bytes_u16(value: u16) -> [u8; 2] {
+    let mut out = [0u8; 2];
+    let _ = ade_endian::put_u16(&mut out, 0, value);
+    out
+}
+
+/// Fill in the clock bits of an already-written data stream.
+///
+/// `previous_data` is the data bit immediately before the stream, which the
+/// first clock bit depends on.
+fn apply_clock_bits(stream: &mut [u8], previous_data: u8) {
+    let mut previous = previous_data;
+    for byte in stream.iter_mut() {
+        let mut result = *byte;
+        for pair in 0..4u32 {
+            let data_shift = 6u32.saturating_sub(pair.saturating_mul(2));
+            let clock_shift = data_shift.saturating_add(1);
+            let data = byte.checked_shr(data_shift).unwrap_or(0) & 1;
+            if previous == 0 && data == 0 {
+                result |= 1u8.checked_shl(clock_shift).unwrap_or(0);
+            } else {
+                result &= !(1u8.checked_shl(clock_shift).unwrap_or(0));
+            }
+            previous = data;
+        }
+        *byte = result;
+    }
+}
