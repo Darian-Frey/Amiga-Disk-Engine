@@ -106,7 +106,10 @@ Neither run is the F-001 bar, which requires a fuzz corpus rather than well-form
 - [ ] **Timing-level protection** — long tracks, variable rate, weak bits. These live in the timing rather than the data and need flux, not MFM.
 - [ ] Extended-ADF write; SCP read/write (D-007); optional read-only IPF behind a licence-gated feature flag (C-003).
 - [ ] **Consider FDI** as a second licence-free flux format alongside SCP. It stores raw low-level track data like IPF, but its specification is public and its tools are open source, where C-003 forbids ADE from ever emitting IPF — so it is the only route to *writing* an interchange format that carries copy protection. Not committed; see SPEC §FDI is the licence-free flux format. Its magic bytes need verifying first.
-- [ ] Multi-read consolidation with confidence reporting (F-008); raw-track + filesystem dual view (F-007).
+- [x] **Raw-track + filesystem dual view (F-007)** — an extended ADF is reported *both* as a track table, which is what it is, and as a volume, which is what most of it holds. Ordinary tracks are taken as they are and raw ones are MFM-decoded; sectors are placed by **physical position**, since two corpus disks label every track 0.
+  **Six of the corpus's eleven extended ADFs now mount**, yielding content that was previously unreachable — `Demolition` gives 29 files and 560 KB, `REALM OF THE TROLLS` 8 files and 372 KB. One is named `protec`. `ls`, `extract` and `check` all read through the reconstruction.
+  Reported as a reconstruction, never silently: undecodable sectors are zeros, so `ade info` states how much is real (`880 of 1760 sectors, 50% of a disk`) and `ade check` adds a `volume-reconstructed` finding, because "880 orphaned blocks" means something quite different on a disk half of which could not be decoded. A container with nothing readable reports no volume rather than an empty one.
+- [ ] Multi-read consolidation with confidence reporting (F-008). **Blocked on material**: consolidating several reads of one disk needs several reads of one disk, and the corpus holds one capture of each.
 **Acceptance:** A protected disk survives capture → SCP → write-back and boots in an emulator; consolidation resolves a marginal multi-read fixture.
 
 ## Phase 5 — Catalogue & GUI

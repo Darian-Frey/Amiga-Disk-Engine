@@ -5,11 +5,13 @@
 //! crate that depends on every layer, and the only place cross-layer
 //! coordination is permitted (D-003).
 
+pub mod assemble;
 pub mod convert;
 pub mod health;
 pub mod inspect;
 pub mod json;
 
+pub use assemble::{Assembly, assemble};
 pub use convert::{Conversion, conversion};
 pub use health::{
     BitmapHealth, DirCacheHealth, Examined, Finding, Health, Severity, examine, examine_partition,

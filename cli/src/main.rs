@@ -307,6 +307,28 @@ fn track_lines(lines: &mut Vec<String>, i: &Inspection) {
 fn device_lines(lines: &mut Vec<String>, i: &Inspection) {
     track_lines(lines, i);
 
+    if let Some(a) = &i.assembly {
+        // Said before the volume, not after: anyone reading the listing below
+        // needs to know it is a reconstruction with holes in it.
+        lines.push("  assembled".to_owned());
+        lines.push(format!(
+            "    recovered   {} of {} sectors ({}% of a disk)",
+            a.sectors_placed,
+            a.sectors_total,
+            a.percent_complete()
+        ));
+        lines.push(format!(
+            "    from        {} sector tracks, {} decoded from raw MFM",
+            a.from_sector_tracks, a.from_raw_tracks
+        ));
+        // Only when something is actually missing: a complete reconstruction
+        // is the disk, and warning about holes it does not have is noise.
+        if a.sectors_placed < a.sectors_total {
+            lines.push("    note        the volume below is reconstructed; missing".to_owned());
+            lines.push("                sectors read as zeros".to_owned());
+        }
+    }
+
     if let Some(d) = &i.description {
         // The disk's own words about itself, usually ASCII art from whoever
         // released it. Indented rather than quoted, because the layout is the

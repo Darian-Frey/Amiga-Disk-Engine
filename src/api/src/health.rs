@@ -221,7 +221,12 @@ pub fn examine_partition(bytes: Vec<u8>, partition: Option<&str>) -> Health {
     // directly, so it needs the same bytes the inspection saw. Passing the
     // still-compressed ones reported a truncated image on a sound disk.
     let (bytes, _) = crate::inspect::unwrap_container(bytes);
+    // The inspection sees the container as it is — it does its own assembly
+    // and reports the result — while the block reads below need the
+    // reconstruction. Inspecting the assembled bytes instead would report a
+    // protected disk's container as a plain ADF (F-007).
     let inspection = inspect_bytes(bytes.clone());
+    let bytes = crate::inspect::assemble_for_reading(bytes);
     let mut findings: Vec<Finding> = inspection
         .faults()
         .into_iter()
@@ -278,24 +283,7 @@ pub fn examine_partition(bytes: Vec<u8>, partition: Option<&str>) -> Health {
         return barren(inspection, findings);
     };
 
-    // D-013: the long-name block layout is not implemented, and a classic read
-    // of one does not fail — it silently produces the wrong name. The entry
-    // blocks share a primary type, a secondary type and a checksum algorithm
-    // with classic ones, and a wrong reading still checksums, so nothing
-    // downstream will notice. Say so rather than present names that cannot
-    // have been read correctly.
-    if volume
-        .dostype()
-        .is_some_and(|d| d.mode() == Mode::LongNames)
-    {
-        findings.push(Finding::new(
-            "lnfs-unsupported",
-            Severity::Warning,
-            "this volume uses the long-name layout (LNFS), which is not implemented \
-             (D-013) — names and comments are being read at their classic offsets \
-             and are unreliable; block accounting and checksums are not affected",
-        ));
-    }
+    volume_prelude(&inspection, &volume, &mut findings);
 
     let scan = scan_tree(&volume, &mut findings);
     let source: &dyn ade_block::BlockSource = match &window {
@@ -777,6 +765,50 @@ fn summarise(blocks: &[u32]) -> String {
         )
     } else {
         head.join(", ")
+    }
+}
+
+/// Findings that describe the *volume* rather than anything found in it.
+///
+/// Pushed before the tree walk because they change how everything after them
+/// should be read.
+fn volume_prelude(inspection: &Inspection, volume: &Volume<'_>, findings: &mut Vec<Finding>) {
+    // F-007: everything below reads a reconstruction, not the file. Said
+    // before any of it, because "880 orphaned blocks" means something quite
+    // different on a disk half of which could not be decoded — there the
+    // blocks are not lost, they were never recovered.
+    if let Some(assembly) = &inspection.assembly {
+        findings.push(Finding::new(
+            "volume-reconstructed",
+            Severity::Info,
+            format!(
+                "this volume was reassembled from a raw-track container — {} of {} sectors \
+                 recovered ({}% of a disk). Missing sectors read as zeros, so unreachable \
+                 blocks and short files below are expected rather than damage",
+                assembly.sectors_placed,
+                assembly.sectors_total,
+                assembly.percent_complete()
+            ),
+        ));
+    }
+
+    // D-013: the long-name block layout is not implemented, and a classic read
+    // of one does not fail — it silently produces the wrong name. The entry
+    // blocks share a primary type, a secondary type and a checksum algorithm
+    // with classic ones, and a wrong reading still checksums, so nothing
+    // downstream will notice. Say so rather than present names that cannot
+    // have been read correctly.
+    if volume
+        .dostype()
+        .is_some_and(|d| d.mode() == Mode::LongNames)
+    {
+        findings.push(Finding::new(
+            "lnfs-unsupported",
+            Severity::Warning,
+            "this volume uses the long-name layout (LNFS), which is not implemented \
+             (D-013) — names and comments are being read at their classic offsets \
+             and are unreliable; block accounting and checksums are not affected",
+        ));
     }
 }
 

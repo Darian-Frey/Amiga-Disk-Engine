@@ -65,6 +65,20 @@ pub struct Compression {
 /// A container that is not compressed passes straight through. A wrapper that
 /// fails to decompress yields the *original* bytes and a recorded error, so the
 /// caller still reports something truthful about the file rather than nothing.
+/// Reconstruct a raw-track container so blocks can be read from it (F-007).
+///
+/// A pass-through for every other container. Anything that reads blocks
+/// directly rather than through an [`Inspection`] needs this, or it sees the
+/// track table as if it were sectors.
+pub(crate) fn assemble_for_reading(bytes: Vec<u8>) -> Vec<u8> {
+    let head = bytes.get(..HEAD_BYTES.min(bytes.len())).unwrap_or(&[]);
+    let kind = sniff(head, bytes.len() as u64).kind;
+    match assemble_container(&bytes, kind) {
+        Some((assembled, _)) => assembled,
+        None => bytes,
+    }
+}
+
 pub(crate) fn unwrap_container(bytes: Vec<u8>) -> (Vec<u8>, Option<Compression>) {
     let size = bytes.len() as u64;
     let head = bytes.get(..HEAD_BYTES.min(bytes.len())).unwrap_or(&[]);
@@ -113,6 +127,11 @@ pub struct Inspection {
     pub volume_absent: Option<String>,
     /// The track table, where the container carries raw tracks.
     pub tracks: Option<TrackTable>,
+    /// How a raw-track container was reconstructed into the volume above.
+    ///
+    /// Present only when the volume shown is a **reconstruction** rather than
+    /// the file itself, so a reader can tell the difference (F-007).
+    pub assembly: Option<AssemblyInfo>,
     /// The disk's own description of itself, from `FILE_ID.DIZ`.
     pub description: Option<Description>,
     /// Printable text found in the boot code (F-011).
@@ -229,6 +248,7 @@ fn unreadable_container(
         volume: None,
         volume_absent: Some(reason),
         tracks,
+        assembly: None,
         description: None,
         boot_text: Vec::new(),
         compression,
@@ -236,6 +256,30 @@ fn unreadable_container(
         partitions: Vec::new(),
         partition_faults: Vec::new(),
     }
+}
+
+/// Reconstruct a volume from a raw-track container, if this is one and
+/// anything could be read.
+///
+/// `None` when the container is not a raw-track one, or when nothing decoded —
+/// an image of pure protection has no filesystem view to offer, and inventing
+/// an empty one would be worse than saying so.
+fn assemble_container(bytes: &[u8], kind: Kind) -> Option<(Vec<u8>, AssemblyInfo)> {
+    if !matches!(kind, Kind::ExtendedAdf { .. }) {
+        return None;
+    }
+    let parsed = extended::ExtendedAdf::parse(bytes).ok()?;
+    let assembly = crate::assemble::assemble(&parsed, bytes);
+    if assembly.is_empty() {
+        return None;
+    }
+    let info = AssemblyInfo {
+        sectors_placed: assembly.sectors_placed,
+        sectors_total: assembly.sectors_total,
+        from_sector_tracks: assembly.from_sector_tracks,
+        from_raw_tracks: assembly.from_raw_tracks,
+    };
+    Some((assembly.bytes, info))
 }
 
 /// Read the track table of a raw-track container, if this is one.
@@ -281,6 +325,41 @@ fn read_track_table(bytes: &[u8], kind: Kind) -> Option<TrackTable> {
         present: parsed.tracks.iter().filter(|t| t.present).count(),
         faults: parsed.faults,
     })
+}
+
+/// What was recovered when a raw-track container was assembled into a volume.
+///
+/// A volume reported alongside one of these is a reconstruction: sectors that
+/// could not be decoded are zeros, so `sectors_placed` is how much of the
+/// listing is real.
+#[derive(Debug, Clone)]
+pub struct AssemblyInfo {
+    /// Sectors actually recovered.
+    pub sectors_placed: usize,
+    /// Sectors a whole disk would hold.
+    pub sectors_total: usize,
+    /// Tracks contributed by ordinary sector tracks.
+    pub from_sector_tracks: usize,
+    /// Tracks contributed by decoding raw MFM.
+    pub from_raw_tracks: usize,
+}
+
+impl AssemblyInfo {
+    /// How complete the reconstruction is, as a percentage.
+    #[must_use]
+    pub const fn percent_complete(&self) -> usize {
+        if self.sectors_total == 0 {
+            return 0;
+        }
+        match self
+            .sectors_placed
+            .saturating_mul(100)
+            .checked_div(self.sectors_total)
+        {
+            Some(percent) => percent,
+            None => 0,
+        }
+    }
 }
 
 /// A raw-track container's table, summarised for reporting.
@@ -458,7 +537,23 @@ pub fn inspect_bytes(bytes: Vec<u8>) -> Inspection {
     };
 
     let tracks = read_track_table(&bytes, detection.kind);
-    let Some(geometry) = geometry_for(detection.kind, size) else {
+    // F-007: a raw-track container holds no volume of its own, but most of a
+    // protected disk is usually ordinary. Reconstruct what can be read and
+    // carry on with that, while still reporting the container as what it is.
+    let (bytes, assembly) = match assemble_container(&bytes, detection.kind) {
+        Some((assembled, info)) => (assembled, Some(info)),
+        None => (bytes, None),
+    };
+    let geometry_kind = if assembly.is_some() {
+        sniff(
+            bytes.get(..HEAD_BYTES.min(bytes.len())).unwrap_or(&[]),
+            bytes.len() as u64,
+        )
+        .kind
+    } else {
+        detection.kind
+    };
+    let Some(geometry) = geometry_for(geometry_kind, bytes.len() as u64) else {
         return unreadable_container(detection, size, bootblock, tracks, compression);
     };
     let geometry = match geometry {
@@ -472,6 +567,7 @@ pub fn inspect_bytes(bytes: Vec<u8>) -> Inspection {
                 volume: None,
                 volume_absent: Some(e.to_string()),
                 tracks: None,
+                assembly: None,
                 description: None,
                 boot_text: Vec::new(),
                 compression: compression.clone(),
@@ -491,6 +587,7 @@ pub fn inspect_bytes(bytes: Vec<u8>) -> Inspection {
             volume: None,
             volume_absent: Some("image is shorter than its geometry".to_owned()),
             tracks: None,
+            assembly: None,
             description: None,
             boot_text: Vec::new(),
             compression: compression.clone(),
@@ -509,6 +606,7 @@ pub fn inspect_bytes(bytes: Vec<u8>) -> Inspection {
     let (rdb, partitions, partition_faults) = read_partition_table(&image);
     Inspection {
         tracks,
+        assembly,
         description,
         boot_text,
         compression,
@@ -764,6 +862,21 @@ impl Inspection {
                 Value::opt(self.tracks.as_ref(), TrackTable::to_json),
             ),
             (
+                "assembly",
+                Value::opt(self.assembly.as_ref(), |a| {
+                    Value::Obj(vec![
+                        ("sectors_placed", Value::Num(a.sectors_placed as u64)),
+                        ("sectors_total", Value::Num(a.sectors_total as u64)),
+                        (
+                            "from_sector_tracks",
+                            Value::Num(a.from_sector_tracks as u64),
+                        ),
+                        ("from_raw_tracks", Value::Num(a.from_raw_tracks as u64)),
+                        ("percent_complete", Value::Num(a.percent_complete() as u64)),
+                    ])
+                }),
+            ),
+            (
                 "description",
                 Value::opt(self.description.as_ref(), Description::to_json),
             ),
@@ -895,6 +1008,15 @@ impl Image {
     pub fn from_bytes(bytes: Vec<u8>) -> Result<Self, InspectionError> {
         // An ADZ mounts exactly like the ADF inside it.
         let (bytes, _) = unwrap_container(bytes);
+        // And a raw-track container mounts as whatever of it could be
+        // reconstructed (F-007), so `ls` and `extract` reach the ordinary part
+        // of a protected disk.
+        let head = bytes.get(..HEAD_BYTES.min(bytes.len())).unwrap_or(&[]);
+        let kind = sniff(head, bytes.len() as u64).kind;
+        let bytes = match assemble_container(&bytes, kind) {
+            Some((assembled, _)) => assembled,
+            None => bytes,
+        };
         let size = bytes.len() as u64;
         let head = bytes.get(..HEAD_BYTES.min(bytes.len())).unwrap_or(&[]);
         let geometry = geometry_for(sniff(head, size).kind, size)

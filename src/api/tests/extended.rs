@@ -208,8 +208,22 @@ fn the_inspection_reports_the_table() {
     assert_eq!(table.sectors, 1);
     assert_eq!(table.raw_mfm, 1);
     assert_eq!(table.empty, 1);
-    // A raw-track container has no volume, and the reason must say so rather
-    // than claim the format is unimplemented.
+    // The container holds one ordinary track, so it assembles into a volume
+    // view (F-007) — a mostly empty one, but the assembly is reported.
+    let assembly = inspection.assembly.expect("assembled");
+    assert_eq!(assembly.from_sector_tracks, 1);
+    assert_eq!(assembly.sectors_placed, 11, "one track of eleven sectors");
+    assert_eq!(assembly.sectors_total, 1760);
+}
+
+#[test]
+fn a_container_with_nothing_readable_holds_no_volume() {
+    // The other side: an image that is pure protection has no filesystem view
+    // to offer, and inventing an empty one would be worse than saying so.
+    let image = build(&[(1, 8000, 63000, 0xBB), (1, 0, 0, 0)]);
+    let inspection = inspect_bytes(image);
+
+    assert!(inspection.assembly.is_none(), "nothing decoded");
     assert!(inspection.volume.is_none());
     let why = inspection.volume_absent.expect("a reason");
     assert!(why.contains("holds tracks, not a volume"), "{why}");
