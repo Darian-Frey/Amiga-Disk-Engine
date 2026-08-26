@@ -6,12 +6,14 @@
 //! coordination is permitted (D-003).
 
 pub mod assemble;
+pub mod consolidate;
 pub mod convert;
 pub mod health;
 pub mod inspect;
 pub mod json;
 
 pub use assemble::{Assembly, assemble};
+pub use consolidate::{Consolidation, Diff, consolidate, diff};
 pub use convert::{Conversion, conversion};
 pub use health::{
     BitmapHealth, DirCacheHealth, Examined, Finding, Health, Severity, examine, examine_partition,

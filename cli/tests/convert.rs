@@ -8,6 +8,8 @@
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
     reason = "integration tests: a failure to set up is a test failure"
 )]
 
@@ -181,4 +183,139 @@ fn the_matrix_lists_every_format_with_a_reason() {
         text.contains("refused outright, not warned about"),
         "the policy should be stated\n{text}"
     );
+}
+
+#[test]
+fn diff_reports_identical_images_as_identical() {
+    let image = Volume::dd(1).named("Same").build();
+    let a = temp("same-a", "adf");
+    let b = temp("same-b", "adf");
+    fs::write(&a, &image).unwrap();
+    fs::write(&b, &image).unwrap();
+
+    let out = Command::new(ade())
+        .arg("diff")
+        .arg(&a)
+        .arg(&b)
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&out.stdout).into_owned();
+    let _ = fs::remove_file(&a);
+    let _ = fs::remove_file(&b);
+
+    assert_eq!(out.status.code().unwrap_or(-1), 0, "{text}");
+    assert!(text.contains("identical"), "{text}");
+}
+
+#[test]
+fn diff_locates_a_difference() {
+    let image = Volume::dd(1).named("Differ").build();
+    let mut other = image.clone();
+    other[512 * 3 + 7] ^= 0xFF;
+
+    let a = temp("diff-a", "adf");
+    let b = temp("diff-b", "adf");
+    fs::write(&a, &image).unwrap();
+    fs::write(&b, &other).unwrap();
+
+    let out = Command::new(ade())
+        .arg("diff")
+        .arg(&a)
+        .arg(&b)
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&out.stdout).into_owned();
+    let _ = fs::remove_file(&a);
+    let _ = fs::remove_file(&b);
+
+    assert_ne!(
+        out.status.code().unwrap_or(-1),
+        0,
+        "a difference is a finding"
+    );
+    assert!(text.contains("1 of 1760 sectors differ"), "{text}");
+    assert!(text.contains("1 bytes"), "{text}");
+}
+
+#[test]
+fn consolidate_says_two_dumps_cannot_vote() {
+    // The thing a caller most needs to understand about a two-dump merge.
+    let image = Volume::dd(1).named("Pair").build();
+    let mut other = image.clone();
+    other[512 * 9..512 * 10].fill(0xAA);
+
+    let a = temp("cons-a", "adf");
+    let b = temp("cons-b", "adf");
+    fs::write(&a, &image).unwrap();
+    fs::write(&b, &other).unwrap();
+
+    let out = Command::new(ade())
+        .arg("consolidate")
+        .arg(&a)
+        .arg(&b)
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&out.stdout).into_owned();
+    let _ = fs::remove_file(&a);
+    let _ = fs::remove_file(&b);
+
+    assert!(text.contains("unresolved  1 sectors"), "{text}");
+    assert!(text.contains("two dumps cannot vote"), "{text}");
+    assert!(
+        text.contains("not which dump is correct"),
+        "the limit must be stated: {text}"
+    );
+}
+
+#[test]
+fn consolidate_writes_only_when_asked_and_never_overwrites() {
+    let image = Volume::dd(1).named("Merged").build();
+    let mut other = image.clone();
+    other[512 * 4..512 * 5].fill(0x11);
+
+    let a = temp("w-a", "adf");
+    let b = temp("w-b", "adf");
+    let c = temp("w-c", "adf");
+    let merged = temp("w-out", "adf");
+    fs::write(&a, &image).unwrap();
+    fs::write(&b, &image).unwrap();
+    fs::write(&c, &other).unwrap();
+
+    // Without --output, nothing is written.
+    let out = Command::new(ade())
+        .arg("consolidate")
+        .arg(&a)
+        .arg(&b)
+        .arg(&c)
+        .output()
+        .unwrap();
+    assert!(String::from_utf8_lossy(&out.stdout).contains("resolved    1 sectors"));
+    assert!(!merged.exists(), "report-only by default");
+
+    // With it, the majority version is written.
+    let out = Command::new(ade())
+        .arg("consolidate")
+        .arg(format!("--output={}", merged.display()))
+        .arg(&a)
+        .arg(&b)
+        .arg(&c)
+        .output()
+        .unwrap();
+    assert!(String::from_utf8_lossy(&out.stdout).contains("wrote"));
+    assert_eq!(fs::read(&merged).unwrap(), image, "two votes beat one");
+
+    // And a second run refuses to clobber it.
+    let out = Command::new(ade())
+        .arg("consolidate")
+        .arg(format!("--output={}", merged.display()))
+        .arg(&a)
+        .arg(&b)
+        .arg(&c)
+        .output()
+        .unwrap();
+    assert!(String::from_utf8_lossy(&out.stderr).contains("refusing to overwrite"));
+
+    for p in [&a, &b, &c, &merged] {
+        let _ = fs::remove_file(p);
+    }
 }

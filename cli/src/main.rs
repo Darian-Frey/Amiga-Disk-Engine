@@ -104,6 +104,8 @@ struct Args {
     format: Format,
     /// Which partition of a hard disk to act on, by name or index.
     partition: Option<String>,
+    /// Where `consolidate` should write its merged image, if anywhere.
+    output: Option<PathBuf>,
     /// Write tracks as raw MFM rather than as sectors.
     ///
     /// A flag rather than an output extension because an extended ADF is also
@@ -117,6 +119,7 @@ fn parse_args(raw: Vec<String>) -> Result<Args, String> {
     let mut format = Format::Text;
     let mut partition: Option<String> = None;
     let mut raw_output = false;
+    let mut output: Option<PathBuf> = None;
     for arg in raw {
         match arg.as_str() {
             "--raw" => raw_output = true,
@@ -127,6 +130,9 @@ fn parse_args(raw: Vec<String>) -> Result<Args, String> {
                     "unknown format: {}",
                     other.trim_start_matches("--format=")
                 ));
+            }
+            other if other.starts_with("--output=") => {
+                output = Some(PathBuf::from(other.trim_start_matches("--output=")));
             }
             other if other.starts_with("--partition=") => {
                 partition = Some(other.trim_start_matches("--partition=").to_owned());
@@ -147,6 +153,7 @@ fn parse_args(raw: Vec<String>) -> Result<Args, String> {
         format,
         partition,
         raw: raw_output,
+        output,
     })
 }
 
@@ -185,6 +192,10 @@ fn main() -> ExitCode {
         ),
         ("convert", 2) => convert(Path::new(p(0)), Path::new(p(1)), args.raw),
         ("formats", 0) => formats(),
+        ("diff", 2) => diff_images(Path::new(p(0)), Path::new(p(1))),
+        ("consolidate", n) if n >= 2 => {
+            consolidate_images(&args.positional, args.output.as_deref())
+        }
         ("--version" | "-V", 0) => {
             println!("ade {}", ade_core::version());
             ExitCode::from(EXIT_CLEAN)
@@ -210,6 +221,8 @@ fn usage() {
     println!("    ade extract <image> <path> [dest]  extract a file");
     println!("    ade convert <in> <out>             convert between containers (F-016)");
     println!("    ade formats                        what converts to what, and what it costs");
+    println!("    ade diff <a> <b>                   where two dumps of a disk differ (F-009)");
+    println!("    ade consolidate <a> <b> [...]      what several dumps agree on (F-008)");
     println!("    ade --version");
     println!();
     println!("OPTIONS:");
@@ -217,6 +230,7 @@ fn usage() {
     println!("    --format=json   machine-readable; field names and fault codes are stable");
     println!("    --partition=P   which partition of a hard disk, by name (DH0) or index (0)");
     println!("    --raw           convert writes raw MFM tracks (an extended ADF)");
+    println!("    --output=P      consolidate writes the merged image to P");
     println!();
     println!("EXIT CODES:");
     println!("    0  clean   1  faults   2  usage   3  unreadable   4  no volume");
@@ -1118,4 +1132,154 @@ fn encode_raw_mfm(sectors: &[u8]) -> Result<Vec<u8>, String> {
         })
         .collect();
     extended::write(&sources).map_err(|e| e.to_string())
+}
+
+/// Read several images, reporting any that cannot be read.
+fn read_all(paths: &[String]) -> Result<Vec<Vec<u8>>, ExitCode> {
+    let mut out = Vec::with_capacity(paths.len());
+    for path in paths {
+        match std::fs::read(path) {
+            Ok(bytes) => out.push(bytes),
+            Err(e) => {
+                eprintln!("ade: {path}: {e}");
+                return Err(ExitCode::from(EXIT_UNREADABLE));
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Report where two dumps of a disk differ (F-009).
+fn diff_images(a: &Path, b: &Path) -> ExitCode {
+    let images = match read_all(&[a.display().to_string(), b.display().to_string()]) {
+        Ok(i) => i,
+        Err(code) => return code,
+    };
+    let (Some(left), Some(right)) = (images.first(), images.get(1)) else {
+        return ExitCode::from(EXIT_UNREADABLE);
+    };
+    let report = match ade_core::diff(left, right) {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("ade: {e}");
+            return ExitCode::from(EXIT_USAGE);
+        }
+    };
+
+    println!("{}", a.display());
+    println!("{}", b.display());
+    if report.is_identical() {
+        println!("  identical — {} sectors compared", report.sectors_total);
+        return ExitCode::from(EXIT_CLEAN);
+    }
+    println!(
+        "  {} of {} sectors differ, {} bytes",
+        report.sectors.len(),
+        report.sectors_total,
+        report.bytes_differing
+    );
+    println!("  tracks  {}", summarise(&report.tracks));
+    ExitCode::from(EXIT_FAULTS)
+}
+
+/// Report what several dumps of a disk agree on (F-008).
+fn consolidate_images(paths: &[String], output: Option<&Path>) -> ExitCode {
+    let images = match read_all(paths) {
+        Ok(i) => i,
+        Err(code) => return code,
+    };
+    let report = match ade_core::consolidate(&images) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("ade: {e}");
+            return ExitCode::from(EXIT_USAGE);
+        }
+    };
+
+    println!(
+        "{} dumps, {} sectors each",
+        report.sources,
+        report.total_sectors()
+    );
+    println!("  agreed      {} sectors", report.unanimous_sectors);
+    println!(
+        "  resolved    {} sectors by plurality",
+        report.resolved_sectors
+    );
+    println!(
+        "  unresolved  {} sectors with no majority",
+        report.unresolved_sectors
+    );
+    if report.sources == 2 && report.unresolved_sectors > 0 {
+        // Worth saying plainly: with two dumps every disagreement is a tie by
+        // definition, so "unresolved" here is arithmetic, not damage.
+        println!("              (two dumps cannot vote — every difference ties)");
+    }
+
+    if !report.tracks.is_empty() {
+        println!("  tracks that disagree");
+        for track in report.tracks.iter().take(12) {
+            let unresolved = if track.unresolved.is_empty() {
+                String::new()
+            } else {
+                format!(", {} unresolved", track.unresolved.len())
+            };
+            println!(
+                "    {:3}  sectors {:?}{unresolved}",
+                track.track, track.disputed
+            );
+        }
+        if report.tracks.len() > 12 {
+            println!(
+                "    ... and {} more tracks",
+                report.tracks.len().saturating_sub(12)
+            );
+        }
+    }
+
+    // Agreement is not correctness: these may be dumps of different physical
+    // copies, so a plurality says what most dumps hold, not what is right.
+    println!();
+    println!("This reports agreement between dumps, not which dump is correct.");
+
+    if let Some(path) = output {
+        if path.exists() {
+            eprintln!(
+                "ade: {}: already exists, refusing to overwrite",
+                path.display()
+            );
+            return ExitCode::from(EXIT_USAGE);
+        }
+        if let Err(e) = std::fs::write(path, &report.bytes) {
+            eprintln!("ade: {}: {e}", path.display());
+            return ExitCode::from(EXIT_UNREADABLE);
+        }
+        println!("wrote {} bytes to {}", report.bytes.len(), path.display());
+    }
+
+    ExitCode::from(if report.is_unanimous() {
+        EXIT_CLEAN
+    } else {
+        EXIT_FAULTS
+    })
+}
+
+/// Render a list of track numbers as ranges, so a long run reads as one.
+fn summarise(tracks: &[usize]) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    let mut index = 0usize;
+    while let Some(&start) = tracks.get(index) {
+        let mut end = start;
+        while tracks.get(index.saturating_add(1)) == Some(&end.saturating_add(1)) {
+            index = index.saturating_add(1);
+            end = end.saturating_add(1);
+        }
+        parts.push(if start == end {
+            start.to_string()
+        } else {
+            format!("{start}-{end}")
+        });
+        index = index.saturating_add(1);
+    }
+    parts.join(", ")
 }
