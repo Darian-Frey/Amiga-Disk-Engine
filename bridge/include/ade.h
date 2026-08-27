@@ -66,6 +66,10 @@ typedef enum {
  * 1978-01-01, minutes past midnight, and ticks at 50 Hz. */
 typedef struct {
     AdeBytes     name;
+    /* Full path from the volume root, for entries from ade_walk_open. Empty
+     * for entries from ade_dir_open, which are already relative to the
+     * directory that was asked for. */
+    AdeBytes     path;
     uint32_t     block;
     uint32_t     size;
     AdeEntryKind kind;
@@ -105,6 +109,14 @@ size_t   ade_image_finding_count(const AdeImage *image);
  * if there is no volume or the block is not a directory. Free with
  * ade_listing_free. */
 AdeListing *ade_dir_open(const AdeImage *image, uint32_t block);
+
+/* Every entry on the volume, flattened, with full paths. Use this rather than
+ * recursing through ade_dir_open yourself: walking an Amiga volume safely is
+ * engine logic, not UI logic. A hard link to a directory makes cycles
+ * reachable on an uncorrupted disk, and the engine's walk carries a visited
+ * set and a depth bound — a cycle grows the path strings without bound even
+ * while the entry count stays inside its cap. Free with ade_listing_free. */
+AdeListing *ade_walk_open(const AdeImage *image);
 size_t      ade_listing_count(const AdeListing *listing);
 /* Copies entry `index` into `*out`. ADE_NOT_FOUND past the end. The name in
  * the entry borrows from the listing. */

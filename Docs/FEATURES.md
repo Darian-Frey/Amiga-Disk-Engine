@@ -52,8 +52,10 @@ Priorities are MoSCoW (Must / Should / Could / Won't). Effort is rough and pre-s
 **Acceptance:**
 - Linux-first Qt6 GUI presents a directory tree, hex view, and file preview for any opened image.
 - Drag-and-drop extraction; search across the contents of multiple loaded images.
-**Status:** Not started
-**Notes:** ADF Opus's never-realised cross-platform port is the gap. Qt6 over the C-ABI bridge, per D-001.
+**Status:** Delivered 2026-08-27 (Linux; Windows and macOS builds untried)
+**Notes:** ADF Opus's never-realised cross-platform port is the gap. Qt6 over the C-ABI bridge, per D-001. Both acceptance clauses met: an image drops in, a file drags out, and search covers every open image at once. 14 headless tests run without an X server.
+**Design consequence found 2026-08-27:** searching means walking a disk, and safe traversal is cycle detection (AV-001) and a depth bound (IMP-003) — engine logic, not GUI logic. The capability was therefore added to the C ABI as `ade_walk_open` rather than written in Qt, and the header says so, because the same reasoning applies to every future front end. A binding that is missing a safe primitive is an invitation to reimplement it unsafely.
+**Not cross-platform yet in fact, only in construction.** Qt6 and the C ABI are what make the other platforms possible; nothing but Linux has been built or run.
 
 ### F-005 End-to-end pipeline in one app
 **Priority:** Must

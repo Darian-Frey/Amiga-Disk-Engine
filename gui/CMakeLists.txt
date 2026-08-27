@@ -39,7 +39,9 @@ add_custom_target(ade_bridge ALL
 qt_add_executable(ade-gui
     src/main.cpp
     src/MainWindow.cpp
+    src/ImageTree.cpp
     src/MainWindow.h
+    src/ImageTree.h
     src/Image.h
 )
 add_dependencies(ade-gui ade_bridge)
@@ -59,7 +61,9 @@ if(Qt6Test_FOUND)
     qt_add_executable(ade-gui-tests
         tests/test_mainwindow.cpp
         src/MainWindow.cpp
+        src/ImageTree.cpp
         src/MainWindow.h
+        src/ImageTree.h
         src/Image.h
     )
     add_dependencies(ade-gui-tests ade_bridge)

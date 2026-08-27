@@ -1,6 +1,6 @@
 # Build
 
-> **No longer a stub.** The Rust workspace builds, tests, and lints as of 2026-08-21, so the commands below are real rather than intended. The Qt6 GUI does not exist yet (Phase 5), so its half remains prospective. Toolchain settled by **D-001** and **D-002** — see [DECISIONS.md](DECISIONS.md).
+> **No longer a stub.** Every command below is real. The Rust workspace has built, tested and linted since 2026-08-21; the C-ABI bridge and the Qt6 GUI joined it on 2026-08-27. Toolchain settled by **D-001** and **D-002** — see [DECISIONS.md](DECISIONS.md).
 >
 > **The toolchain is pinned.** `rust-toolchain.toml` names an exact version, not `stable`, and rustup installs it automatically. Verified on Linux x86-64; the workspace pins `edition = "2024"` and a `rust-version` floor of 1.85.
 >
@@ -54,11 +54,36 @@ RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
 python3 tools/check-layering.py   # D-003: no cross-layer dependencies
 ```
 
+## The GUI
+
+Qt6 6.4 or later, and CMake 3.19 or later. CMake invokes `cargo` for the
+bridge itself, so this is the only command needed:
+
+```bash
+cmake -S gui -B gui/build -DCMAKE_BUILD_TYPE=Release
+cmake --build gui/build
+./gui/build/ade-gui [image...]
+```
+
+Its tests need no X server — `Qt6::Test` under the offscreen platform — and
+generate their own image with `mkfixture`, since D-010 commits no binaries:
+
+```bash
+ctest --test-dir gui/build --output-on-failure
+```
+
+The C ABI has its own check, a real C program compiled `-Wall -Wextra -Werror`
+against the hand-written header and run under the sanitizers. It is the only
+thing that can catch `bridge/include/ade.h` disagreeing with the library:
+
+```bash
+bridge/tests/run.sh
+```
+
 Still to come:
 
 ```bash
 cargo fuzz run <target>          # F-001 acceptance, with the first parser
-cmake --build build              # Qt6 GUI (Phase 5)
 ```
 
 ## Lints as invariants
@@ -67,7 +92,9 @@ The workspace lint set in the root `Cargo.toml` is load-bearing, not
 cosmetic. Relaxing any of it is a decision rather than a convenience:
 
 - `unsafe_code = "forbid"` — nothing in the core needs it. The C-ABI bridge
-  will, and gets a scoped exemption when it exists (D-001, D-006).
+  does, and its exemption is scoped rather than granted: `forbid` cannot be
+  lifted by an inner `allow`, so `ade-bridge` opts out of the workspace lint
+  set and restates every other lint verbatim (D-001, D-006).
 - `unwrap_used`, `expect_used`, `panic`, `indexing_slicing`,
   `arithmetic_side_effects` — all denied. Each is a route from hostile input
   to a crash, which F-001 forbids.

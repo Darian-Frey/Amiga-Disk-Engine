@@ -1,15 +1,20 @@
-// The main window (F-004): a directory tree, a hex view, and a preview.
+// The main window (F-004): a directory tree, a hex view, a preview, and
+// search across every image that is open.
 #pragma once
 
 #include "Image.h"
 
 #include <QMainWindow>
 
+#include <memory>
+#include <vector>
+
+class ImageTree;
+class QAction;
 class QLabel;
+class QLineEdit;
 class QPlainTextEdit;
-class QSplitter;
 class QTabWidget;
-class QTreeWidget;
 class QTreeWidgetItem;
 
 class MainWindow : public QMainWindow {
@@ -18,9 +23,16 @@ class MainWindow : public QMainWindow {
 public:
     explicit MainWindow(QWidget *parent = nullptr);
 
-    // Open an image, replacing whatever is loaded. Failure is reported through
-    // `errorOccurred` rather than shown here — see that signal.
+    // Open an image, adding it to whatever is already loaded. Failure is
+    // reported through `errorOccurred` rather than shown here.
     void openImage(const QString &path);
+
+    // Close every open image.
+    void closeAll();
+
+    // How many images are open. Several can be, which is what makes
+    // cross-image search meaningful.
+    size_t imageCount() const { return m_images.size(); }
 
 signals:
     // Something went wrong that a person should see.
@@ -33,26 +45,48 @@ signals:
     void errorOccurred(const QString &message);
 
 protected:
-    // Drag-and-drop: dropping an image opens it (F-004).
     void dragEnterEvent(QDragEnterEvent *event) override;
     void dropEvent(QDropEvent *event) override;
 
 private slots:
     void chooseImage();
-    void entrySelected();
     void extractSelected();
+    void search();
 
 private:
-    void populate(QTreeWidgetItem *parent, quint32 block);
+    // One open image and where it came from.
+    struct Open {
+        ade::Image image;
+        QString path;
+        QString name;
+        size_t index = 0;
+    };
+
+    void addImageRoot(Open &open);
+    void populate(QTreeWidgetItem *parent, const Open &open, quint32 block);
+    // Show an entry in the hex and text views, from either tree.
+    void showEntry(QTreeWidgetItem *item);
+    const Open *imageFor(const QTreeWidgetItem *item) const;
+    // A file entry's bytes, or empty for a directory or an unreadable one.
+    QByteArray contentsOf(QTreeWidgetItem *item) const;
+    // One line describing an image: container, volume, size, findings.
+    static QString describe(const Open &open);
     void showSummary();
     void clearViews();
 
-    ade::Image m_image;
-    QString m_path;
+    std::vector<std::unique_ptr<Open>> m_images;
+    // Set while one tree is clearing the other's selection, so that the
+    // clearing does not come straight back as a selection change.
+    bool m_syncing = false;
+    // The entry last shown, from whichever tree. Extraction acts on it, so
+    // that a search result extracts as readily as a tree row.
+    QTreeWidgetItem *m_selected = nullptr;
 
-    QTreeWidget *m_tree = nullptr;
+    ImageTree *m_tree = nullptr;
+    ImageTree *m_results = nullptr;
     QPlainTextEdit *m_hex = nullptr;
     QPlainTextEdit *m_text = nullptr;
+    QLineEdit *m_query = nullptr;
     QTabWidget *m_views = nullptr;
     QLabel *m_summary = nullptr;
     QAction *m_extract = nullptr;

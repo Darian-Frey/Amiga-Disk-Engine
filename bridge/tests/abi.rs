@@ -135,6 +135,10 @@ fn a_directory_lists_and_entries_come_back() {
                 data: std::ptr::null(),
                 len: 0,
             },
+            path: ade::AdeBytes {
+                data: std::ptr::null(),
+                len: 0,
+            },
             block: 0,
             size: 0,
             kind: AdeEntryKind::Unknown,
@@ -253,6 +257,86 @@ fn an_image_with_no_volume_says_why_rather_than_failing_to_open() {
         assert!(ade::ade_dir_open(image, 880).is_null());
         assert!(ade::ade_file_read(image, 880).is_null());
 
+        ade::ade_image_free(image);
+    }
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn a_walk_returns_every_entry_with_its_path() {
+    // The GUI needs this for cross-image search, and must not roll its own
+    // traversal: cycle detection and the depth bound live in the engine
+    // (AV-001, IMP-003).
+    let mut disk = ade_fixtures::Volume::dd(1).named("Walked");
+    disk.add_file("top", b"a");
+    disk.add_dir("Tools");
+    let (path, c_path) = fixture("walk", &disk.build());
+
+    // SAFETY: valid path, live handle throughout.
+    unsafe {
+        let image = ade::ade_image_open(c_path.as_ptr(), std::ptr::null_mut());
+        assert!(!image.is_null());
+        let walk = ade::ade_walk_open(image);
+        assert!(!walk.is_null());
+
+        let count = ade::ade_listing_count(walk);
+        assert!(count >= 2, "at least the file and the directory");
+
+        let mut saw_path = false;
+        for index in 0..count {
+            let mut entry = std::mem::zeroed::<AdeEntry>();
+            assert_eq!(
+                ade::ade_listing_entry(walk, index, &raw mut entry),
+                AdeResult::Ok
+            );
+            let name = std::slice::from_raw_parts(entry.name.data, entry.name.len);
+            assert!(!name.is_empty());
+            // A walk carries paths; a plain listing does not.
+            if entry.path.len > 0 {
+                saw_path = true;
+            }
+        }
+        assert!(saw_path, "walk entries must carry a path");
+
+        ade::ade_listing_free(walk);
+        ade::ade_image_free(image);
+    }
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn a_plain_listing_carries_no_path() {
+    // The distinction the `path` field documents: `ade_dir_open` entries are
+    // already relative to the directory asked for.
+    let mut disk = ade_fixtures::Volume::dd(1).named("NoPath");
+    disk.add_file("top", b"a");
+    let (path, c_path) = fixture("nopath", &disk.build());
+
+    // SAFETY: valid path, live handle.
+    unsafe {
+        let image = ade::ade_image_open(c_path.as_ptr(), std::ptr::null_mut());
+        let listing = ade::ade_dir_open(image, ade::ade_image_root_block(image));
+        let mut entry = std::mem::zeroed::<AdeEntry>();
+        assert_eq!(
+            ade::ade_listing_entry(listing, 0, &raw mut entry),
+            AdeResult::Ok
+        );
+        assert_eq!(entry.path.len, 0);
+        ade::ade_listing_free(listing);
+        ade::ade_image_free(image);
+    }
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn walking_a_volumeless_image_is_null_not_a_crash() {
+    let (path, c_path) = fixture("walknull", &vec![0u8; 901_120]);
+    // SAFETY: valid path.
+    unsafe {
+        let image = ade::ade_image_open(c_path.as_ptr(), std::ptr::null_mut());
+        assert!(!image.is_null());
+        assert!(ade::ade_walk_open(image).is_null());
+        assert!(ade::ade_walk_open(std::ptr::null()).is_null());
         ade::ade_image_free(image);
     }
     let _ = std::fs::remove_file(path);

@@ -129,6 +129,9 @@ public:
     size_t findingCount() const { return ade_image_finding_count(m_raw); }
 
     Listing list(quint32 block) const { return Listing{ade_dir_open(m_raw, block)}; }
+    // Every entry on the volume, flattened. The engine does the traversal
+    // because doing it here would mean reimplementing cycle detection.
+    Listing walk() const { return Listing{ade_walk_open(m_raw)}; }
     Buffer read(quint32 block) const { return Buffer{ade_file_read(m_raw, block)}; }
 
 private:

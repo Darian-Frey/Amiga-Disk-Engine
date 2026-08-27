@@ -11,7 +11,19 @@ Effort vocabulary: trivial | small | medium | large.
 
 ## Suggested
 
-_None._
+### IMP-005 An open image is held whole in memory, so the GUI scales with images open
+**Status:** suggested
+**Effort:** medium
+**Found:** 2026-08-27, measuring the GUI's cross-image search against 400 corpus images.
+**Where:** [bridge/src/lib.rs](../bridge/src/lib.rs) `ade_image_open`, and the `ade-core` open path beneath it.
+
+**What works today.** Opening reads the file into memory and keeps it there for the lifetime of the handle. 400 floppy images opened in 580 ms and searched in 79 ms — but at **400 MB resident**, almost exactly the sum of their sizes. The CLI never notices, because `ade batch` reads one image, examines it and drops it; that is how a 4652-image corpus runs at 9 MB peak. The GUI does notice, because the whole point of the multi-image model is that every image stays open.
+
+**Why it could be better.** A person cataloguing a collection may reasonably drop a few hundred floppies in, and a hardfile is not 880 KB — one 500 MB HDF is larger than the entire floppy corpus opened at once. The ceiling is not a floppy count, it is total bytes, and nothing currently reports approaching it.
+
+**Trade-offs.** Memory-mapping or a windowed reader would cut resident size to what is actually touched, but both break the current guarantee that a decompressed container (ADZ, HDZ) and a plain one behave identically — a gzip stream has no seekable backing file, so one of them must stay materialised. It would also put I/O errors on paths that today cannot fail, which is a change to every signature that reads a block. The honest interim measure is far cheaper: report the total resident cost in the GUI and let a person see it climb.
+
+**Not urgent.** 400 images is well beyond what the acceptance criteria ask for, and the failure mode is a slow machine rather than a wrong answer.
 
 ## Applied
 

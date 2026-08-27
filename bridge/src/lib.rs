@@ -131,6 +131,11 @@ impl From<EntryKind> for AdeEntryKind {
 pub struct AdeEntry {
     /// The name exactly as stored — Latin-1, not UTF-8.
     pub name: AdeBytes,
+    /// The full path from the volume root, for entries from [`ade_walk_open`].
+    ///
+    /// Empty for entries from [`ade_dir_open`], which are already relative to
+    /// the directory that was asked for.
+    pub path: AdeBytes,
     /// The block the entry occupies, and the handle for descending into it.
     pub block: u32,
     /// File size in bytes; zero for a directory.
@@ -155,8 +160,12 @@ pub struct AdeImage {
     absent: Option<CString>,
 }
 
-/// A directory listing, owned by the caller until freed.
+/// A directory listing or a whole-volume walk, owned by the caller until freed.
 pub struct AdeListing {
+    /// The path bytes each entry's `path` points into, when this came from a
+    /// walk. Same ownership role as `names`.
+    #[allow(dead_code, reason = "keeps the path buffers alive for `entries`")]
+    paths: Vec<Vec<u8>>,
     /// The name bytes each entry's [`AdeBytes`] points into.
     ///
     /// **Never read, and must not be removed.** It is the owner of the
@@ -390,6 +399,7 @@ pub unsafe extern "C" fn ade_dir_open(image: *const AdeImage, block: u32) -> *mu
             .zip(names.iter())
             .map(|(entry, name)| AdeEntry {
                 name: AdeBytes::of(name),
+                path: AdeBytes::empty(),
                 block: entry.block,
                 size: entry.byte_size,
                 kind: entry.kind.into(),
@@ -399,7 +409,69 @@ pub unsafe extern "C" fn ade_dir_open(image: *const AdeImage, block: u32) -> *mu
                 ticks: entry.altered.ticks,
             })
             .collect();
-        Box::into_raw(Box::new(AdeListing { names, entries }))
+        Box::into_raw(Box::new(AdeListing {
+            names,
+            paths: Vec::new(),
+            entries,
+        }))
+    })
+}
+
+/// Every entry on the volume, flattened, with full paths.
+///
+/// This exists so a front end never has to write its own traversal. Walking an
+/// Amiga volume safely is engine logic, not UI logic: a hard link to a
+/// directory makes cycles reachable on an *uncorrupted* disk (AV-001), and the
+/// engine's walk carries both a visited set and an explicit depth bound —
+/// the latter because a cycle grows the path *strings* without bound even
+/// while the entry count stays inside its cap (IMP-003). A recursive
+/// `ade_dir_open` in C++ would have neither.
+///
+/// Release with [`ade_listing_free`].
+///
+/// # Safety
+/// `image` must be a live handle or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ade_walk_open(image: *const AdeImage) -> *mut AdeListing {
+    with_image(image, std::ptr::null_mut(), |image| {
+        let Ok(handle) = Image::from_bytes(image.bytes.clone()) else {
+            return std::ptr::null_mut();
+        };
+        let Ok(volume) = handle.volume() else {
+            return std::ptr::null_mut();
+        };
+        let Ok(walk) = volume.walk(volume.root()) else {
+            return std::ptr::null_mut();
+        };
+
+        let names: Vec<Vec<u8>> = walk.entries.iter().map(|(_, e)| e.name.clone()).collect();
+        let paths: Vec<Vec<u8>> = walk
+            .entries
+            .iter()
+            .map(|(path, _)| path.as_bytes().to_vec())
+            .collect();
+        let entries = walk
+            .entries
+            .iter()
+            .zip(names.iter())
+            .zip(paths.iter())
+            .map(|(((_, entry), name), path)| AdeEntry {
+                name: AdeBytes::of(name),
+                path: AdeBytes::of(path),
+                block: entry.block,
+                size: entry.byte_size,
+                kind: entry.kind.into(),
+                protection: entry.protection.0,
+                days: entry.altered.days,
+                mins: entry.altered.mins,
+                ticks: entry.altered.ticks,
+            })
+            .collect();
+        Box::into_raw(Box::new(AdeListing {
+            paths,
+            names,
+            entries,
+        }))
     })
 }
 

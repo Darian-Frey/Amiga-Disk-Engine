@@ -24,10 +24,12 @@ int main(int argc, char *argv[]) {
                      });
     window.show();
 
-    // An image named on the command line opens straight away, which makes the
-    // GUI usable from a file manager and testable without clicking.
+    // Images named on the command line open straight away, which makes the
+    // GUI usable from a file manager and testable without clicking. All of
+    // them open, not just the first: several at once is how a cross-image
+    // search gets set up.
     const QStringList args = QApplication::arguments();
-    if (args.size() > 1) window.openImage(args.at(1));
+    for (int i = 1; i < args.size(); ++i) window.openImage(args.at(i));
 
     return QApplication::exec();
 }

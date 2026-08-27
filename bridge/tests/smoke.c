@@ -125,6 +125,31 @@ int main(int argc, char **argv) {
         ade_listing_free(listing);
     }
 
+    // The whole volume, flattened. This is what a front end searches, and the
+    // reason it is here rather than in the front end: the traversal carries
+    // the cycle detection (AV-001).
+    AdeListing *walk = ade_walk_open(image);
+    check(walk != NULL, "walked the volume");
+    if (walk) {
+        size_t n = ade_listing_count(walk);
+        printf("walked:    %zu\n", n);
+        check(n > 0, "the walk found entries");
+
+        int with_path = 0;
+        for (size_t i = 0; i < n; i++) {
+            AdeEntry entry;
+            if (ade_listing_entry(walk, i, &entry) != ADE_OK) continue;
+            if (entry.path.len > 0 && entry.path.data != NULL) with_path++;
+            if (i < 8) {
+                printf("  ");
+                print_name(entry.path);
+                printf("\n");
+            }
+        }
+        check((size_t)with_path == n, "every walked entry carries its path");
+        ade_listing_free(walk);
+    }
+
     ade_image_free(image);
     printf("\n%s\n", failures ? "FAILURES" : "all checks passed");
     return failures ? 1 : 0;
