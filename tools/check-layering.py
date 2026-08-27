@@ -31,7 +31,11 @@ POLICY = {
     "ade-flux":       {"ade-track", "ade-block"},
     "ade-filesystem": {"ade-block", "ade-endian"},
     "ade-object":     {"ade-filesystem"},
-    "ade-catalogue":  {"ade-object"},
+    # Also `ade-block`, for CRC32 (F-013). Content identification and gzip need
+    # the same algorithm, and `ade-block` is the lowest layer both can reach;
+    # implementing a checksum twice is how two copies of it silently diverge.
+    # A deliberate edit, which is what this file is for.
+    "ade-catalogue":  {"ade-object", "ade-block"},
     "ade-core": {
         "ade-endian", "ade-block", "ade-container", "ade-track",
         "ade-flux", "ade-filesystem", "ade-object", "ade-catalogue",

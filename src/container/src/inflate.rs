@@ -651,53 +651,12 @@ fn copy_back(
     Ok(())
 }
 
-/// The CRC32 table for the reflected polynomial `0xEDB88320`, built at compile
-/// time.
+/// CRC32, re-exported from where it now lives.
 ///
-/// A byte at a time rather than a bit at a time. The bitwise form is eight
-/// times the work, which is invisible in a release build and very visible in a
-/// debug one — where the tests run, and where a corpus round-trip over real
-/// 900 KB images went from minutes to seconds.
-#[allow(
-    clippy::indexing_slicing,
-    clippy::cast_possible_truncation,
-    reason = "const-evaluated: an out-of-range index or a truncating cast here               is a compile error, not a runtime one, and `i` is bounded by 256"
-)]
-const CRC32_TABLE: [u32; 256] = {
-    let mut table = [0u32; 256];
-    let mut i = 0usize;
-    while i < 256 {
-        let mut crc = i as u32;
-        let mut bit = 0;
-        while bit < 8 {
-            crc = if crc & 1 != 0 {
-                (crc >> 1) ^ 0xEDB8_8320
-            } else {
-                crc >> 1
-            };
-            bit += 1;
-        }
-        table[i] = crc;
-        i += 1;
-    }
-    table
-};
-
-/// CRC32 as gzip uses it: the reflected polynomial `0xEDB88320`.
-///
-/// This is what makes a decompressed image trustworthy rather than merely
-/// plausible — see [`gunzip`], which verifies it against the trailer.
-#[must_use]
-pub fn crc32(data: &[u8]) -> u32 {
-    let mut crc: u32 = 0xFFFF_FFFF;
-    for &byte in data {
-        // Taking the low byte is the algorithm, not a lossy conversion.
-        let index = usize::try_from((crc ^ u32::from(byte)) & 0xFF).unwrap_or(0);
-        let entry = CRC32_TABLE.get(index).copied().unwrap_or(0);
-        crc = entry ^ (crc >> 8);
-    }
-    !crc
-}
+/// Moved to `ade-block` so `ade-catalogue` can use the same implementation for
+/// content identification without a cross-layer dependency (D-003). Kept here
+/// because gzip's trailer is where most callers meet it.
+pub use ade_block::checksum::crc32;
 
 /// gzip's fixed header length, before any optional fields (RFC 1952 §2.3).
 const GZIP_HEADER: usize = 10;

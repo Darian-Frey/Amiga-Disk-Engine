@@ -13,6 +13,7 @@ dependencies = [
 name = "ade-catalogue"
 version = "0.0.0"
 dependencies = [
+ "ade-block",
  "ade-object",
 ]
 

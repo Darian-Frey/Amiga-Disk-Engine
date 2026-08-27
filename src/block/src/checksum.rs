@@ -117,6 +117,61 @@ fn fold(buf: &[u8], skip_at: usize, step: impl Fn(u32, u32) -> u32) -> Option<u3
     Some(sum)
 }
 
+/// The CRC32 table for the reflected polynomial `0xEDB88320`, built at compile
+/// time.
+///
+/// A byte at a time rather than a bit at a time. The bitwise form is eight
+/// times the work, which is invisible in a release build and very visible in a
+/// debug one — where the tests run.
+#[allow(
+    clippy::indexing_slicing,
+    clippy::cast_possible_truncation,
+    reason = "const-evaluated: an out-of-range index or a truncating cast here \
+              is a compile error, not a runtime one, and `i` is bounded by 256"
+)]
+const CRC32_TABLE: [u32; 256] = {
+    let mut table = [0u32; 256];
+    let mut i = 0usize;
+    while i < 256 {
+        let mut crc = i as u32;
+        let mut bit = 0;
+        while bit < 8 {
+            crc = if crc & 1 != 0 {
+                (crc >> 1) ^ 0xEDB8_8320
+            } else {
+                crc >> 1
+            };
+            bit += 1;
+        }
+        table[i] = crc;
+        i += 1;
+    }
+    table
+};
+
+/// CRC32 with the reflected polynomial `0xEDB88320`.
+///
+/// **Not an Amiga checksum.** It lives here because two unrelated parts of ADE
+/// need the same algorithm and `ade-block` is the lowest layer both can reach:
+/// gzip uses it to verify a decompressed image (`ade-container::inflate`), and
+/// TOSEC datfiles use it to identify one (`ade-catalogue`). Implementing it
+/// twice is how two copies of a checksum silently diverge.
+///
+/// It is a content hash, not a cryptographic one: 71 collisions were measured
+/// among 88,833 TOSEC entries, so a caller identifying content by it must
+/// report every match rather than assume one.
+#[must_use]
+pub fn crc32(data: &[u8]) -> u32 {
+    let mut crc: u32 = 0xFFFF_FFFF;
+    for &byte in data {
+        // Taking the low byte is the algorithm, not a lossy conversion.
+        let index = usize::try_from((crc ^ u32::from(byte)) & 0xFF).unwrap_or(0);
+        let entry = CRC32_TABLE.get(index).copied().unwrap_or(0);
+        crc = entry ^ (crc >> 8);
+    }
+    !crc
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, reason = "tests may unwrap")]
 mod tests {

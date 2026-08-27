@@ -22,6 +22,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
+use ade_catalogue::Catalogue;
+
 use crate::{Severity, examine, json::Value};
 
 /// What happened to one image.
@@ -47,6 +49,11 @@ pub struct Record {
     pub worst: Option<Severity>,
     /// Why the file could not be examined at all.
     pub unreadable: Option<String>,
+    /// What the dataset calls this image, when one was supplied (F-013).
+    ///
+    /// More than one name means the content hash is ambiguous; ADE reports
+    /// them all rather than choosing.
+    pub identified: Vec<String>,
 }
 
 impl Record {
@@ -81,6 +88,8 @@ pub struct Summary {
     pub findings: BTreeMap<&'static str, usize>,
     /// Total bytes recovered across every image.
     pub bytes_recovered: u64,
+    /// How many images the dataset could name, when one was supplied.
+    pub identified: usize,
 }
 
 impl Summary {
@@ -106,6 +115,7 @@ impl Summary {
             ("mounted", Value::Num(self.mounted as u64)),
             ("sound", Value::Num(self.sound as u64)),
             ("bytes_recovered", Value::Num(self.bytes_recovered)),
+            ("identified", Value::Num(self.identified as u64)),
             (
                 // An array of pairs rather than an object: container names are
                 // runtime strings, and a JSON object with arbitrary keys is
@@ -166,6 +176,15 @@ impl Record {
                 "unreadable",
                 Value::opt(self.unreadable.as_ref(), Value::str),
             ),
+            (
+                "identified",
+                Value::Arr(
+                    self.identified
+                        .iter()
+                        .map(|n| Value::str(n.clone()))
+                        .collect(),
+                ),
+            ),
         ])
     }
 }
@@ -173,6 +192,19 @@ impl Record {
 /// Examine one image, turning any failure into a record rather than an error.
 #[must_use]
 pub fn examine_one(path: &Path) -> Record {
+    examine_inner(path, None)
+}
+
+/// Examine one image and name it from a dataset (F-013 and F-014 together).
+#[must_use]
+pub fn examine_and_identify(path: &Path, catalogue: &Catalogue) -> Record {
+    examine_inner(path, Some(catalogue))
+}
+
+/// The shared body: the file is read **once** and both the health examination
+/// and the content hash work from those bytes. Reading twice doubled the cost
+/// of a corpus run for no benefit.
+fn examine_inner(path: &Path, catalogue: Option<&Catalogue>) -> Record {
     let bytes = match std::fs::read(path) {
         Ok(b) => b,
         Err(e) => {
@@ -187,10 +219,18 @@ pub fn examine_one(path: &Path) -> Record {
                 findings: Vec::new(),
                 worst: None,
                 unreadable: Some(e.to_string()),
+                identified: Vec::new(),
             };
         }
     };
     let size = bytes.len() as u64;
+    // Hash before `examine` consumes the bytes.
+    let identified = catalogue.map_or_else(Vec::new, |c| {
+        c.identify(&bytes)
+            .into_iter()
+            .map(|e| e.name.clone())
+            .collect()
+    });
     let health = examine(bytes);
 
     Record {
@@ -204,6 +244,7 @@ pub fn examine_one(path: &Path) -> Record {
         findings: health.findings.iter().map(|f| f.code).collect(),
         worst: health.worst(),
         unreadable: None,
+        identified,
     }
 }
 
@@ -216,7 +257,17 @@ pub fn examine_one(path: &Path) -> Record {
 /// The callback receives `(done, total)` after each image so a caller can show
 /// progress without this module knowing what a terminal is.
 #[must_use]
-pub fn run(paths: &[PathBuf], mut progress: impl FnMut(usize, usize)) -> Summary {
+pub fn run(paths: &[PathBuf], progress: impl FnMut(usize, usize)) -> Summary {
+    run_with(paths, None, progress)
+}
+
+/// As [`run`], but naming each image from a dataset as it goes (F-013).
+#[must_use]
+pub fn run_with(
+    paths: &[PathBuf],
+    catalogue: Option<&Catalogue>,
+    mut progress: impl FnMut(usize, usize),
+) -> Summary {
     let mut files = collect(paths);
     // Sorted so two runs over one corpus are comparable and a failure is
     // reproducible.
@@ -226,7 +277,10 @@ pub fn run(paths: &[PathBuf], mut progress: impl FnMut(usize, usize)) -> Summary
     let mut summary = Summary::default();
 
     for (index, path) in files.iter().enumerate() {
-        let record = examine_one(path);
+        let record = match catalogue {
+            Some(c) => examine_and_identify(path, c),
+            None => examine_one(path),
+        };
 
         summary.examined = summary.examined.saturating_add(1);
         if record.unreadable.is_some() {
@@ -257,6 +311,9 @@ pub fn run(paths: &[PathBuf], mut progress: impl FnMut(usize, usize)) -> Summary
         for code in seen {
             let count = summary.findings.entry(code).or_insert(0usize);
             *count = count.saturating_add(1);
+        }
+        if !record.identified.is_empty() {
+            summary.identified = summary.identified.saturating_add(1);
         }
         summary.records.push(record);
 

@@ -807,8 +807,33 @@ This is what confirms the layout rather than merely fitting it: the arithmetic c
 ## Flux formats
 
 - **Extended-ADF** — see above.
-- **SCP** — the open, documented flux container and ADE's write target (D-007). Header magic `SCP` at 0x00 with a version byte at 0x03; track data headers carry `TRK`. [SCP]
-- **IPF** — stores flux-transition timings. Reading requires the closed CAPS library; creation is SPS-only. Read-only, optional, licence-gated; ADE **cannot emit IPF** (C-003).
+- **SCP** — the open, documented flux container and ADE's write target (D-007). Header magic `SCP` at 0x00 with a version byte at 0x03; track data headers carry `TRK`. [SCP] Confirmed 2026-08-27: a generated file opens `53 43 50 00`, and ADE's sniffer already identifies it. See §SCP has material and an oracle.
+- **IPF** — stores flux-transition timings. Reading requires the closed CAPS library; creation is SPS-only. Read-only, optional, licence-gated; ADE **cannot emit IPF** (C-003). Independently corroborated 2026-08-27: Greaseweazle, which writes SCP and HFE happily, refuses IPF as an output format.
+
+### SCP has material and an oracle
+
+*Established 2026-08-27, and it reverses an earlier judgement.*
+
+SCP was recorded as blocked on material, on the grounds that not one `.scp` file existed here. That is no longer true. The **Greaseweazle host tools** (`gw`, installed from the project's own releases — it is not on PyPI) convert a plain sector image into real SCP, so every one of the 4652 corpus ADFs is potential material.
+
+More usefully, `gw` is an **independent implementation**, which makes it an oracle in exactly the sense D-002 and D-010 mean: run as a separate binary, source not read, disagreements adjudicated rather than assumed. Measured:
+
+| check | result |
+|---|---|
+| ADF → SCP → ADF, five varied disks | **5 of 5 byte-identical** |
+| ADF → HFE → ADF | byte-identical |
+| IPF as an output format | refused |
+| ADE's sniffer on a generated SCP | identified as `SCP flux` |
+
+That is the same footing gzip put ADZ on, and it is what made ADZ shippable.
+
+#### Two caveats that matter
+
+**SCP generation is not deterministic.** Converting one ADF twice produces two different SCP files: flux timings carry jitter, which is the point of the format. So an SCP fixture cannot be committed and compared byte for byte — it must be generated at test time, and the invariant to assert is the **round trip**, not the bytes. This suits D-010 anyway, which commits no binaries.
+
+**`gw` does not understand extended ADF.** Given `Wings of Death_DiskB.adf` — a 2,004,560-byte `UAE-1ADF` container — it read the first 901,120 bytes of the *file* as though they were sectors, header included, and reported "Found 1760 sectors of 1760 (100%)". The output decodes back to exactly those bytes, so the round trip is self-consistent and the input reading is nonsense.
+
+That is worth knowing before trusting it: `gw` is an oracle for **plain sector images only**. Pointed at a raw-track container it will silently agree with itself about the wrong data, and its confidence percentage describes its own encode rather than anything about the disk.
 
 ## MFM
 
@@ -896,8 +921,6 @@ Counting the baseline two different ways produced two contradictory pictures of 
 ### What this decoder still does not check
 
 Track length and bit-cell timing are not considered. Long tracks, variable-rate tracks and weak bits are all protection techniques that live in the *timing* rather than in the data, and reading them needs flux rather than MFM — which is what SCP and IPF carry and extended ADF does not.
-
-## Flux formats
 
 ## Corpus observations
 

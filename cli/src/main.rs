@@ -106,6 +106,8 @@ struct Args {
     partition: Option<String>,
     /// Where `consolidate` should write its merged image, if anywhere.
     output: Option<PathBuf>,
+    /// A directory of TOSEC datfiles, for identification (F-013).
+    datfiles: Option<PathBuf>,
     /// Write tracks as raw MFM rather than as sectors.
     ///
     /// A flag rather than an output extension because an extended ADF is also
@@ -120,6 +122,7 @@ fn parse_args(raw: Vec<String>) -> Result<Args, String> {
     let mut partition: Option<String> = None;
     let mut raw_output = false;
     let mut output: Option<PathBuf> = None;
+    let mut datfiles: Option<PathBuf> = None;
     for arg in raw {
         match arg.as_str() {
             "--raw" => raw_output = true,
@@ -130,6 +133,9 @@ fn parse_args(raw: Vec<String>) -> Result<Args, String> {
                     "unknown format: {}",
                     other.trim_start_matches("--format=")
                 ));
+            }
+            other if other.starts_with("--datfiles=") => {
+                datfiles = Some(PathBuf::from(other.trim_start_matches("--datfiles=")));
             }
             other if other.starts_with("--output=") => {
                 output = Some(PathBuf::from(other.trim_start_matches("--output=")));
@@ -154,6 +160,7 @@ fn parse_args(raw: Vec<String>) -> Result<Args, String> {
         partition,
         raw: raw_output,
         output,
+        datfiles,
     })
 }
 
@@ -192,7 +199,8 @@ fn main() -> ExitCode {
         ),
         ("convert", 2) => convert(Path::new(p(0)), Path::new(p(1)), args.raw),
         ("formats", 0) => formats(),
-        ("batch", n) if n >= 1 => batch(&args.positional, args.format),
+        ("batch", n) if n >= 1 => batch(&args.positional, args.format, args.datfiles.as_deref()),
+        ("identify", n) if n >= 1 => identify(&args.positional, args.datfiles.as_deref()),
         ("diff", 2) => diff_images(Path::new(p(0)), Path::new(p(1))),
         ("consolidate", n) if n >= 2 => {
             consolidate_images(&args.positional, args.output.as_deref())
@@ -223,6 +231,7 @@ fn usage() {
     println!("    ade convert <in> <out>             convert between containers (F-016)");
     println!("    ade formats                        what converts to what, and what it costs");
     println!("    ade batch <dir|image>...           verify a whole corpus (F-014)");
+    println!("    ade identify <image>...            name images from TOSEC datfiles (F-013)");
     println!("    ade diff <a> <b>                   where two dumps of a disk differ (F-009)");
     println!("    ade consolidate <a> <b> [...]      what several dumps agree on (F-008)");
     println!("    ade --version");
@@ -233,6 +242,7 @@ fn usage() {
     println!("    --partition=P   which partition of a hard disk, by name (DH0) or index (0)");
     println!("    --raw           convert writes raw MFM tracks (an extended ADF)");
     println!("    --output=P      consolidate writes the merged image to P");
+    println!("    --datfiles=D    directory of TOSEC .dat files, for identify");
     println!();
     println!("EXIT CODES:");
     println!("    0  clean   1  faults   2  usage   3  unreadable   4  no volume");
@@ -1291,11 +1301,27 @@ fn summarise(tracks: &[usize]) -> String {
 /// Progress goes to stderr and the summary to stdout, so the machine-readable
 /// output stays clean when a run is piped — a progress bar interleaved with
 /// JSON is worse than no progress bar.
-fn batch(paths: &[String], format: Format) -> ExitCode {
+fn batch(paths: &[String], format: Format, datfiles: Option<&Path>) -> ExitCode {
     let inputs: Vec<PathBuf> = paths.iter().map(PathBuf::from).collect();
     let show_progress = std::io::IsTerminal::is_terminal(&std::io::stderr());
 
-    let summary = ade_core::batch::run(&inputs, |done, total| {
+    // Optional: a corpus run that also names every disk is F-013 and F-014
+    // doing their jobs together.
+    let catalogue = match datfiles {
+        Some(dir) => match ade_core::layers::catalogue::Catalogue::load_dir(dir) {
+            Ok(c) => {
+                eprintln!("loaded {} entries from {} datfiles", c.len(), c.files());
+                Some(c)
+            }
+            Err(e) => {
+                eprintln!("ade: {}: {e}", dir.display());
+                return ExitCode::from(EXIT_UNREADABLE);
+            }
+        },
+        None => None,
+    };
+
+    let summary = ade_core::batch::run_with(&inputs, catalogue.as_ref(), |done, total| {
         if show_progress && (done % 25 == 0 || done == total) {
             eprint!("\r  {done} of {total} examined");
             let _ = std::io::stderr().flush();
@@ -1352,6 +1378,13 @@ fn report_batch(out: &mut impl Write, summary: &ade_core::Summary) {
         format!("  unreadable  {}", summary.unreadable),
         format!("  recovered   {} bytes", summary.bytes_recovered),
     ];
+    if summary.identified > 0 {
+        lines.push(format!(
+            "  identified  {} ({}%) named from the dataset",
+            summary.identified,
+            percent(summary.identified, summary.examined)
+        ));
+    }
 
     lines.push("  containers".to_owned());
     let mut containers: Vec<(&String, &usize)> = summary.containers.iter().collect();
@@ -1395,4 +1428,69 @@ fn report_batch(out: &mut impl Write, summary: &ade_core::Summary) {
 /// An integer percentage, because a proportion of a disk count is not a float.
 fn percent(part: usize, whole: usize) -> usize {
     part.saturating_mul(100).checked_div(whole).unwrap_or(0)
+}
+
+/// Name images by content hash against a dataset (F-013).
+fn identify(paths: &[String], datfiles: Option<&Path>) -> ExitCode {
+    let Some(dir) = datfiles else {
+        eprintln!("ade: identify needs --datfiles=<directory of .dat files>");
+        return ExitCode::from(EXIT_USAGE);
+    };
+    let catalogue = match ade_core::layers::catalogue::Catalogue::load_dir(dir) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("ade: {}: {e}", dir.display());
+            return ExitCode::from(EXIT_UNREADABLE);
+        }
+    };
+    eprintln!(
+        "loaded {} entries from {} datfiles",
+        catalogue.len(),
+        catalogue.files()
+    );
+
+    let mut named = 0usize;
+    let mut unknown = 0usize;
+    let mut out = std::io::stdout().lock();
+
+    for path in paths {
+        let bytes = match std::fs::read(path) {
+            Ok(b) => b,
+            Err(e) => {
+                eprintln!("ade: {path}: {e}");
+                unknown = unknown.saturating_add(1);
+                continue;
+            }
+        };
+        let matches = catalogue.identify(&bytes);
+        if matches.is_empty() {
+            unknown = unknown.saturating_add(1);
+            if !emit(&mut out, &format!("{path}\n  unknown — not in the dataset")) {
+                return ExitCode::from(EXIT_CLEAN);
+            }
+            continue;
+        }
+        named = named.saturating_add(1);
+        let mut lines = vec![path.clone()];
+        for entry in &matches {
+            lines.push(format!("  {}", entry.name));
+            lines.push(format!("    from {}", entry.source));
+        }
+        if matches.len() > 1 {
+            // A content hash is not an identity. Say so rather than pick.
+            lines.push(format!(
+                "    ! {} entries share this hash — ADE will not choose between them",
+                matches.len()
+            ));
+        }
+        for line in &lines {
+            if !emit(&mut out, line) {
+                return ExitCode::from(EXIT_CLEAN);
+            }
+        }
+    }
+
+    let _ = out.flush();
+    eprintln!("{named} identified, {unknown} unknown");
+    ExitCode::from(if unknown > 0 { EXIT_FAULTS } else { EXIT_CLEAN })
 }

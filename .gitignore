@@ -25,6 +25,12 @@
 *.ipf
 /disks/
 
+# --- TOSEC datfiles: third-party data, not committed (F-013) ---
+# Freely redistributable metadata rather than disk content, but 31 MB of
+# someone else's dataset does not belong in this repository any more than the
+# images do. Fetched locally; the parser is what ADE owns.
+/datfiles/
+
 # --- Qt6 / CMake GUI (Phase 5) ---
 /build/
 gui/build/

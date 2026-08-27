@@ -10,5 +10,6 @@ description = "ADE: content hashing, dataset matching, reporting, export"
 
 [dependencies]
 ade-object = { workspace = true }
+ade-block = { workspace = true }
 [lints]
 workspace = true
