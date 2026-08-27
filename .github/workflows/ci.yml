@@ -35,6 +35,20 @@ jobs:
       - name: Tests
         run: cargo test --workspace --all-targets
 
+      # The C ABI, compiled and run as C (D-001). `cargo test` exercises the
+      # bridge from Rust, which cannot catch the header disagreeing with the
+      # library — only a real C compiler reading ade.h can. Built with
+      # -Werror and run under AddressSanitizer, because a C ABI is the one
+      # place in ADE where a memory bug is possible at all.
+      - name: C ABI (header agreement, ASan)
+        run: |
+          cargo build --release -p ade-bridge
+          cc -Wall -Wextra -Werror -g -fsanitize=address,undefined \
+             -o /tmp/ade-smoke bridge/tests/smoke.c \
+             target/release/libade.a -lpthread -ldl -lm
+          cargo run --quiet -p ade-fixtures --bin mkfixture /tmp/ade-fixture.adf
+          ASAN_OPTIONS=detect_leaks=1 /tmp/ade-smoke /tmp/ade-fixture.adf
+
       # D-002's oracle, over fixtures ADE generates rather than a corpus it
       # cannot commit (D-010, amended 2026-08-24). ADFlib reads any structurally
       # valid volume regardless of who wrote it, so this puts an independent

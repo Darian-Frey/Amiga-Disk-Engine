@@ -13,6 +13,7 @@ members = [
     "src/api",
     # Front-ends.
     "cli",
+    "bridge",
     # Test support.
     "tools/fixtures",
 ]

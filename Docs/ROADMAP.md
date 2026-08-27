@@ -124,7 +124,11 @@ Neither run is the F-001 bar, which requires a fuzz corpus rather than well-form
 **Status:** In progress — batch operations landed 2026-08-26
 **Features delivered:** F-004, F-005, F-006, F-013, F-014
 **Deliverables:**
-- [ ] Qt6 GUI: tree + hex + preview, drag-drop, cross-image search (F-004).
+- [x] **C-ABI bridge** (D-001) — the seam the GUI links against, and the only place in ADE that writes `unsafe`. Opaque handles, explicit frees, and an error code rather than a Rust `Result`. `bridge/include/ade.h` is hand-written: ADE has no dependencies and a header is the contract with every future caller.
+  Three rules it exists to keep: **no panic crosses the boundary** (every entry point is wrapped in `catch_unwind`, because "should not panic" and "cannot unwind into C" are different claims); **names are bytes, not C strings** (Amiga filenames are Latin-1 and hold bytes above 0x7F, so a `char*` API would either lie about the encoding or mangle the name); and **null is tolerated everywhere**, since a C caller that has just had an error will pass one.
+  The `unsafe` exemption is **scoped, not granted**: the workspace *forbids* `unsafe_code` and `forbid` cannot be lifted by an inner `allow`, so the bridge crate opts out of the workspace lint set and restates every other lint verbatim.
+  Verified three ways: 8 Rust tests, a real C program compiled `-Wall -Wextra -Werror` against the hand-written header — which is the only thing that can catch the header disagreeing with the library — and that same program under AddressSanitizer, UBSan and LeakSanitizer, clean. CI runs the C check, generating its own fixture with the new `mkfixture` tool since D-010 commits no images.
+- [ ] Qt6 GUI: tree + hex + preview, drag-drop, cross-image search (F-004). The bridge is ready; this is the remaining half.
 - [ ] In-app Greaseweazle read/write (F-006); end-to-end pipeline wired (F-005).
 - [x] **Auto-identification against TOSEC (F-013)** — `ade identify --datfiles=DIR <image>...` names images by content hash, and `ade batch --datfiles=DIR` catalogues a whole corpus in one pass. `ade-catalogue` parses Logiqx XML datfiles and indexes them by CRC32.
   **4586 of 4652 corpus images identified (98%)** from 88,921 entries across 98 Amiga datfiles, recovering the full TOSEC name — year, publisher, disk number and the `[cr]`/`[b]`/`[m]` provenance tags a renamed file has lost. `1000cc Turbo.adf` becomes `1000cc Turbo (1990)(Energize)[cr CSL][t +3 Supplex]`.

@@ -43,6 +43,10 @@ POLICY = {
     # Front-ends see the core API and nothing else (F-002): no engine logic in
     # UI or CLI code, and no reaching past the seam to a layer directly.
     "ade-cli":        {"ade-core"},
+    # The C ABI the Qt6 GUI links against (D-001). Same rule as the CLI: it
+    # sees the core API and nothing else, so no engine logic can leak into a
+    # binding.
+    "ade-bridge":     {"ade-core"},
     # Test support, not part of the pipeline. Deliberately depends on nothing:
     # the fixture generator is an independent statement of the on-disk format,
     # so a misreading in a layer crate cannot cancel out against it (D-010).
