@@ -319,3 +319,66 @@ fn consolidate_writes_only_when_asked_and_never_overwrites() {
         let _ = fs::remove_file(p);
     }
 }
+
+#[test]
+fn batch_summarises_a_directory() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    static NEXT: AtomicUsize = AtomicUsize::new(0);
+    let n = NEXT.fetch_add(1, Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!("ade-batch-cli-{}-{n}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+
+    let mut sound = Volume::dd(1).named("Sound");
+    sound.add_file("startup", b"hello");
+    fs::write(dir.join("a.adf"), sound.build()).unwrap();
+    fs::write(dir.join("b.adf"), Volume::dd(1).named("Bare").build()).unwrap();
+
+    let out = Command::new(ade()).arg("batch").arg(&dir).output().unwrap();
+    let text = String::from_utf8_lossy(&out.stdout).into_owned();
+    let _ = fs::remove_dir_all(&dir);
+
+    assert!(text.contains("2 images examined"), "{text}");
+    assert!(text.contains("mounted     2"), "{text}");
+    assert!(text.contains("containers"), "{text}");
+}
+
+#[test]
+fn batch_json_emits_records_then_a_summary() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    static NEXT: AtomicUsize = AtomicUsize::new(0);
+    let n = NEXT.fetch_add(1, Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!("ade-batchjson-{}-{n}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(dir.join("a.adf"), Volume::dd(1).named("Jason").build()).unwrap();
+
+    let out = Command::new(ade())
+        .args(["batch", "--json"])
+        .arg(&dir)
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&out.stdout).into_owned();
+    let _ = fs::remove_dir_all(&dir);
+
+    let lines: Vec<&str> = text.lines().filter(|l| !l.trim().is_empty()).collect();
+    assert_eq!(lines.len(), 2, "one record then one summary\n{text}");
+    assert!(lines[0].contains("\"path\""), "{}", lines[0]);
+    assert!(lines[1].contains("\"examined\":1"), "{}", lines[1]);
+}
+
+#[test]
+fn batch_on_nothing_is_a_usage_error() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    static NEXT: AtomicUsize = AtomicUsize::new(0);
+    let n = NEXT.fetch_add(1, Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!("ade-batchempty-{}-{n}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+
+    let out = Command::new(ade()).arg("batch").arg(&dir).output().unwrap();
+    let _ = fs::remove_dir_all(&dir);
+
+    assert_eq!(out.status.code().unwrap_or(-1), 2, "usage");
+    assert!(String::from_utf8_lossy(&out.stderr).contains("nothing to examine"));
+}

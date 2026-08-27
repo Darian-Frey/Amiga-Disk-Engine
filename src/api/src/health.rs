@@ -554,13 +554,11 @@ fn cross_check_bitmap(
 ) -> Option<BitmapHealth> {
     let bitmap = Bitmap::read(image, volume.geometry(), volume.rootblock()).ok()?;
 
-    if !bitmap.flagged_valid {
-        findings.push(Finding::new(
-            "bitmap-flag-clear",
-            Severity::Warning,
-            "bitmap-valid flag is clear — the map may be stale (AV-003)",
-        ));
-    }
+    // The flag is not re-reported here: `Inspection` already raises
+    // `bitmap-flag-clear` from the rootblock, and `examine` inherits every
+    // inspection fault as a finding. Emitting it again listed the same warning
+    // twice in slightly different words — found by a batch run, where the code
+    // showed up on exactly twice as many images as carried it.
     for &bad in &bitmap.bad_checksums {
         findings.push(
             Finding::new(

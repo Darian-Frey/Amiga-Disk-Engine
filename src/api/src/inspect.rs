@@ -781,7 +781,7 @@ impl Inspection {
         if !r.bitmap_flag_valid() {
             faults.push(Fault::new(
                 "bitmap-flag-clear",
-                "bitmap-valid flag is clear — the bitmap may be stale",
+                "bitmap-valid flag is clear — the map may be stale (AV-003)",
             ));
         }
         if r.name_length_overflows() {

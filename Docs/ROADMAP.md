@@ -120,11 +120,14 @@ Neither run is the F-001 bar, which requires a fuzz corpus rather than well-form
 
 ## Phase 5 — Catalogue & GUI
 **Goal:** The single cross-platform application: capture-to-catalogue in one place.
-**Status:** Not started
+**Status:** In progress — batch operations landed 2026-08-26
 **Features delivered:** F-004, F-005, F-006, F-013, F-014
 **Deliverables:**
 - [ ] Qt6 GUI: tree + hex + preview, drag-drop, cross-image search (F-004).
 - [ ] In-app Greaseweazle read/write (F-006); end-to-end pipeline wired (F-005).
 - [ ] Auto-identification on ingest against TOSEC/WHDLoad/OpenRetro; ManifeST catalogue integration (F-013) — defines the future `VOCABULARY.md` contract.
-- [ ] Corpus-scale batch operations with machine-readable summaries (F-014).
+- [x] **Corpus-scale batch operations (F-014)** — `ade batch <dir|image>...` verifies a whole corpus in one pass and reports a histogram: containers, findings, how many mounted, how many are sound, bytes recovered. Text or JSON (records as JSON Lines, then a summary object). Progress goes to stderr so stdout stays the machine surface.
+  **The whole 4652-image corpus runs in 5.5 seconds at 9 MB peak** — one image is read, examined and dropped, so memory does not scale with the corpus. 3601 mount (77%), 2847 are sound (61%), none is unreadable, 2.2 GB of file content recovered.
+  Nothing aborts a run: an image that cannot be read becomes a record, because a pass over four thousand disks that stops at the first bad one has reported on one disk. Results are in sorted path order so two runs are comparable and a failure reproducible.
+  This is the capability every corpus measurement in SPEC was taken by hand-rolling a script for.
 **Acceptance:** A cold user images a real disk, sees it auto-identified and catalogued, and batch-verifies a multi-thousand-image corpus in one run.

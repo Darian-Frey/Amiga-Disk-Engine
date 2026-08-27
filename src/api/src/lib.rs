@@ -6,6 +6,7 @@
 //! coordination is permitted (D-003).
 
 pub mod assemble;
+pub mod batch;
 pub mod consolidate;
 pub mod convert;
 pub mod health;
@@ -13,6 +14,7 @@ pub mod inspect;
 pub mod json;
 
 pub use assemble::{Assembly, assemble};
+pub use batch::{Record, Summary};
 pub use consolidate::{Consolidation, Diff, consolidate, diff};
 pub use convert::{Conversion, conversion};
 pub use health::{

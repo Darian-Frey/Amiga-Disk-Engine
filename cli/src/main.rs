@@ -192,6 +192,7 @@ fn main() -> ExitCode {
         ),
         ("convert", 2) => convert(Path::new(p(0)), Path::new(p(1)), args.raw),
         ("formats", 0) => formats(),
+        ("batch", n) if n >= 1 => batch(&args.positional, args.format),
         ("diff", 2) => diff_images(Path::new(p(0)), Path::new(p(1))),
         ("consolidate", n) if n >= 2 => {
             consolidate_images(&args.positional, args.output.as_deref())
@@ -221,6 +222,7 @@ fn usage() {
     println!("    ade extract <image> <path> [dest]  extract a file");
     println!("    ade convert <in> <out>             convert between containers (F-016)");
     println!("    ade formats                        what converts to what, and what it costs");
+    println!("    ade batch <dir|image>...           verify a whole corpus (F-014)");
     println!("    ade diff <a> <b>                   where two dumps of a disk differ (F-009)");
     println!("    ade consolidate <a> <b> [...]      what several dumps agree on (F-008)");
     println!("    ade --version");
@@ -1282,4 +1284,115 @@ fn summarise(tracks: &[usize]) -> String {
         index = index.saturating_add(1);
     }
     parts.join(", ")
+}
+
+/// Verify a whole corpus and summarise it (F-014).
+///
+/// Progress goes to stderr and the summary to stdout, so the machine-readable
+/// output stays clean when a run is piped — a progress bar interleaved with
+/// JSON is worse than no progress bar.
+fn batch(paths: &[String], format: Format) -> ExitCode {
+    let inputs: Vec<PathBuf> = paths.iter().map(PathBuf::from).collect();
+    let show_progress = std::io::IsTerminal::is_terminal(&std::io::stderr());
+
+    let summary = ade_core::batch::run(&inputs, |done, total| {
+        if show_progress && (done % 25 == 0 || done == total) {
+            eprint!("\r  {done} of {total} examined");
+            let _ = std::io::stderr().flush();
+        }
+    });
+    if show_progress {
+        eprintln!();
+    }
+
+    if summary.examined == 0 {
+        eprintln!("ade: nothing to examine");
+        return ExitCode::from(EXIT_USAGE);
+    }
+
+    let mut out = std::io::stdout().lock();
+    match format {
+        Format::Json => {
+            // Records first as JSON Lines, then the summary object, so a
+            // consumer can stream the former and still get the latter.
+            for record in &summary.records {
+                if !emit(&mut out, &record.to_json().to_json()) {
+                    return ExitCode::from(EXIT_CLEAN);
+                }
+            }
+            emit(&mut out, &summary.to_json().to_json());
+        }
+        Format::Text => report_batch(&mut out, &summary),
+    }
+    let _ = out.flush();
+
+    ExitCode::from(if summary.unreadable > 0 || !summary.at_risk().is_empty() {
+        EXIT_DATA_AT_RISK
+    } else if summary.sound < summary.mounted {
+        EXIT_FAULTS
+    } else {
+        EXIT_CLEAN
+    })
+}
+
+/// The human-readable batch summary.
+fn report_batch(out: &mut impl Write, summary: &ade_core::Summary) {
+    let mut lines = vec![
+        format!("{} images examined", summary.examined),
+        format!(
+            "  mounted     {} ({}%)",
+            summary.mounted,
+            percent(summary.mounted, summary.examined)
+        ),
+        format!(
+            "  sound       {} ({}%)",
+            summary.sound,
+            percent(summary.sound, summary.examined)
+        ),
+        format!("  unreadable  {}", summary.unreadable),
+        format!("  recovered   {} bytes", summary.bytes_recovered),
+    ];
+
+    lines.push("  containers".to_owned());
+    let mut containers: Vec<(&String, &usize)> = summary.containers.iter().collect();
+    containers.sort_by(|a, b| b.1.cmp(a.1));
+    for (name, count) in containers.iter().take(10) {
+        lines.push(format!("    {count:>6}  {name}"));
+    }
+
+    if summary.findings.is_empty() {
+        lines.push("  findings    none".to_owned());
+    } else {
+        lines.push("  findings".to_owned());
+        let mut findings: Vec<(&&str, &usize)> = summary.findings.iter().collect();
+        findings.sort_by(|a, b| b.1.cmp(a.1));
+        for (code, count) in findings {
+            lines.push(format!("    {count:>6}  {code}"));
+        }
+    }
+
+    let at_risk = summary.at_risk();
+    if !at_risk.is_empty() {
+        lines.push(format!("  at risk      {} images", at_risk.len()));
+        for record in at_risk.iter().take(10) {
+            lines.push(format!("    {}", record.path.display()));
+        }
+        if at_risk.len() > 10 {
+            lines.push(format!(
+                "    ... and {} more",
+                at_risk.len().saturating_sub(10)
+            ));
+        }
+    }
+
+    for line in &lines {
+        if !emit(out, line) {
+            return;
+        }
+    }
+}
+
+/// An integer percentage, because a proportion of a disk count is not a float.
+fn percent(part: usize, whole: usize) -> usize {
+    part.saturating_mul(100).checked_div(whole).unwrap_or(0)
 }
