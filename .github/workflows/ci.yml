@@ -49,6 +49,17 @@ jobs:
           cargo run --quiet -p ade-fixtures --bin mkfixture /tmp/ade-fixture.adf
           ASAN_OPTIONS=detect_leaks=1 /tmp/ade-smoke /tmp/ade-fixture.adf
 
+      # The Qt6 front end (F-004). Headless: what the window *shows* needs no
+      # display, and only how it *feels* needs a person.
+      - name: Install Qt6
+        run: sudo apt-get update && sudo apt-get install -y qt6-base-dev cmake
+
+      - name: GUI build and tests
+        run: |
+          cmake -S gui -B gui/build -DCMAKE_BUILD_TYPE=Release
+          cmake --build gui/build
+          QT_QPA_PLATFORM=offscreen ctest --test-dir gui/build --output-on-failure
+
       # D-002's oracle, over fixtures ADE generates rather than a corpus it
       # cannot commit (D-010, amended 2026-08-24). ADFlib reads any structurally
       # valid volume regardless of who wrote it, so this puts an independent
