@@ -1,4 +1,4 @@
-//! Big-endian conversion — the single byte-order seam.
+//! Byte-order conversion — the single seam.
 //!
 //! **C-001.** All Amiga on-disk data is 68k big-endian; the host is
 //! little-endian. Every conversion in ADE routes through this crate, and no
@@ -8,6 +8,12 @@
 //!
 //! Every accessor is bounds-checked and returns a typed error carrying the
 //! offset that failed — there is no panicking path, per D-006 and F-001.
+//!
+//! Most of what ADE reads is big-endian, so the unsuffixed readers are the
+//! big-endian ones. Little-endian readers exist for *containers*: SCP's header
+//! and offsets are little-endian while its flux values are big-endian, and a
+//! seam that only understood one order would have forced the other to be
+//! written inline, which is the thing C-001 forbids.
 
 use core::fmt;
 
@@ -75,6 +81,37 @@ reader!(u32_at, u32, 4, "Read a big-endian `u32`.");
 reader!(u64_at, u64, 8, "Read a big-endian `u64`.");
 reader!(i16_at, i16, 2, "Read a big-endian `i16`.");
 reader!(i32_at, i32, 4, "Read a big-endian `i32`.");
+
+/// Little-endian readers, for containers rather than for Amiga data.
+///
+/// Nothing an Amiga wrote is little-endian, and for the first seven months of
+/// ADE nothing needed these. SCP does: its header, track table and revolution
+/// entries are little-endian, while its flux values are big-endian — **one
+/// format, both orders** ([SCP], verified against a generated file: a flux
+/// entry of `009e` is 158 ticks read big-endian and 40448 read little-endian,
+/// and 158 × 25 ns is exactly one 4 µs MFM interval while 40448 is a
+/// millisecond).
+///
+/// That is precisely why they live here rather than as an inline
+/// `from_le_bytes` at the one call site that needs them. C-001 exists so that
+/// byte order is never implicit, and a format that uses both orders is the
+/// case that punishes implicitness hardest: the wrong choice does not fail, it
+/// silently produces a number a thousand times too large.
+macro_rules! reader_le {
+    ($name:ident, $ty:ty, $width:expr, $doc:literal) => {
+        #[doc = $doc]
+        #[allow(
+            clippy::disallowed_methods,
+            reason = "C-001: this crate is the single exemption"
+        )]
+        pub fn $name(buf: &[u8], offset: usize) -> Result<$ty, OutOfBounds> {
+            Ok(<$ty>::from_le_bytes(bytes_at::<$width>(buf, offset)?))
+        }
+    };
+}
+
+reader_le!(u16_le_at, u16, 2, "Read a little-endian `u16`.");
+reader_le!(u32_le_at, u32, 4, "Read a little-endian `u32`.");
 
 macro_rules! writer {
     ($name:ident, $ty:ty, $width:expr, $doc:literal) => {

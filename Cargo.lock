@@ -78,6 +78,7 @@ name = "ade-flux"
 version = "0.0.0"
 dependencies = [
  "ade-block",
+ "ade-endian",
  "ade-track",
 ]
 

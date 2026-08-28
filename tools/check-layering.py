@@ -28,7 +28,10 @@ POLICY = {
     "ade-block":      {"ade-endian"},
     "ade-container":  {"ade-block", "ade-endian"},
     "ade-track":      {"ade-block", "ade-endian"},
-    "ade-flux":       {"ade-track", "ade-block"},
+    # Also `ade-endian`: SCP is the first container ADE reads whose fields are
+    # little-endian, and C-001 requires every byte-order conversion to route
+    # through the seam rather than be written inline (2026-08-28).
+    "ade-flux":       {"ade-track", "ade-block", "ade-endian"},
     "ade-filesystem": {"ade-block", "ade-endian"},
     "ade-object":     {"ade-filesystem"},
     # Also `ade-block`, for CRC32 (F-013). Content identification and gzip need

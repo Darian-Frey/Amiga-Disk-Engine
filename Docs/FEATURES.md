@@ -13,7 +13,11 @@ Retro-computing preservationists, demoscene archivists, and forensic hobbyists w
 
 ## Features
 
-Priorities are MoSCoW (Must / Should / Could / Won't). Effort is rough and pre-spike (S = days, M = weeks, L = months). "Phase" references [ROADMAP.md](ROADMAP.md). All statuses are **Not started** — this is a planning-stage repository.
+Priorities are MoSCoW (Must / Should / Could / Won't). Effort is rough and pre-spike (S = days, M = weeks, L = months). "Phase" references [ROADMAP.md](ROADMAP.md).
+
+**Statuses audited 2026-08-28** against what the built binaries actually do, command by command, rather than against ROADMAP's phase notes. Nine of them said "Not started" for work that had shipped, and two things the audit found are worth stating here because they are easy to re-import: ROADMAP's per-phase **"Features in scope"** line is a scope list, not a delivery record — it names features the phase covers, including ones not begun — and a feature can be *delivered* and *not met* at once, because a decision has since ruled part of its acceptance out (F-011).
+
+Status vocabulary: **Not started** | **In progress** | **Partially delivered** (some acceptance clauses met, the rest identified) | **Delivered** (every clause met) | **Met** (delivered and verified against something external).
 
 ### F-001 Defensive, fuzz-hardened core
 **Priority:** Must
@@ -33,7 +37,9 @@ Priorities are MoSCoW (Must / Should / Could / Won't). Effort is rough and pre-s
 **Acceptance:**
 - Core exposes a documented library API consumed by both a CLI and (later) the GUI, with no engine logic living in UI code.
 - No single module owns more than one pipeline layer (anti-god-class; see D-003).
-**Status:** Not started
+**Status:** Met 2026-08-27
+**Evidence:** `ade-core` is the documented library API; the `ade` CLI and the Qt6 GUI both consume it and nothing else — the GUI reaches it through the C ABI (`ade-bridge`), which `tools/check-layering.py` holds to depending on `ade-core` alone. The anti-god-class clause is machine-checked across all 12 crates on every push, not asserted: a cross-layer dependency fails CI.
+**What proves the "no engine logic in UI" half** is the GUI's search. It needed a whole-volume walk, and the walk went into the ABI rather than into Qt, because traversal carries cycle detection. The rule held under pressure from a real feature, which is the only test of it that counts.
 **Notes:** The "Pontus pattern" (D-001). Serves bulk-corpus and casual users from one core.
 
 ### F-003 One transparent open-path for every container
@@ -42,7 +48,10 @@ Priorities are MoSCoW (Must / Should / Could / Won't). Effort is rough and pre-s
 **Acceptance:**
 - A single "open" entry point accepts ADF, ADZ, HDF, HDZ, DMS, SCP, and extended-ADF, and (optionally) IPF-read, dispatching by content sniffing not extension.
 - Gzip-wrapped containers (ADZ/HDZ) are handled transparently.
-**Status:** Not started
+**Status:** Partially delivered — six of eight containers open
+**What opens and mounts:** ADF (DD, HD and 81–83-cylinder), ADZ, HDF, HDZ, extended ADF, and **SCP flux** (2026-08-28). Dispatch is by content sniffing, and the evidence for the decision is printed.
+**What is recognised but not read:** DMS and IPF. Both sniff correctly and say so rather than failing — the honest half of the acceptance clause working, though the clause itself is not yet met.
+**Why each is outstanding:** DMS waits on D-009 and material (only HEAVY2 files were ever found); IPF stays licence-gated behind C-003 and D-007, and Greaseweazle refusing IPF as an output format corroborates that independently.
 **Notes:** Normalises everything into the block layer. Bounded by C-003 (no IPF write) and C-004 (DMS lossiness).
 **Design constraint found 2026-08-22 (C-008):** a plain ADF has **no magic number**, and an unpartitioned HDF has only the `DOS` prefix it shares with every ADF. Content sniffing cannot be a magic lookup; it is a cascade of weighted evidence. Measured against 4288 real images: 7% do not begin with `DOS` at all (144 distinct custom bootloaders), only 74% of those that do have a valid bootblock checksum, 19% of them have no rootblock at block 880, and ten non-`DOS` images mount cleanly. Sizes are not fixed either — 81-, 82- and 83-cylinder ADFs occur. The open path must report what it decided and why, so a misidentification shows up in the health report rather than silently. See SPEC §The sniffing problem and §Corpus observations.
 
@@ -62,7 +71,8 @@ Priorities are MoSCoW (Must / Should / Could / Won't). Effort is rough and pre-s
 **Effort:** L · **Phase:** 4–5
 **Acceptance:**
 - A user can go flux capture → image → filesystem browse → catalogue → write-back without leaving the app or hand-invoking a third-party tool.
-**Status:** Not started
+**Status:** Not started as a pipeline — four of its five stages exist separately
+**Where it stands:** image, filesystem browse and catalogue all work, in both the CLI and the GUI; capture and write-back need the Greaseweazle (F-006), and nothing chains the stages into one flow. The feature is a *sequence*, so having the pieces is not having it.
 **Notes:** Depends on F-003, F-006. The current ecosystem forces a relay race across gw / disk-utilities / xDMS / a browser.
 
 ### F-006 In-app Greaseweazle read/write
@@ -71,7 +81,8 @@ Priorities are MoSCoW (Must / Should / Could / Won't). Effort is rough and pre-s
 **Acceptance:**
 - Detect a connected Greaseweazle; read a disk to an image and write an image to disk from within the app.
 - Drive-unit and disk-definition selection handled through the UI, not raw `--drive` / `diskdefs` flags.
-**Status:** Not started
+**Status:** Not started — blocked on hardware
+**Blocked on:** a physical Greaseweazle board. The host tools are installed and verified as an SCP oracle (2026-08-27), which unblocked the *format*; detecting and driving a device cannot be written against nothing.
 **Notes:** Demand evidenced by the third-party GUI proliferation (Desert Sage, FluxMyFluffyFloppy, EasyRead). Depends on D-007.
 
 ### F-007 Extended-ADF / SCP as a browsable first-class citizen
@@ -79,7 +90,10 @@ Priorities are MoSCoW (Must / Should / Could / Won't). Effort is rough and pre-s
 **Effort:** L · **Phase:** 4
 **Acceptance:**
 - Open an SCP or extended-ADF and view the raw MFM track alongside the mounted, decodable filesystem in one view.
-**Status:** Not started
+**Status:** Delivered 2026-08-28 — both halves of the clause
+**Evidence:** one `ade info` on an extended ADF *or* an SCP reports the track table, how many tracks are raw MFM, how many decoded, and the volume mounted from them. A 30 MB flux capture of `1000cc Turbo` shows its capture parameters, 160 of 160 tracks decoded, 1760 sound sectors, 100% recovered and the rootblock legible at 880 — in 0.4 seconds. `ls`, `check` and `extract` then work on it like any disk. The raw and filesystem views are the same report, which is the clause.
+**Always says it is a reconstruction.** Undecodable sectors are zeros, and zeros make a listing quietly omit half a disk, so no assembled volume is ever mounted without `sectors_placed` alongside it, and `check` raises `volume-reconstructed` as an explicit finding.
+**A flux capture reports how it was captured**, separately from what it holds: revolutions stored, resolution, RPM, index alignment, and — the line a preservationist should read twice — whether the timings were **normalised**, since a normalised capture has already had the jitter that carries weak bits averaged out of it.
 **Notes:** Most browsers punt on extended ADF entirely. Enabled by D-005 (raw-MFM-capable model from day one).
 
 ### F-008 Multi-read flux consolidation
@@ -87,7 +101,9 @@ Priorities are MoSCoW (Must / Should / Could / Won't). Effort is rough and pre-s
 **Effort:** L · **Phase:** 4
 **Acceptance:**
 - Merge N reads of the same disk into a best-estimate image with a per-track confidence/quality report identifying unresolved tracks.
-**Status:** Not started
+**Status:** Delivered 2026-08-26 — `ade consolidate`
+**What exists:** N dumps merge per sector, with a per-track report naming the disputed tracks and how the votes fell.
+**It reports agreement, not correctness**, and the distinction is not pedantic. The clause assumes N reads of one physical disk, where disagreement means a read failed. The corpus's multi-dump titles are independent dumps of possibly *different copies* — several TOSEC-tagged `[m ...]`, i.e. deliberately edited — and one pair differs in exactly one sector: the rootblock, by 17 bytes of volume datestamp, with neither dump wrong. So it declines to call a winner correct, and **two dumps cannot vote at all**, since every disagreement ties by definition.
 **Notes:** Marginal disks need repeated reads; open tooling merges them poorly. Pairs with F-009.
 
 ### F-009 Image / disk diffing
@@ -95,7 +111,8 @@ Priorities are MoSCoW (Must / Should / Could / Won't). Effort is rough and pre-s
 **Effort:** M · **Phase:** 2, 5
 **Acceptance:**
 - Compare two images of the same title block-by-block (and file-by-file) and report differences.
-**Status:** Not started
+**Status:** Delivered 2026-08-26 — `ade diff`
+**What exists:** two images compare block by block, with the differing blocks named and located rather than a bare "they differ". Text output only; `--format=json` is not honoured here (see F-015).
 **Notes:** No convenient tool does this; essential for validating repeated reads. Uses F-008 output.
 
 ### F-010 Health / integrity report
@@ -115,7 +132,10 @@ Priorities are MoSCoW (Must / Should / Could / Won't). Effort is rough and pre-s
 **Effort:** S · **Phase:** 3
 **Acceptance:**
 - Scan bootblocks against a signature set for known historical viruses and flag matches; never execute bootblock code.
-**Status:** Not started
+**Status:** Half delivered, half **declined by D-014** — the acceptance clause as written will not be met
+**What ships:** boot-code text extraction. `ade info` prints the printable runs found in a bootblock, filtered so the result is prose rather than 68k opcodes — `NqNqNq` is `NOP` repeated, and 91% of kept runs contain a space. On a cracked disk it recovers exactly what it should: *"DEFJAM and CCS Proudly Present … CRACKED BY: -IL SCURO-"*.
+**What will not ship in this form:** matching those strings against virus names. It is *measurably backwards* — every corpus disk naming a strain carries an **anti-virus** bootblock, because cracking groups shipped virus killers. ADE reports the text and draws no verdict (D-014).
+**AV-002's real defence is structural**, not a scanner: ADE has no execution path of any kind, pinned by tests using boot code written to be hostile to an interpreter. Revisiting this needs a checkable signature set to exist, which is D-014's reversal condition.
 **Notes:** The original 1990 DMS had this; modern convenient tools dropped it. Relates to AV-002.
 
 ### F-012 GUI undelete / salvage
@@ -123,7 +143,9 @@ Priorities are MoSCoW (Must / Should / Could / Won't). Effort is rough and pre-s
 **Effort:** M · **Phase:** 2
 **Acceptance:**
 - Detect recoverable deleted entries and restore them through the GUI, with a clear recoverability indicator.
-**Status:** Not started
+**Status:** Not started — blocked on material, not effort
+**Blocked on:** something to recover. A survey of 90 corpus disks found **zero intact deleted file headers**: mastered game and application disks have no editing history, so the case the feature exists for does not occur in the corpus. Writing a salvager with nothing to salvage means testing it only against fixtures built from the same assumptions as the code — the trap D-002 was written to avoid.
+**What would unblock it:** disks with a real editing history (user data disks, work disks), or a decision to accept fixture-only evidence, which is a DECISIONS entry rather than a coding choice.
 **Notes:** DiskSalv is Amiga-native and ancient; ADFlib's undelete is CLI-only.
 
 ### F-013 Auto-identification on ingest
@@ -131,15 +153,21 @@ Priorities are MoSCoW (Must / Should / Could / Won't). Effort is rough and pre-s
 **Effort:** M · **Phase:** 5
 **Acceptance:**
 - On open, content-hash the image and match against TOSEC / WHDLoad / OpenRetro datasets; expose results to a ManifeST-style catalogue.
-**Status:** Not started
-**Notes:** Game-art lookups exist (FS-UAE/OpenRetro) but not for forensic image management. Will define the ManifeST contract (future VOCABULARY.md).
+**Status:** Partially delivered 2026-08-27 — TOSEC only
+**What exists:** `ade identify --datfiles=DIR <image>...` and `ade batch --datfiles=DIR`, indexing Logiqx datfiles by CRC32. **4586 of 4652 corpus images identified (98%)** from 88,921 entries across 98 datfiles, recovering the full TOSEC name a renamed file has lost.
+**CRC32 is a content hash, not an identity** — 71 collisions measured within the dataset, and size does not separate them because colliding pairs share a length. So `identify` returns *every* match and says when there is more than one, rather than choosing.
+**Outstanding:** WHDLoad and OpenRetro as further datasets, the ManifeST contract (future `VOCABULARY.md`), and identification on *open* rather than on demand — today it is a command, not something the open path does.
+**Notes:** Game-art lookups exist (FS-UAE/OpenRetro) but not for forensic image management.
 
 ### F-014 Corpus-scale batch operations
 **Priority:** Must
 **Effort:** M · **Phase:** 5
 **Acceptance:**
 - Bulk verify / convert / catalogue / report across thousands of images in one run, with a machine-readable summary.
-**Status:** Not started
+**Status:** Delivered 2026-08-26 except bulk convert — `ade batch`
+**What exists:** verify, catalogue and report across a whole corpus in one run, text or JSON (records as JSON Lines, then a summary object). **The 4652-image corpus runs in 5.5 seconds at 9 MB peak**, because one image is read, examined and dropped — memory does not scale with the corpus. Nothing aborts a run: an unreadable image becomes a record, since a pass over four thousand disks that stops at the first bad one has reported on one disk.
+**Missing clause:** bulk *convert*. `ade convert` is per-image; `ade batch` does not drive it.
+**A histogram counts images, not occurrences** — one damaged disk raising a code fifty times is one affected disk. Getting that wrong made 186 images read as 1050.
 **Notes:** No friendly tool scales to the 4,500-image-corpus workflow hit on the ST. Depends on F-002, F-013.
 
 ### F-015 Stable scriptable surface
@@ -147,9 +175,9 @@ Priorities are MoSCoW (Must / Should / Could / Won't). Effort is rough and pre-s
 **Effort:** M · **Phase:** 1+
 **Acceptance:**
 - A documented, versioned CLI and library binding suitable for automation, with stable exit codes and structured output.
-**Status:** In progress — exit codes and JSON output landed 2026-08-22 (IMP-001)
-**What exists:** five documented exit codes distinguishing clean / faults / usage / unreadable / no-volume; `--format=json` on `info` and `ls`, the latter as JSON Lines; typed faults with stable kebab-case codes. Output is pure ASCII, so Latin-1 Amiga names round-trip losslessly. Verified across 4288 images: 68,961 JSON Lines, all valid.
-**Still to come:** a library binding, and a version policy for the JSON schema itself.
+**Status:** In progress — exit codes and JSON landed 2026-08-22 (IMP-001), the library binding 2026-08-27
+**What exists:** five documented exit codes distinguishing clean / faults / usage / unreadable / no-volume; `--format=json` on `info`, `ls`, `check` and `batch`; typed faults with stable kebab-case codes; and a C ABI (`bridge/include/ade.h`) that is the library binding half of the clause, hand-written and checked by a real C compiler on every push. Output is pure ASCII, so Latin-1 Amiga names round-trip losslessly. Verified across 4288 images: 68,961 JSON Lines, all valid.
+**Still to come:** a version policy for the JSON schema itself, and JSON from `diff`, `consolidate`, `identify` and `formats` — which today accept `--format=json` and ignore it (BUG-007).
 **Notes:** Friendly tools aren't scriptable; the scriptable one (amitools) is slow. Depends on F-002.
 
 ### F-016 Format-conversion matrix
@@ -157,7 +185,10 @@ Priorities are MoSCoW (Must / Should / Could / Won't). Effort is rough and pre-s
 **Effort:** M · **Phase:** 3–4
 **Acceptance:**
 - Convert any supported input container to any supported output, refusing or warning honestly where lossy or impossible (e.g. no IPF write, DMS `errdms`).
-**Status:** Not started
+**Status:** Delivered 2026-08-25 — `ade convert` and `ade formats`
+**What exists:** every pair of formats has an explicit answer carrying its own reason. The conversions that run are the decompression direction (ADZ→ADF, HDZ→HDF), whose reader is proven byte-identical against `gzip`, copies between sector containers, and sector→raw-MFM via `--raw`.
+**Lossy conversions are refused outright, not warned about.** A warning nobody reads is how the loss happens.
+**Refused and not-implemented are kept apart**, because they invite opposite follow-up: IPF is a decision that does not expire (C-003), DMS is a gap with a cause (D-009).
 **Notes:** Conversions are today scattered across single-purpose tools; lossiness rarely surfaced. Bounded by C-003, C-004.
 
 ### F-017 FUSE mount of an image

@@ -7,7 +7,7 @@ Background context (why ADE exists, the documentation landscape survey, and the 
 ## Phase 0 — Scaffold & decisions
 **Goal:** Stand up the plan-first documentation set and resolve the two stack decisions that gate all code.
 **Status:** Complete 2026-08-22
-**Features delivered:** —
+**Features in scope:** —
 **Deliverables:**
 - [x] Documentation scaffold (this set) to the project-scaffold standard.
 - [x] Resolve **D-001** (language/stack) — Accepted 2026-08-21 as Rust core + Qt6 over a C-ABI bridge.
@@ -25,7 +25,7 @@ Background context (why ADE exists, the documentation landscape survey, and the 
 ## Phase 1 — Read-only ADF core (happy path)
 **Goal:** Parse and extract from plain 880 KB DD ADF images, defensively, through the chosen stack.
 **Status:** In progress — first vertical slice landed 2026-08-22
-**Features delivered:** F-001, F-002 (initial), F-003 (ADF/ADZ), F-010 (initial), F-015 (initial)
+**Features in scope:** F-001, F-002 (initial), F-003 (ADF/ADZ), F-010 (initial), F-015 (initial)
 **Deliverables:**
 - [x] **`ade info <image>`** — the first vertical slice, cutting container → block → endian → filesystem so every seam is exercised before integration rather than after. Reports container kind with its evidence, bootblock, and volume as independent facts (C-008), with stable exit codes (F-015).
 - [x] Bootblock parse + checksum; both checksum algorithms in `ade-block::checksum` as separately named functions. RDB *detection* (parsing is Phase 2).
@@ -56,7 +56,7 @@ Neither run is the F-001 bar, which requires a fuzz corpus rather than well-form
 ## Phase 2 — Filesystem breadth
 **Goal:** Cover the full non-flux filesystem surface, including hard-disk images, plus forensic recovery.
 **Status:** In progress
-**Features delivered:** F-009 (initial), F-010 *(largely delivered early, 2026-08-24)*, F-012, F-017, F-018 *(reading half delivered 2026-08-24; the GUI half waits on Phase 5)*
+**Features in scope:** F-009 (initial), F-010 *(largely delivered early, 2026-08-24)*, F-012, F-017, F-018 *(reading half delivered 2026-08-24; the GUI half waits on Phase 5)*
 **Deliverables:**
 - [x] HD (1.76 MB) geometry — mounts, round-trips OFS and FFS, rootblock computed at 1760 rather than read (C-007). Extra-cylinder (81–83) geometries too. Cross-checked against ADFlib.
 - [x] Dostype identification and hashing across all eight, including the international variants, cross-checked against ADFlib on accented filenames (C-006).
@@ -74,7 +74,7 @@ Neither run is the F-001 bar, which requires a fuzz corpus rather than well-form
 ## Phase 3 — Containers & compression
 **Goal:** Absorb the compressed and packaged formats transparently, with honest lossiness reporting.
 **Status:** In progress — everything unblocked is delivered; DMS remains blocked on material (D-009)
-**Features delivered:** F-003 (DMS/HDZ), F-011, F-016
+**Features in scope:** F-003 (HDZ/ADZ delivered; DMS is not), F-011 *(banner half delivered; scanning declined by D-014)*, F-016
 **Deliverables:**
 - [x] **ADZ / HDZ gzip at the container front-end** — a DEFLATE decoder ([RFC 1951]) and gzip wrapper ([RFC 1952]) written from the specifications, since the workspace has no dependencies. An ADZ now inspects, mounts, lists, extracts and health-checks exactly as the ADF inside it, with the wrapper reported rather than hidden. Verified against the system `gzip` on real corpus images — byte-identical, which is a stronger oracle than D-002's, because there is no interpretive gap to adjudicate. AV-005 is discharged for this path: a 970 KB stream expanding to 1 GB is refused at a peak RSS of 515 MB against a 512 MiB cap, and the cap is checked before every write rather than after.
 - [ ] DMS (all modes + encrypted) by whichever route D-009 settles on. **Still blocked on test data** — there is not one DMS file to work from, and D-009 records why writing a decompressor with nothing to decompress is the failure D-002 and D-010 exist to prevent.
@@ -92,8 +92,8 @@ Neither run is the F-001 bar, which requires a fuzz corpus rather than well-form
 
 ## Phase 4 — Track / flux level
 **Goal:** Handle the copy-protection frontier — the Amiga analogue of STX/Pasti — on the open flux path.
-**Status:** In progress — the extended-ADF container reads; MFM decoding is next
-**Features delivered:** F-003 (SCP/ext-ADF/IPF-read), F-005 (initial), F-007, F-008
+**Status:** In progress — extended ADF and SCP both read; what is left is timing-level protection, which needs real protected media
+**Features in scope:** F-003 (extended ADF and SCP delivered; IPF-read is not), F-005, F-007, F-008
 **Deliverables:**
 - [x] **Extended-ADF reading** — the track table parses, each track's kind and extent are reported, and damage is a fault rather than a failure. All eleven corpus images parse; `Demolition.adf` is genuinely truncated 25,732 bytes short and yields 163 of its 166 tracks instead of nothing.
   Two readings a plausible implementation gets wrong, both now measured and pinned: **`space` is the file allocation and `length` the meaningful extent** — `length` is 45056 bits for all 428 type-0 tracks while `space` is 5632, 12650 or 12668 depending on the writer — and **a track may be empty**, 154 having both fields zero.
@@ -107,7 +107,12 @@ Neither run is the F-001 bar, which requires a fuzz corpus rather than well-form
 - [x] **Extended-ADF write, and MFM encoding** — the inverse of the decoder, and verified by it. A whole disk encoded track by track into raw MFM, written as an extended ADF, read back, decoded and reassembled comes out **byte-identical** and mounts under its own name. That closed loop is what D-004 asks for: the read path was proven first, at 2095 corpus sectors with agreeing checksums, which is what makes the decoder a trustworthy judge of the encoder.
   Clock bits are **computed**, not left clear — a test helper can skip that and a real encoder cannot, since a clock bit depends on the data bit before it and so cannot be computed field by field. The sync words are excluded deliberately; their illegality is what makes them findable.
   `ade convert --raw in.adf out.adf` writes one. A flag rather than an output extension, because an extended ADF is also called `.adf` and inventing a convention would be presumptuous. The matrix now records sector image → raw MFM as **lossless**, which it provably is.
-- [ ] **SCP read/write (D-007) — unblocked 2026-08-27**, reversing the earlier "no material" note. The Greaseweazle host tools convert any sector image into real SCP, so all 4652 corpus ADFs are potential material, and `gw` is an *independent implementation* and therefore an oracle in D-002's sense. Verified: five varied disks round-trip ADF → SCP → ADF **byte-identically**, HFE likewise, and ADE's sniffer already identifies a generated SCP. Two caveats in SPEC §SCP has material and an oracle: generation is **not deterministic** (flux jitter, so assert the round trip rather than the bytes), and `gw` **silently mis-reads extended ADFs** as plain sector data.
+- [x] **SCP reading (D-007) — delivered 2026-08-28.** `ade-flux` parses the container and turns flux intervals into MFM bits; `ade-track` already knew how to find sectors in those, and `assemble_scp` places them by physical position. A capture opens, mounts, lists, checks and extracts like any other image — a 30 MB file in 0.4 seconds.
+  **Two byte orders in one format.** Header, track table and revolution entries are little-endian; flux values are big-endian. `009e` is 158 one way and 40448 the other, and only one of those is an interval a drive produces — so `ade-endian` gained little-endian readers rather than letting the exception be written inline, and `clippy.toml` gained the `from_le_bytes` entries that had never been needed before. C-001's tripwire had a hole for exactly as long as nothing was little-endian.
+  **The bit-cell width is not in the file** and has to be tracked, because motor speed drifts within a revolution and a fixed divisor accumulates that drift into a wrong bit. Two failures worth keeping: a correction of one sixteenth of one tick is **zero** in integer arithmetic, so the loop silently never ran while reporting perfect lock; and flux at a wrong data rate rejects every interval, never corrects, never drifts, and again reports perfect lock. Both are now what "locked" means — small drift *and* under 5% of intervals rejected.
+  **Every stored revolution is merged, not chosen between.** They are not duplicates: a marginal region reads differently each time, which is why the format keeps several. That is F-008's merge inside one file, and the concrete reason flux beats a sector image of the same disk.
+  Verified against `gw` as an independent implementation (D-002's rule, second format): a generated fixture and three corpus disks round-trip **byte-identically**, and 20 corpus disks produce identical listings, every one recovering 1760 of 1760 sectors. What that cannot show is anything flux exists for — `gw` encodes ordinary disks, so no weak bits, long tracks or illegal MFM are in evidence. That gap needs real protected media and the hardware F-006 waits on.
+  Writing SCP remains undone: D-004 puts write paths behind proven read paths, and this one is a day old.
 - [ ] Optional read-only IPF behind a licence-gated feature flag (C-003). Still gated: `gw` writes SCP and HFE but refuses IPF as an output, which corroborates the constraint independently.
 - [ ] **Consider FDI** as a second licence-free flux format alongside SCP. It stores raw low-level track data like IPF, but its specification is public and its tools are open source, where C-003 forbids ADE from ever emitting IPF — so it is the only route to *writing* an interchange format that carries copy protection. Not committed; see SPEC §FDI is the licence-free flux format. Its magic bytes need verifying first.
 - [x] **Raw-track + filesystem dual view (F-007)** — an extended ADF is reported *both* as a track table, which is what it is, and as a volume, which is what most of it holds. Ordinary tracks are taken as they are and raw ones are MFM-decoded; sectors are placed by **physical position**, since two corpus disks label every track 0.
@@ -122,7 +127,7 @@ Neither run is the F-001 bar, which requires a fuzz corpus rather than well-form
 ## Phase 5 — Catalogue & GUI
 **Goal:** The single cross-platform application: capture-to-catalogue in one place.
 **Status:** In progress — the GUI landed 2026-08-27; F-005 and F-006 remain, both needing hardware
-**Features delivered:** F-004, F-005, F-006, F-013, F-014
+**Features in scope:** F-004, F-005, F-006, F-013, F-014
 **Deliverables:**
 - [x] **C-ABI bridge** (D-001) — the seam the GUI links against, and the only place in ADE that writes `unsafe`. Opaque handles, explicit frees, and an error code rather than a Rust `Result`. `bridge/include/ade.h` is hand-written: ADE has no dependencies and a header is the contract with every future caller.
   Three rules it exists to keep: **no panic crosses the boundary** (every entry point is wrapped in `catch_unwind`, because "should not panic" and "cannot unwind into C" are different claims); **names are bytes, not C strings** (Amiga filenames are Latin-1 and hold bytes above 0x7F, so a `char*` API would either lie about the encoding or mangle the name); and **null is tolerated everywhere**, since a C caller that has just had an error will pass one.

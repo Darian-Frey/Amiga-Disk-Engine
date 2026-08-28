@@ -2,13 +2,13 @@
 
 ## Project
 
-Amiga Disk Engine (ADE) — a forensic-grade, cross-platform toolkit for reading, validating, cataloguing, and writing Amiga floppy and hard-disk images. Successor to the Atari Disk Engine, carrying its lessons (chiefly: no god-class, protected formats designed-for early, untrusted-input stance). Early implementation: documentation-first, with a Rust workspace that builds and lints but does not yet parse an image.
+Amiga Disk Engine (ADE) — a forensic-grade, cross-platform toolkit for reading, validating, cataloguing, and writing Amiga floppy and hard-disk images. Successor to the Atari Disk Engine, carrying its lessons (chiefly: no god-class, protected formats designed-for early, untrusted-input stance). Documentation-first, with a Rust workspace, a C ABI and a Qt6 GUI that read, verify, catalogue and convert real images.
 
 ## Current state
 
 - **Docs:** full scaffold present in `Docs/` (FEATURES, ROADMAP, ARCHITECTURE, DECISIONS, SPEC, ATTACK_VECTORS, BUILD stub, BUGS, IMPROVEMENTS, CHANGELOG, this file) plus an index `Docs/README.md`. Consistent, cross-referenced. The repository landing page is the root `README.md`.
 - **Tree:** Cargo workspace, one crate per pipeline layer under `src/<layer>/`, plus `cli/` (`ade` binary). CI runs fmt, clippy, tests, docs, and the layering check.
-- **Code:** scaffold only. Real: `ade-endian` (C-001, complete for the widths so far) and `ade-block` (geometry, `BlockSource` seam, `ValidBlock` bounds proof). Partial: `ade-filesystem::dostype`. The other layer crates are documented stubs. No parsing of real images yet.
+- **Code:** 12 crates, an `ade` CLI, a C ABI (`bridge/`) and a Qt6 GUI (`gui/`). `ade` does `info`, `check`, `ls`, `extract`, `convert`, `formats`, `batch`, `identify`, `diff` and `consolidate`; the GUI browses several images at once, previews, extracts by drag, and searches across all of them. `ade-flux` reads SCP captures as of 2026-08-28. Still unread: DMS (D-009) and IPF (C-003), both sniffed and honestly refused.
 - **Enforcement worth knowing about:** C-001 is a `clippy.toml` tripwire (raw `from_be_bytes` fails the build outside `ade-endian`); D-003 is `tools/check-layering.py` (a cross-layer dependency fails CI); AV-004 is type-level — `BlockSource::read_block` takes a `ValidBlock`, constructible only via `Geometry::validate`. Do not route around these; widen the policy deliberately or not at all.
 - **Stack:** settled 2026-08-21. **D-001** = Rust core + C-ABI bridge + Qt6 GUI (Phase 5). **D-002** = reimplement OFS/FFS/RDB in Rust; ADFlib is a black-box differential oracle only — never linked, source never read (that would forfeit the licence freedom). Implementation is unblocked.
 - **Fixtures:** **D-010** Accepted 2026-08-22 — **no disk image is ever committed**, in any form. Fixtures are generated in code at test time; `tests/fixtures/` holds a manifest and docs only. A 4288-image TOSEC corpus lives in `disks/`, gitignored, for differential testing against the D-002 oracle; tests must skip cleanly when it is absent. `.gitignore` ignores disk-image extensions repository-wide with no whitelist — committing one requires a DECISIONS entry, not a negation line.
@@ -17,7 +17,15 @@ Amiga Disk Engine (ADE) — a forensic-grade, cross-platform toolkit for reading
 
 ## Active task / next milestone
 
-Phase 0 is complete (2026-08-22). Phase 1 is unblocked and nothing is waiting on a decision.
+**Registers audited 2026-08-28.** Statuses in FEATURES and ATTACK_VECTORS are now checked against what the binaries do; ROADMAP's per-phase list was renamed **"Features in scope"**, which is what it always held — Phase 2's names F-012 and F-017, neither begun. Do not read a scope line as a delivery record.
+
+Phases 0 and 1 are complete. Phases 2–5 are each partly delivered; what is left in every one of them is blocked on material or hardware rather than on effort: DMS (D-009), LNFS (D-013), virus signatures (D-014), F-012 undelete (no deleted headers in 90 corpus disks), F-006 and F-005 (no Greaseweazle board). SCP reading landed 2026-08-28; the unblocked work left is F-018's GUI half.
+
+   **SCP is two byte orders in one file** — little-endian header and offsets, big-endian flux values. `009e` is 158 one way and 40448 the other, and the wrong choice finds no sectors rather than failing. `ade-endian` has `u16_le_at`/`u32_le_at` for this; `clippy.toml` now disallows `from_le_bytes` too, a hole that existed for as long as nothing was little-endian.
+   **A flux decoder's lock check must count what it rejected.** Drift alone is not enough: at a wrong data rate every interval is out of range, nothing corrects the estimate, and a drift-only check calls total failure a perfect lock. Same trap in integer arithmetic — a correction of 1/16 of one tick is zero, so the loop never runs and never drifts. Carry the estimate scaled.
+   **Never dispatch on SCP's disk-type byte.** `gw` writes 0x80 ("other") for an Amiga disk it encoded itself; the spec's 0x04 is aspirational.
+
+The numbered history below is kept for its hard-won lessons, not as a plan; its numbering drifted long ago and the phase notes inside it are the state at the time of writing.
 
 1. ~~First slice `ade info`~~ — **done 2026-08-22**. Runs over all 4288 corpus images with zero crashes.
 2. ~~Mount and traverse~~ — **done 2026-08-22**. `ade ls` and `ade extract` work; 11,087 files extracted from a 400-image sample with zero read errors. AV-001 is discharged: every chain carries a visited set.
@@ -92,7 +100,7 @@ Do not violate without a DECISIONS entry:
 
 **The toolchain is pinned** in `rust-toolchain.toml` — an exact version, not `stable`. Do not float it: CI denies all warnings, clippy gains lints every release, and a floating channel breaks the build with no code change. Bump the pin deliberately; the non-blocking `toolchain-drift` job says when it is worth doing.
 
-No build yet, but the toolchain is settled — Rust + Cargo for core/CLI/bridge, CMake + Qt6 for the GUI from Phase 5. See [BUILD.md](BUILD.md). Fuzzing the parsers (`cargo-fuzz`) is part of the Phase-1 acceptance bar, not an afterthought, and the ADFlib differential suite must **skip** rather than fail when the oracle binary is absent, so a fresh clone still builds and tests.
+Three build systems, all real: Cargo for the core, CLI and bridge; `cc` for the C ABI smoke test, which is the only thing that catches `ade.h` disagreeing with the library; CMake + Qt6 for the GUI, which invokes Cargo itself. See [BUILD.md](BUILD.md) — every command in it has been run as written. Fuzzing the parsers (`cargo-fuzz`) is part of the Phase-1 acceptance bar, not an afterthought, and the ADFlib differential suite must **skip** rather than fail when the oracle binary is absent, so a fresh clone still builds and tests.
 
 ## Conventions
 
@@ -104,7 +112,7 @@ No build yet, but the toolchain is settled — Rust + Cargo for core/CLI/bridge,
 
 ## Known pitfalls
 
-- See [ATTACK_VECTORS.md](ATTACK_VECTORS.md) for the canonical list (AV-001…AV-005), all currently `Detection: not implemented`.
+- See [ATTACK_VECTORS.md](ATTACK_VECTORS.md) for the canonical list (AV-001…AV-005). All five now have implemented detection with named tests (audited 2026-08-28) — but detection existing is not the vector closed, and each entry records what would prove its mechanism broken.
 - IPF cannot be created (C-003); the flux write path is SCP / extended-ADF.
 - DMS does not always round-trip (`errdms`, C-004) — fail loudly, never silently.
 

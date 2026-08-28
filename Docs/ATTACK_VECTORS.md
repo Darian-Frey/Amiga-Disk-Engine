@@ -4,7 +4,9 @@ Project-specific failure modes ADE must be resilient against. Disk images are un
 
 Severity: Critical (must hold) | Major (regression on release blocks) | Minor (track only).
 
-> **Detection status.** ADE is planning-stage: no code exists, so every vector below is `Detection: not implemented`. This is honest signal, not an oversight — each entry states the check that *would* detect it. Entries move from "not implemented" to a concrete test path via the **History** field as the code lands (per the standard's category-three → category-one transition).
+> **Detection status, audited 2026-08-28.** All five vectors now have implemented detection, each with a named test path. The header this replaces still said "no code exists, so every vector below is `Detection: not implemented`" — true when written on 2026-08-21, and left standing for a week after it stopped being true. AV-002 and AV-003 had been updated in place; AV-001, AV-004 and AV-005 had not, so this register was claiming ADE undefended against the three vectors its type system and fuzz harness were built around.
+>
+> A vector is never "closed" here. Detection existing is the start of the entry's useful life, not the end of it: what each one now records is *which* mechanism holds it and *what would prove the mechanism broken*.
 
 ## Parsing robustness
 
@@ -13,14 +15,20 @@ Severity: Critical (must hold) | Major (regression on release blocks) | Minor (t
 **Description.** A corrupt or malicious directory hash chain that points back into itself causes unbounded traversal → hang or OOM. This is the exact class of bug ADFlib had to add loop detection for.
 
 **Wider than first recorded.** The 2026-08-22 SPEC research found that cycles are reachable on **structurally valid, non-corrupt disks**: AmigaDOS permits hard links to directories, "which opens the way to endless recursion" (Clévy, ADF FAQ §4.6). Cycle detection is therefore a correctness requirement for ordinary images, not only a defence against hostile input — and it must be a visited-set over block numbers rather than a depth limit, since a legitimate deep tree and a two-block cycle are indistinguishable by depth alone.
-**Detection.** Not implemented (would require a cycle-detecting traversal carrying a visited-set of block numbers, exercised by both a malformed-chain fuzz fixture *and* a legitimate directory-hardlink fixture).
+**Detection.** **Implemented** (audited 2026-08-28; landed 2026-08-22 with `ade ls`). Every chain that can be followed carries a visited set of block numbers — directory hash chains, file extension chains, dircache chains, the RDB `PART` list, and the whole-volume walk, which carries **one** set across the entire traversal so a hard link pointing back up the tree terminates rather than recursing. Tests exercise both halves the entry asked for, malformed and legitimate: `a_two_block_hash_cycle_terminates`, `a_directory_cycle_terminates_a_tree_walk`, `a_self_looping_extension_chain_terminates`, `a_two_block_extension_cycle_terminates`, `a_looping_cache_chain_terminates_and_is_reported`.
+
+**Behind the visited set sits a structural cap** that does not depend on it: a volume cannot hold more entries than it has blocks. The redundancy is deliberate, and IMP-003 records why — removing the visited set alone made ADE allocate 28.8 GB and take the host down, so this Critical vector rested on a single `HashSet::insert` returning true. The cap turns that into a reported fault.
+
+**Depth is carried explicitly as well as count.** Bounding the entry count is not enough: each path string is built from its parent's, so a cycle makes the *strings* grow without bound — `a/b/a/b/…` — while the count stays inside its cap. Found by mutation-testing `walk`, where the first version of the cap still reached 4 GB.
 **Related decisions.** D-006. **Related features.** F-001, F-012. **Related constraints.** SPEC §Links.
 **History.** Identified 2026-08-21 during initial scaffolding, from the ADFlib precedent. Scope widened 2026-08-22 to include legitimate directory hard links.
 
 ### AV-004 Out-of-range block pointers
 **Severity:** Critical
 **Description.** File-header/extension/rootblock pointers that fall outside device geometry cause wild reads if dereferenced unchecked.
-**Detection.** Not implemented (would require bounds-checking every pointer against computed geometry before dereference, exercised by a crafted-pointer fixture).
+**Detection.** **Implemented, at the type level** (audited 2026-08-28; landed 2026-08-21 with `ade-block`). `BlockSource::read_block` does not take a number — it takes a `ValidBlock`, whose only constructor is `Geometry::validate` and whose field is private to `ade-block`. An unchecked index cannot reach a backing store because no code can build the token that would carry it there, so this vector is enforced by the compiler rather than by a check somebody must remember to write.
+
+**It holds across partition boundaries too.** `Window` re-validates every block number after translating it to the underlying device, so a partition cannot be used to address outside itself — AV-004 within a volume and AV-004 across a device are different claims, and both are checked.
 **Related decisions.** D-006. **Related features.** F-001.
 **History.** Identified 2026-08-21 during initial scaffolding.
 
@@ -29,7 +37,9 @@ Severity: Critical (must hold) | Major (regression on release blocks) | Minor (t
 ### AV-005 Decompression edge cases
 **Severity:** Major
 **Description.** DMS encryption/password paths and malformed gzip (ADZ/HDZ) can trigger resource exhaustion or crashes in the decompressor.
-**Detection.** Not implemented (would require capped output sizes and fuzzing the DMS/gzip front-ends; `errdms` fixtures as known-bad inputs).
+**Detection.** **Implemented for gzip** (audited 2026-08-28; landed 2026-08-25). The inflater caps output up front and checks the cap **before each write, never after** — a limit tested afterwards has already allocated. The cap is the caller's policy rather than a constant, so a legitimate 100 MB HDZ hitting a floppy-sized cap is reported as such rather than treated as an attack. gzip's declared `ISIZE` is verified after the fact and never trusted to size anything beforehand, which is BUG-003's lesson with the attacker holding the pen.
+
+**Not implemented for DMS**, which is not parsed at all yet (D-009, F-003). The `errdms` fixtures this entry asks for cannot exist before the parser does.
 **Related decisions.** D-002, D-006, D-009. **Related constraints.** C-004 (SPEC.md).
 
 > **Observed in ADE itself, 2026-08-24 — BUG-003.** `read_file` reserved `Vec::with_capacity(byte_size)` from a `u32` read off the disk, so a crafted file header claiming 4 GB caused a 4 GB allocation on an 880 KB floppy, before any data block was read. Fixed by clamping the reservation to the volume's own size.

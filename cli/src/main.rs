@@ -293,6 +293,31 @@ fn info(path: &Path, format: Format) -> ExitCode {
 /// A mix of kinds is the signature of copy protection rather than a defect —
 /// the raw tracks are what a plain ADF could not have carried.
 fn track_lines(lines: &mut Vec<String>, i: &Inspection) {
+    if let Some(f) = &i.flux {
+        // How the capture was made, before what it holds. These describe the
+        // *file* rather than the disk: two captures of one disk can differ in
+        // every line here and still hold the same sectors.
+        lines.push("  capture".to_owned());
+        lines.push(format!(
+            "    revolutions {} per track, {} RPM, {} ns resolution",
+            f.revolutions, f.rpm, f.tick_ns
+        ));
+        let mut how = Vec::new();
+        how.push(if f.index_aligned {
+            "starts at the index pulse"
+        } else {
+            "starts at an arbitrary point"
+        });
+        if f.normalised {
+            // The one line here a preservationist should read twice.
+            how.push("timings normalised, not as captured");
+        }
+        if f.foreign_creator {
+            how.push("written by other hardware, not a SuperCard Pro");
+        }
+        lines.push(format!("    flux        {}", how.join("; ")));
+    }
+
     if let Some(t) = &i.tracks {
         // A mix of kinds is the signature of copy protection, not a defect:
         // the raw tracks are what a plain ADF could not have carried.

@@ -9,7 +9,31 @@ Severity vocabulary: low | medium | high.
 
 ## Open
 
-_None._
+### BUG-008 `ade formats` panics on a closed pipe
+**Severity:** low
+**Status:** open
+**Found:** 2026-08-28, running `ade formats | head` while checking what SCP conversion reported.
+**Where:** [cli/src/main.rs](../cli/src/main.rs), the `formats` arm.
+
+**What is wrong.** `ade formats | head` panics with `failed printing to stdout: Broken pipe (os error 32)`. The matrix is 70-odd lines, so piping it to `head` or `grep -m1` is the obvious way to read it.
+
+**This is a known defect returning.** IMP-001 fixed exactly this for `info` and `ls` on 2026-08-22: `println!` panics on a closed pipe, `SIGPIPE` cannot be restored without `unsafe`, and all output was routed through an `emit` helper that treats a closed pipe as the ordinary end of a command. `formats` was added afterwards and writes with `println!` directly, so it never got the fix — the helper exists and is simply not used here.
+
+**Correct behaviour.** Route the matrix through `emit` like every other command. Worth checking the other later arms at the same time, since the same omission is available to each of them.
+
+### BUG-007 `--format=json` is accepted and silently ignored by four commands
+**Severity:** medium
+**Status:** open
+**Found:** 2026-08-28, auditing F-015's status against what the binary does.
+**Where:** [cli/src/main.rs](../cli/src/main.rs), the `diff`, `consolidate`, `identify` and `formats` arms.
+
+**What is wrong.** `--format=json` is parsed globally, and `info`, `ls`, `check` and `batch` honour it. The other four accept the flag, print text, and exit 0. `ade --format=json identify --datfiles=… disk.adf` produces a human report with no indication that the flag did nothing.
+
+**Why it matters more than the missing output.** F-015 makes the JSON surface a stability commitment, and a script's normal way to ask "is this supported?" is to pass the flag and check the exit code. Silently ignoring it means a caller cannot tell an unsupported command from a successful one, and the failure surfaces downstream as a parse error against text that was never meant to be parsed. Refusing the flag would be a worse feature but a better contract.
+
+**Correct behaviour.** Either emit JSON from all four — `diff` and `consolidate` have obvious record shapes, and `identify` already has one internally — or reject the flag with exit code 2 (usage) naming the commands that support it. Emitting is preferable; rejecting is the honest interim.
+
+**Not a regression.** The flag has been global since IMP-001 on 2026-08-22, and each command added since simply did not wire it up.
 
 ## Fixed
 

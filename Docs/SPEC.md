@@ -807,8 +807,87 @@ This is what confirms the layout rather than merely fitting it: the arithmetic c
 ## Flux formats
 
 - **Extended-ADF** — see above.
-- **SCP** — the open, documented flux container and ADE's write target (D-007). Header magic `SCP` at 0x00 with a version byte at 0x03; track data headers carry `TRK`. [SCP] Confirmed 2026-08-27: a generated file opens `53 43 50 00`, and ADE's sniffer already identifies it. See §SCP has material and an oracle.
+- **SCP** — the open, documented flux container and ADE's write target (D-007). Header magic `SCP` at 0x00 with a version byte at 0x03; track data headers carry `TRK`. [SCP] Confirmed 2026-08-27: a generated file opens `53 43 50 00`, and ADE's sniffer already identifies it. Read since 2026-08-28 — see §SCP structure and §SCP has material and an oracle.
 - **IPF** — stores flux-transition timings. Reading requires the closed CAPS library; creation is SPS-only. Read-only, optional, licence-gated; ADE **cannot emit IPF** (C-003). Independently corroborated 2026-08-27: Greaseweazle, which writes SCP and HFE happily, refuses IPF as an output format.
+
+### SCP structure
+
+*Written from [SCP] on 2026-08-28 and verified field by field against a Greaseweazle-generated capture of `1000cc Turbo.adf`.*
+
+An SCP holds neither sectors nor bits. It holds **intervals between magnetic flux transitions** — one list per revolution, per track. Everything above that is inferred by deciding where the bit cells fall, which is what makes flux a preservation format and a sector image a summary of one.
+
+#### File header, 16 bytes
+
+| Offset | Size | Field | Notes |
+|---|---|---|---|
+| 0x00 | 3 | `SCP` | the signature |
+| 0x03 | 1 | version | `(version << 4) \| revision`; 0x25 is v2.5. **Greaseweazle writes 0x00** |
+| 0x04 | 1 | disk type | manufacturer in the upper nibble, subclass below |
+| 0x05 | 1 | revolutions | stored per track, 1–5 |
+| 0x06 | 1 | start track | first slot used |
+| 0x07 | 1 | end track | last slot used |
+| 0x08 | 1 | FLAGS | see below |
+| 0x09 | 1 | bit-cell width | 0 means the default of 16 bits |
+| 0x0A | 1 | heads | 0 = both, 1 = side 0, 2 = side 1 |
+| 0x0B | 1 | resolution | multiplier of 25 ns; 0 *is* 25 ns, not zero |
+| 0x0C | 4 | checksum | over everything from 0x10 to EOF |
+
+FLAGS, bit 0 upward: index-aligned, 96 TPI, 360 RPM, normalised, read/write, footer present, extended mode, foreign creator. The generated capture reads `0b0010_0011` — index-aligned, 96 TPI, footer present.
+
+#### Track offset table
+
+168 little-endian longwords at **0x10** (at 0x80 when the extended-mode flag is set), each an **absolute file offset** to a track data header, or zero for a track that is absent. The slot index is the *physical* track: cylinder doubled, plus the head.
+
+#### Track data header
+
+`TRK`, then the track number as one byte, then twelve bytes per stored revolution: duration in ticks (index to index), the number of flux values, and the offset to them **relative to the track data header**, not to the file. The generated capture's first track has two revolutions at 8,000,000 ticks each — 200 ms, which is 300 RPM — of 41,975 flux values, the first starting 28 bytes into the header, exactly after two revolution entries.
+
+#### Flux values, and the trap
+
+Each value is a **16-bit big-endian** count of ticks — in a file whose every other field is little-endian.
+
+This is the one thing a reader must not get wrong, and getting it wrong does not fail: the capture's first values are `009e`, which is **158** read big-endian and **40448** read little-endian. 158 ticks is 3,950 ns, one 4 µs MFM interval at 250 kbit/s. 40448 ticks is a millisecond, which is not an interval any drive produces — but nothing would report an error, and the decode would simply find no sectors anywhere.
+
+A value of **zero is not an interval**. It means no transition occurred within the 16-bit range, so 65,536 ticks are accumulated and the next value continues the same interval. Treating zero as a transition manufactures a stream of impossible ones; the long gaps it stands for are how an erased or unformatted region reads.
+
+#### The disk-type byte cannot be used for detection
+
+The specification assigns 0x04 to Commodore Amiga. **Greaseweazle writes 0x80 — "other" — for a disk it has just encoded as AmigaDOS MFM.** A reader dispatching on this byte would refuse a file the standard tool had made. ADE reports it and decides nothing from it, which is the same lesson C-008 taught about the `DOS` prefix: what a container *says* it holds is evidence, never a verdict.
+
+#### What ADE does not parse
+
+The extension footer (creator strings, drive model, timestamps) and the file checksum. The footer is provenance metadata with no bearing on what the disk says; the checksum covers everything from 0x10 to EOF, so verifying it means reading 30 MB to answer a question no caller has asked. Both are recorded rather than silently skipped.
+
+### Flux is not bits: the cell-width problem
+
+A flux image says *when* the magnetisation reversed. Recovering bits means deciding how many bit cells each interval spans, and no field in the file states the cell width — the drive that wrote the disk and the drive that read it did not agree on speed, and neither ran at exactly its nominal rate.
+
+At 250 kbit/s a cell is 2 µs, which is 80 ticks. Legal MFM intervals are two, three or four cells; a transition is a `1` and the cells that pass without one are zeros, so an interval of *n* cells decodes to a `1` followed by *n−1* zeros.
+
+**A fixed divisor is not enough.** Motor speed drifts by a percent or two within a single revolution, and a fixed divisor accumulates that drift until intervals land on the boundary between two and three cells, where one rounding error becomes a wrong bit and every sector after it is lost. So the cell width is tracked: each interval is measured against the current estimate and the estimate is nudged toward what the interval implies, slowly, because a fast loop chases noise and one weak bit would drag it off the data rate entirely.
+
+Two findings from implementing that, both from tests rather than from reasoning:
+
+**The correction must be carried in fixed point.** A drive running 2% slow implies a cell one tick wider than nominal; one sixteenth of one tick is zero in integer arithmetic, so the loop never moves. It does not look broken — the drift stays at zero, which a naive check reads as a *perfect* lock. The estimate is therefore carried at 64× so sub-tick corrections accumulate.
+
+**A lock check must count what it rejected.** Flux at a data rate nothing like MFM produces intervals that are all out of range, so the estimate is never corrected, never drifts, and a drift-only check again pronounces total failure a perfect lock. A loop that never ran is not a loop that succeeded, so "locked" also requires that under 5% of intervals fell outside two-to-four cells.
+
+### Reading SCP, measured
+
+*2026-08-28.*
+
+| check | result |
+|---|---|
+| Generated fixture → SCP → decoded, byte-for-byte | identical |
+| 20 corpus disks → SCP → decoded, listings | 20 of 20 identical |
+| 3 corpus disks → SCP → decoded, byte-for-byte | 3 of 3 identical |
+| Sectors recovered per disk | **1760 of 1760, every disk** |
+| Intervals rejected as out of range | 1 per track — the partial cell after the index pulse |
+| `ade info` on a 30 MB capture | 0.4 s |
+
+**Several revolutions are merged, not chosen between.** An SCP normally stores two or more revolutions of each track, and they are not duplicates: a marginal or weak-bit region reads differently each time, which is *why* the format stores several. Each is decoded, and any sound sector still missing is taken from it. That is F-008's merge applied within one file, and it is the concrete reason reading flux beats reading a sector image of the same disk — the sector image already discarded the second opinion.
+
+**What this does not establish.** Everything flux exists for. `gw` encodes an ordinary AmigaDOS disk, so these captures hold no weak bits, no long tracks and no deliberate illegality. "ADE reads a clean capture correctly" is necessary and nowhere near sufficient; only a real protected disk closes that gap, and that needs the hardware F-006 waits on.
 
 ### SCP has material and an oracle
 

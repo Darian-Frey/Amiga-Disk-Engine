@@ -17,7 +17,7 @@ Index of the Amiga Disk Engine documentation set. The project overview, formats,
 | [DECISIONS.md](DECISIONS.md) | Append-only design-decision log D-001…D-011, with reversal conditions |
 | [SPEC.md](SPEC.md) | Authoritative disk and filesystem format reference; format constraints C-001…C-005 |
 | [ATTACK_VECTORS.md](ATTACK_VECTORS.md) | Failure modes for untrusted disk-image input, AV-001…AV-005 |
-| [BUILD.md](BUILD.md) | Environment, toolchain, build commands (stub until the first build succeeds) |
+| [BUILD.md](BUILD.md) | Environment, toolchain, build commands — all three build systems, every command run as written |
 | [BUGS.md](BUGS.md) | In-repo bug catalogue, BUG-NNN (empty; populated during implementation) |
 | [IMPROVEMENTS.md](IMPROVEMENTS.md) | In-repo refactor / code-quality catalogue, IMP-NNN (empty) |
 | [CHANGELOG.md](CHANGELOG.md) | Version history, referencing F-/D-/C-/AV-/BUG-/IMP- IDs |

@@ -1,7 +1,7 @@
 > **Status:** Active
 > **Provenance:** Claude (primary auditor / initial scaffolding, 2026-08-21)
-> **Last reviewed:** 2026-08-21
-> **Why this status:** Early implementation. The stack decisions are settled (D-001, D-002) and the licence chosen (D-011). The workspace builds, tests, and lints, but the engine is a scaffold: no image is parsed yet. Fixture provenance (D-010) remains open and gates Phase 1 validation.
+> **Last reviewed:** 2026-08-28
+> **Why this status:** ADE reads, verifies, catalogues and converts real images from a CLI, a C ABI and a Qt6 GUI, measured against a 4652-image corpus. What remains in every phase is blocked on material or hardware rather than on effort — DMS files, a Greaseweazle board, disks with a deleted-file history — so progress is now paced by what can be obtained rather than by what can be written.
 
 # Amiga Disk Engine (ADE)
 
@@ -27,6 +27,17 @@ cargo run -p ade-cli -- info    disk.adf     # container, geometry, bootblock, v
 cargo run -p ade-cli -- check   disk.adf     # health report, severity-ranked
 cargo run -p ade-cli -- ls      disk.adf     # directory tree
 cargo run -p ade-cli -- extract disk.adf Tools/thing out.bin
+cargo run -p ade-cli -- batch   disks/       # a whole corpus in one pass
+cargo run -p ade-cli -- identify --datfiles=D disk.adf   # name it from TOSEC
+cargo run -p ade-cli -- diff a.adf b.adf     # where two dumps differ
+cargo run -p ade-cli -- convert in.adz out.adf
+```
+
+The GUI needs Qt6 and CMake, which invokes Cargo for the bridge itself:
+
+```bash
+cmake -S gui -B gui/build -DCMAKE_BUILD_TYPE=Release && cmake --build gui/build
+./gui/build/ade-gui disk1.adf disk2.adf      # several at once; search spans them
 ```
 
 Add `--format=json` to any of them for machine-readable output; the field names and fault codes are a stability commitment (F-015). On a partitioned hard disk, add `--partition=DH0` — a device holds no volume of its own.
@@ -35,7 +46,9 @@ ADE never writes to an image: no image-write path exists in the codebase, and D-
 
 ## Status
 
-**Phases 0 and 1 are complete; Phase 2 is in progress.** ADE reads OFS and FFS on DD, HD and extra-cylinder floppies, on unpartitioned hardfiles, and on RDB-partitioned hard disks — plain or gzip-wrapped, since an ADZ mounts exactly as the ADF inside it. All eight dostypes are identified and hashed correctly, including the international variants, and directory caches (`DOS\4`/`DOS\5`) are read and cross-checked against the directories they describe. Only the LNFS long-name structures of `DOS\6`/`DOS\7` are still to come. It lists, extracts, resolves hard links, and reports volume health including a bitmap cross-check.
+**Phases 0 and 1 are complete; Phases 2 to 5 are each partly delivered** (registers audited 2026-08-28). ADE reads OFS and FFS on DD, HD and extra-cylinder floppies, on unpartitioned hardfiles, and on RDB-partitioned hard disks — plain or gzip-wrapped, since an ADZ mounts exactly as the ADF inside it. All eight dostypes are identified and hashed correctly, including the international variants, and directory caches (`DOS\4`/`DOS\5`) are read and cross-checked against the directories they describe. It lists, extracts, resolves hard links, and reports volume health including a bitmap cross-check.
+
+On top of that: extended ADFs read *and* write, with raw MFM decoded and the reconstruction always declared; `batch` verifies a 4652-image corpus in 5.5 seconds at 9 MB; `identify` names 98% of it from TOSEC datfiles; `diff` and `consolidate` compare and merge repeated dumps; `convert` moves between containers and refuses lossy pairs outright; and a Qt6 GUI browses several images at once, previews them, extracts by drag, and searches every one of them.
 
 Measured rather than asserted:
 
@@ -43,7 +56,7 @@ Measured rather than asserted:
 - **99.36%** byte-identical agreement with ADFlib on extracted file contents (3875 of 3900 files). Every difference is attributed to a recorded disagreement (D-012) or to genuine damage on the disk.
 - **900,000 fuzz cases** across six targets, zero failures. AV-004 is enforced by the type system, not by discipline: `read_block` takes a `ValidBlock`, which only `Geometry::validate` can construct.
 
-Phase 3 has begun with the compressed containers; DMS is blocked on test material (D-009). Still open from Phase 2: LNFS long names and undelete — the last blocked on material rather than effort, since the corpus holds no recoverable deleted entries. Then containers (Phase 3), flux (Phase 4), and the GUI (Phase 5).
+**What is left is mostly blocked on material, not effort.** DMS waits on files to test against (D-009); LNFS on anything that can check it (D-013); virus signatures on a signature set that can be checked at all, which is why ADE reports bootblock text and draws no verdict (D-014); undelete on disks with a deleted-file history, since 90 corpus disks hold not one intact deleted header; and in-app Greaseweazle capture and write-back on a physical board. The unblocked work is SCP reading — the Greaseweazle host tools turn every corpus ADF into material and are an independent oracle — and the GUI's partition picker for RDB hard disks.
 
 The two decisions that gated all implementation were settled on 2026-08-21:
 
@@ -54,13 +67,16 @@ The licence followed from D-002 and is settled: **Apache-2.0** (D-011). D-010 (f
 
 ## Formats
 
-| Layer | Formats |
-|---|---|
-| Floppy images | ADF (DD 880 KB / HD 1.76 MB), ADZ, extended-ADF |
-| Hard-disk images | HDF, HDZ, RDB multi-partition |
-| Compressed | DMS (all modes, including encrypted), gzip wrappers |
-| Flux | SCP (read/write), IPF (read-only, optional, licence-gated) |
-| Filesystems | OFS and FFS across all eight dostypes, INTL and dircache variants, long filenames |
+| Layer | Formats | Today |
+|---|---|---|
+| Floppy images | ADF (DD 880 KB / HD 1.76 MB, and 81–83-cylinder), ADZ, extended-ADF | reads and writes |
+| Hard-disk images | HDF, HDZ, RDB multi-partition | reads |
+| Compressed | gzip wrappers (ADZ/HDZ) | reads |
+| Compressed | DMS (all modes, including encrypted) | **recognised, not read** — D-009 |
+| Flux | SCP | **recognised, not read** — next up, now that it has an oracle |
+| Flux | IPF (read-only, optional, licence-gated) | **recognised, not read** — C-003, D-007 |
+| Filesystems | OFS and FFS across all eight dostypes, INTL and dircache variants | reads |
+| Filesystems | LNFS long filenames (`DOS\6`/`DOS\7`) | **not implemented** — D-013 |
 
 ADE **cannot create IPF** — authoring is closed (SPS-only), so the open flux write path is SCP and extended-ADF (C-003, D-007). Some DMS images are known-bad and will not round-trip; ADE fails loudly rather than emitting a silently-bad ADF (C-004).
 

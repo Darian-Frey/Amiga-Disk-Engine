@@ -11,5 +11,6 @@ description = "ADE: flux layer — SCP, extended-ADF, optional IPF-read, hardwar
 [dependencies]
 ade-track = { workspace = true }
 ade-block = { workspace = true }
+ade-endian = { workspace = true }
 [lints]
 workspace = true

@@ -23,6 +23,8 @@
 //! (SPEC §MFM). That is a property of those disks, not a failure here.
 
 use ade_container::extended::{ExtendedAdf, STANDARD_TRACK_BYTES, TrackKind};
+use ade_flux::mfm;
+use ade_flux::scp::Scp;
 use ade_track::{DD_SECTORS, SECTOR_BYTES, decode_track};
 
 /// Tracks in the standard double-density layout an assembly targets.
@@ -140,6 +142,84 @@ pub fn assemble(parsed: &ExtendedAdf, bytes: &[u8]) -> Assembly {
         sectors_placed,
         sectors_total: DD_TOTAL_SECTORS,
         from_sector_tracks,
+        from_raw_tracks,
+    }
+}
+
+/// Assemble a plain double-density image from an SCP flux capture.
+///
+/// The same reconstruction as [`assemble`], one layer further down: the flux
+/// has to become bits before it can become sectors. Sectors are placed by
+/// physical track position for the same reason and with the same caveat.
+///
+/// # Every revolution is tried, and the sectors are merged
+///
+/// An SCP normally stores two or more revolutions of each track. They are not
+/// duplicates — a marginal or weak-bit region reads differently each time,
+/// which is *why* the format stores several. So each revolution is decoded and
+/// any sound sector it yields that is still missing is taken.
+///
+/// That is F-008's merge applied within one file rather than across several
+/// dumps, and it is the reason reading flux beats reading a sector image of
+/// the same disk: the sector image already threw away the second opinion.
+#[must_use]
+pub fn assemble_scp(parsed: &Scp, bytes: &[u8]) -> Assembly {
+    let mut out = vec![0u8; DD_TRACKS.saturating_mul(STANDARD_TRACK_BYTES)];
+    let mut sectors_placed = 0usize;
+    let mut from_raw_tracks = 0usize;
+
+    for track in &parsed.tracks {
+        if track.index >= DD_TRACKS {
+            continue;
+        }
+        let base = track.index.saturating_mul(STANDARD_TRACK_BYTES);
+        let mut placed_here = false;
+        // Which sectors of this track are already recovered, so a later
+        // revolution only fills what an earlier one missed.
+        let mut have = [false; DD_SECTORS];
+
+        for revolution in 0..track.revolutions.len() {
+            if have.iter().all(|h| *h) {
+                break;
+            }
+            let Some(intervals) = parsed.intervals(bytes, track.index, revolution) else {
+                continue;
+            };
+            let stream = mfm::to_bits(&intervals, mfm::NOMINAL_CELL_TICKS);
+            for sector in decode_track(&stream.bits)
+                .sectors
+                .iter()
+                .filter(|s| s.is_sound())
+            {
+                let index = usize::from(sector.sector);
+                if index >= DD_SECTORS || have.get(index).copied().unwrap_or(true) {
+                    continue;
+                }
+                let at = base.saturating_add(index.saturating_mul(SECTOR_BYTES));
+                let Some(slot) = out.get_mut(at..at.saturating_add(SECTOR_BYTES)) else {
+                    continue;
+                };
+                if sector.data.len() != SECTOR_BYTES {
+                    continue;
+                }
+                slot.copy_from_slice(&sector.data);
+                if let Some(flag) = have.get_mut(index) {
+                    *flag = true;
+                }
+                sectors_placed = sectors_placed.saturating_add(1);
+                placed_here = true;
+            }
+        }
+        if placed_here {
+            from_raw_tracks = from_raw_tracks.saturating_add(1);
+        }
+    }
+
+    Assembly {
+        bytes: out,
+        sectors_placed,
+        sectors_total: DD_TOTAL_SECTORS,
+        from_sector_tracks: 0,
         from_raw_tracks,
     }
 }

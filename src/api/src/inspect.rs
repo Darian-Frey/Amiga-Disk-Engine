@@ -27,6 +27,7 @@ use ade_filesystem::{
     rootblock::Rootblock,
     volume::{FsError, Volume},
 };
+use ade_flux::scp::Scp;
 
 use crate::json::Value;
 
@@ -127,6 +128,8 @@ pub struct Inspection {
     pub volume_absent: Option<String>,
     /// The track table, where the container carries raw tracks.
     pub tracks: Option<TrackTable>,
+    /// How the flux was captured, where the container is a flux image.
+    pub flux: Option<FluxCapture>,
     /// How a raw-track container was reconstructed into the volume above.
     ///
     /// Present only when the volume shown is a **reconstruction** rather than
@@ -223,6 +226,7 @@ fn unreadable_container(
     size: u64,
     bootblock: Option<Bootblock>,
     tracks: Option<TrackTable>,
+    flux: Option<FluxCapture>,
     compression: Option<Compression>,
 ) -> Inspection {
     let reason = match detection.kind {
@@ -238,6 +242,17 @@ fn unreadable_container(
             ),
             None => "the track table could not be read".to_owned(),
         },
+        // A capture whose tracks decoded to nothing. Saying which is the
+        // useful part: a flux image of a heavily protected disk having no
+        // AmigaDOS volume is the expected answer, not a failure.
+        Kind::Scp => match &tracks {
+            Some(t) => format!(
+                "a flux capture holds track timings, not a volume — {} of its {} tracks \
+                 decoded as ordinary AmigaDOS, yielding {} sound sectors",
+                t.standard_tracks, t.declared, t.sound_sectors
+            ),
+            None => "the SCP track table could not be read".to_owned(),
+        },
         other => format!("reading {other} is not implemented yet"),
     };
     Inspection {
@@ -248,6 +263,7 @@ fn unreadable_container(
         volume: None,
         volume_absent: Some(reason),
         tracks,
+        flux,
         assembly: None,
         description: None,
         boot_text: Vec::new(),
@@ -265,11 +281,20 @@ fn unreadable_container(
 /// an image of pure protection has no filesystem view to offer, and inventing
 /// an empty one would be worse than saying so.
 fn assemble_container(bytes: &[u8], kind: Kind) -> Option<(Vec<u8>, AssemblyInfo)> {
-    if !matches!(kind, Kind::ExtendedAdf { .. }) {
-        return None;
-    }
-    let parsed = extended::ExtendedAdf::parse(bytes).ok()?;
-    let assembly = crate::assemble::assemble(&parsed, bytes);
+    let assembly = match kind {
+        Kind::ExtendedAdf { .. } => {
+            let parsed = extended::ExtendedAdf::parse(bytes).ok()?;
+            crate::assemble::assemble(&parsed, bytes)
+        }
+        // Flux is a raw-track container too, one layer further down: the
+        // intervals become bits, the bits become sectors, and from there it is
+        // the same reconstruction.
+        Kind::Scp => {
+            let parsed = Scp::parse(bytes).ok()?;
+            crate::assemble::assemble_scp(&parsed, bytes)
+        }
+        _ => return None,
+    };
     if assembly.is_empty() {
         return None;
     }
@@ -284,6 +309,9 @@ fn assemble_container(bytes: &[u8], kind: Kind) -> Option<(Vec<u8>, AssemblyInfo
 
 /// Read the track table of a raw-track container, if this is one.
 fn read_track_table(bytes: &[u8], kind: Kind) -> Option<TrackTable> {
+    if matches!(kind, Kind::Scp) {
+        return read_scp_table(bytes);
+    }
     if !matches!(kind, Kind::ExtendedAdf { .. }) {
         return None;
     }
@@ -325,6 +353,153 @@ fn read_track_table(bytes: &[u8], kind: Kind) -> Option<TrackTable> {
         present: parsed.tracks.iter().filter(|t| t.present).count(),
         faults: parsed.faults,
     })
+}
+
+/// Read an SCP's track table, decoding one revolution of each track.
+///
+/// **One revolution, not all of them.** This is the summary a reader sees
+/// before deciding whether to look further, and decoding every stored
+/// revolution of every track to produce it would double the work for a number
+/// that would barely move: the second revolution exists for the sectors the
+/// first one missed, and on an ordinary disk the first misses none. Assembly
+/// does read them all, because there the difference is recovered data rather
+/// than a count.
+fn read_scp_table(bytes: &[u8]) -> Option<TrackTable> {
+    let parsed = Scp::parse(bytes).ok()?;
+
+    let mut standard_tracks = 0usize;
+    let mut sound_sectors = 0usize;
+    let mut stray_syncs = 0usize;
+    let mut illegally_encoded_sectors = 0usize;
+    let mut present = 0usize;
+    let mut empty = 0usize;
+    let mut unlocked = 0usize;
+
+    for track in &parsed.tracks {
+        if track.revolutions.is_empty() {
+            empty = empty.saturating_add(1);
+            continue;
+        }
+        let Some(intervals) = parsed.intervals(bytes, track.index, 0) else {
+            continue;
+        };
+        present = present.saturating_add(1);
+        let stream = ade_flux::mfm::to_bits(&intervals, ade_flux::mfm::NOMINAL_CELL_TICKS);
+        if !stream.locked() {
+            unlocked = unlocked.saturating_add(1);
+        }
+        let decoded = ade_track::decode_track(&stream.bits);
+        if decoded.is_standard() {
+            standard_tracks = standard_tracks.saturating_add(1);
+        }
+        sound_sectors = sound_sectors.saturating_add(decoded.sound());
+        stray_syncs = stray_syncs.saturating_add(decoded.stray_syncs);
+        illegally_encoded_sectors = illegally_encoded_sectors
+            .saturating_add(decoded.sectors.iter().filter(|s| !s.clock_valid()).count());
+    }
+
+    let mut faults = Vec::new();
+    if unlocked > 0 {
+        // Worth saying loudly. A cell estimate that never settles means the
+        // bits are guesses, and every count above is derived from them.
+        faults.push(format!(
+            "{unlocked} tracks: the bit-cell estimate never settled near the \
+             250 kbit/s data rate, so their decode is not to be trusted"
+        ));
+    }
+    let declared = usize::from(parsed.track_range.1)
+        .saturating_sub(usize::from(parsed.track_range.0))
+        .saturating_add(1);
+    if parsed.tracks.len() != declared {
+        faults.push(format!(
+            "header declares tracks {}-{} ({declared}) but the table points at {}",
+            parsed.track_range.0,
+            parsed.track_range.1,
+            parsed.tracks.len()
+        ));
+    }
+
+    Some(TrackTable {
+        standard_tracks,
+        sound_sectors,
+        stray_syncs,
+        illegally_encoded_sectors,
+        declared: parsed.tracks.len(),
+        // A flux capture has no sector tracks by definition: every track is
+        // timings, and "ordinary" is a property of what they decode to.
+        sectors: 0,
+        raw_mfm: parsed.tracks.len(),
+        empty,
+        present,
+        faults,
+    })
+}
+
+/// How a flux capture was made, as the file itself declares it.
+///
+/// Separate from the track table because it describes the *capture* rather
+/// than the disk: two files of the same disk can differ in every field here
+/// and hold the same data. For a preservationist these are the provenance
+/// facts — chiefly whether the timings are as they came off the drive.
+#[derive(Debug, Clone)]
+pub struct FluxCapture {
+    /// Revolutions stored per track. More than one is a second opinion on
+    /// every marginal sector.
+    pub revolutions: u8,
+    /// Nanoseconds per stored tick.
+    pub tick_ns: u32,
+    /// Rotational speed the capture declares: 360 RPM or 300.
+    pub rpm: u16,
+    /// Flux data begins at the index pulse rather than at an arbitrary point.
+    pub index_aligned: bool,
+    /// The timings have been normalised rather than kept as captured.
+    ///
+    /// Worth surfacing: a normalised capture has already had the jitter that
+    /// carries weak bits and long-track protection averaged out of it, so it
+    /// is a flux file that no longer holds everything flux is kept for.
+    pub normalised: bool,
+    /// Something other than SuperCard Pro hardware wrote the file.
+    pub foreign_creator: bool,
+    /// The disk-type byte, unmodified.
+    ///
+    /// Reported, never dispatched on: Greaseweazle writes 0x80 ("other") for
+    /// an Amiga disk it has just encoded as AmigaDOS MFM, so a reader trusting
+    /// this byte would refuse a file it had made itself.
+    pub disk_type: u8,
+    /// The version byte the header carries.
+    pub version: u8,
+}
+
+impl FluxCapture {
+    /// Read the capture's own account of itself.
+    fn read(bytes: &[u8]) -> Option<Self> {
+        let scp = Scp::parse(bytes).ok()?;
+        Some(Self {
+            revolutions: scp.revolutions,
+            tick_ns: scp.tick_ns(),
+            rpm: if scp.rpm_360() { 360 } else { 300 },
+            index_aligned: scp.index_aligned(),
+            normalised: scp.normalised(),
+            foreign_creator: scp.foreign_creator(),
+            disk_type: scp.disk_type,
+            version: scp.version,
+        })
+    }
+
+    /// The capture facts as JSON (F-015).
+    #[must_use]
+    pub fn to_json(&self) -> Value {
+        Value::Obj(vec![
+            ("revolutions", Value::Num(u64::from(self.revolutions))),
+            ("tick_ns", Value::Num(u64::from(self.tick_ns))),
+            ("rpm", Value::Num(u64::from(self.rpm))),
+            ("index_aligned", Value::Bool(self.index_aligned)),
+            ("normalised", Value::Bool(self.normalised)),
+            ("foreign_creator", Value::Bool(self.foreign_creator)),
+            ("disk_type", Value::Num(u64::from(self.disk_type))),
+            ("version", Value::Num(u64::from(self.version))),
+        ])
+    }
 }
 
 /// What was recovered when a raw-track container was assembled into a volume.
@@ -537,6 +712,14 @@ pub fn inspect_bytes(bytes: Vec<u8>) -> Inspection {
     };
 
     let tracks = read_track_table(&bytes, detection.kind);
+    // How the capture was made, where it is one. Read from the original bytes:
+    // by the time a flux image has been assembled into a volume, its timings
+    // are gone.
+    let flux = if matches!(detection.kind, Kind::Scp) {
+        FluxCapture::read(&bytes)
+    } else {
+        None
+    };
     // F-007: a raw-track container holds no volume of its own, but most of a
     // protected disk is usually ordinary. Reconstruct what can be read and
     // carry on with that, while still reporting the container as what it is.
@@ -554,7 +737,7 @@ pub fn inspect_bytes(bytes: Vec<u8>) -> Inspection {
         detection.kind
     };
     let Some(geometry) = geometry_for(geometry_kind, bytes.len() as u64) else {
-        return unreadable_container(detection, size, bootblock, tracks, compression);
+        return unreadable_container(detection, size, bootblock, tracks, flux, compression);
     };
     let geometry = match geometry {
         Ok(g) => g,
@@ -567,6 +750,7 @@ pub fn inspect_bytes(bytes: Vec<u8>) -> Inspection {
                 volume: None,
                 volume_absent: Some(e.to_string()),
                 tracks: None,
+                flux: None,
                 assembly: None,
                 description: None,
                 boot_text: Vec::new(),
@@ -587,6 +771,7 @@ pub fn inspect_bytes(bytes: Vec<u8>) -> Inspection {
             volume: None,
             volume_absent: Some("image is shorter than its geometry".to_owned()),
             tracks: None,
+            flux: None,
             assembly: None,
             description: None,
             boot_text: Vec::new(),
@@ -606,6 +791,7 @@ pub fn inspect_bytes(bytes: Vec<u8>) -> Inspection {
     let (rdb, partitions, partition_faults) = read_partition_table(&image);
     Inspection {
         tracks,
+        flux,
         assembly,
         description,
         boot_text,
@@ -810,6 +996,23 @@ impl Inspection {
         faults
     }
 
+    /// The faults as JSON, each one a stable code and a message.
+    ///
+    /// Split out of [`Self::to_json`] only for length; the shape is unchanged.
+    fn faults_json(&self) -> Value {
+        Value::Arr(
+            self.faults()
+                .into_iter()
+                .map(|f| {
+                    Value::Obj(vec![
+                        ("code", Value::str(f.code)),
+                        ("message", Value::str(f.message)),
+                    ])
+                })
+                .collect(),
+        )
+    }
+
     /// The whole inspection as a JSON value (F-015).
     #[must_use]
     pub fn to_json(&self) -> Value {
@@ -861,6 +1064,7 @@ impl Inspection {
                 "tracks",
                 Value::opt(self.tracks.as_ref(), TrackTable::to_json),
             ),
+            ("flux", Value::opt(self.flux.as_ref(), FluxCapture::to_json)),
             (
                 "assembly",
                 Value::opt(self.assembly.as_ref(), |a| {
@@ -900,20 +1104,7 @@ impl Inspection {
                         .collect(),
                 ),
             ),
-            (
-                "faults",
-                Value::Arr(
-                    self.faults()
-                        .into_iter()
-                        .map(|f| {
-                            Value::Obj(vec![
-                                ("code", Value::str(f.code)),
-                                ("message", Value::str(f.message)),
-                            ])
-                        })
-                        .collect(),
-                ),
-            ),
+            ("faults", self.faults_json()),
         ])
     }
 }
