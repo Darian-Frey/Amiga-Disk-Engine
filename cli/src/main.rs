@@ -1597,11 +1597,12 @@ fn identify(paths: &[String], datfiles: Option<&Path>, format: Format) -> ExitCo
                 continue;
             }
         };
-        let matches = catalogue.identify(&bytes);
-        if matches.is_empty() {
-            unknown = unknown.saturating_add(1);
-        } else {
+        let found = catalogue.identify_detailed(&bytes);
+        let matches = found.entries;
+        if found.kind.is_named() {
             named = named.saturating_add(1);
+        } else {
+            unknown = unknown.saturating_add(1);
         }
 
         if format == Format::Json {
@@ -1610,14 +1611,14 @@ fn identify(paths: &[String], datfiles: Option<&Path>, format: Format) -> ExitCo
             // should be readable as it goes rather than only once it ends.
             if !emit_json(
                 &mut out,
-                ade_core::batch::identification_json(path, &matches),
+                ade_core::batch::identification_json(path, &matches, found.kind),
             ) {
                 return ExitCode::from(EXIT_CLEAN);
             }
             continue;
         }
 
-        if matches.is_empty() {
+        if !found.kind.is_named() && matches.is_empty() {
             if !emit(&mut out, &format!("{path}\n  unknown — not in the dataset")) {
                 return ExitCode::from(EXIT_CLEAN);
             }
@@ -1628,12 +1629,25 @@ fn identify(paths: &[String], datfiles: Option<&Path>, format: Format) -> ExitCo
             lines.push(format!("  {}", entry.name));
             lines.push(format!("    from {}", entry.source));
         }
-        if matches.len() > 1 {
-            // A content hash is not an identity. Say so rather than pick.
-            lines.push(format!(
-                "    ! {} entries share this hash — ADE will not choose between them",
+        match found.kind {
+            // The common several-matches case, and not a problem: the dataset
+            // holds one file under more than one name, and both are right.
+            ade_core::layers::catalogue::Match::Duplicated => lines.push(format!(
+                "    ({} names for identical content — every one of them correct)",
                 matches.len()
-            ));
+            )),
+            // The alarming one. Different content claims this hash, so the
+            // disk in hand is not any of them.
+            ade_core::layers::catalogue::Match::Collision => lines.push(format!(
+                "    ! {} different files share this CRC32 and size — this disk is none of them",
+                matches.len()
+            )),
+            // Neither, because the dataset gives nothing to check against.
+            ade_core::layers::catalogue::Match::Unverified => lines.push(format!(
+                "    ! {} entries share this hash and the dataset carries no SHA-1 to separate them",
+                matches.len()
+            )),
+            _ => {}
         }
         for line in &lines {
             if !emit(&mut out, line) {

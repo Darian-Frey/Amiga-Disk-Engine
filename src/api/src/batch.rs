@@ -206,16 +206,23 @@ impl Record {
 /// Lives here because this is the module that already knows about the
 /// catalogue; `ade-catalogue` sits below the JSON writer and cannot reach it.
 ///
-/// **Every match is listed, and `ambiguous` says when there is more than one.**
-/// CRC32 is a content hash, not an identity — 71 collisions were measured
-/// within the TOSEC dataset — so ADE does not choose, and a caller taking
-/// `matches[0]` without checking `ambiguous` would be choosing on its behalf.
+/// **Every match is listed, and `match` says what several of them mean.**
+/// Usually `duplicated`: the dataset holds one file under more than one name,
+/// and every name is correct. `collision` would mean different content
+/// claiming one CRC32, which is the case worth distrusting and has never been
+/// observed in the Amiga set. `ambiguous` is kept, unchanged, as "more than
+/// one entry" — a caller taking `matches[0]` should still look.
 #[must_use]
-pub fn identification_json(path: &str, matches: &[&ade_catalogue::Entry]) -> Value {
+pub fn identification_json(
+    path: &str,
+    matches: &[&ade_catalogue::Entry],
+    kind: ade_catalogue::Match,
+) -> Value {
     Value::Obj(vec![
         ("path", Value::str(path)),
         ("identified", Value::Bool(!matches.is_empty())),
         ("ambiguous", Value::Bool(matches.len() > 1)),
+        ("match", Value::str(match_label(kind))),
         (
             "matches",
             Value::Arr(
@@ -231,6 +238,17 @@ pub fn identification_json(path: &str, matches: &[&ade_catalogue::Entry]) -> Val
             ),
         ),
     ])
+}
+
+/// The stable code for a match kind (F-015: codes are a commitment).
+const fn match_label(kind: ade_catalogue::Match) -> &'static str {
+    match kind {
+        ade_catalogue::Match::Unknown => "unknown",
+        ade_catalogue::Match::Named => "named",
+        ade_catalogue::Match::Duplicated => "duplicated",
+        ade_catalogue::Match::Collision => "collision",
+        ade_catalogue::Match::Unverified => "unverified",
+    }
 }
 
 /// Examine one image, turning any failure into a record rather than an error.

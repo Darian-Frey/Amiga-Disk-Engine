@@ -38,7 +38,10 @@ POLICY = {
     # the same algorithm, and `ade-block` is the lowest layer both can reach;
     # implementing a checksum twice is how two copies of it silently diverge.
     # A deliberate edit, which is what this file is for.
-    "ade-catalogue":  {"ade-object", "ade-block"},
+    # And `ade-endian`, for SHA-1's big-endian words: C-001 admits no
+    # "internal to an algorithm" exception, which is the shape every erosion of
+    # an invariant takes (2026-08-29).
+    "ade-catalogue":  {"ade-object", "ade-block", "ade-endian"},
     "ade-core": {
         "ade-endian", "ade-block", "ade-container", "ade-track",
         "ade-flux", "ade-filesystem", "ade-object", "ade-catalogue",

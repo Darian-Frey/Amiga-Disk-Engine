@@ -464,3 +464,29 @@ Roughly 20% of corpus disks yield reportable text after filtering, and 91% of th
 **Consequences.** Every reporting command emits versioned JSON. The surface starts at **1.0**. Adding a field is cheap and visible; renaming one is possible and visible; doing either by accident is not possible. The inventory costs a test edit per deliberate change, which is the point.
 
 **Reversal conditions.** If the inventory becomes a rubber stamp — updated reflexively to make the build pass, without the version moving — it has stopped working, and the honest response is to say so rather than to keep the ritual. Should ADE ever gain a JSON *parser* (it has none, and F-015 does not need one), a round-trip test would be stronger than an inventory and should replace it.
+
+### D-016 WHDLoad is the wrong kind of dataset; OpenRetro is the right kind and out of reach
+**Decided:** 2026-08-29
+**Recorded:** 2026-08-29
+**Status:** Accepted
+**Authors:** Darian-Frey (decision); Claude (analysis)
+**Related:** F-013, D-002, D-009, D-010, D-013, D-014
+
+**Context.** F-013's acceptance asks ADE to "content-hash the image and match against TOSEC / WHDLoad / OpenRetro datasets". TOSEC has been delivered since 2026-08-27 and names 4,586 of the 4,652 corpus images. This entry is about the other two, and they turn out to be different problems.
+
+**WHDLoad is not an identification dataset for disk images.** The database a tool can actually obtain is Amiberry's `whdload_db.xml`, and every entry is keyed on `filename` plus the **SHA-1 of a WHDLoad LHA archive** — a pre-installed hard-disk package. ADE reads disk images. There is no hash of an ADF anywhere in it, so matching a 4,652-image corpus against it would produce exactly zero matches, correctly. The clause names WHDLoad alongside TOSEC as though they were the same kind of thing; they are not, and no amount of implementation makes them so. Adding it would be building a lookup that cannot match by construction.
+
+**OpenRetro is the right shape and cannot be fetched.** It records ADF and IPF variants by **SHA-1 of the disk file**, which is precisely the key ADE needs. But there is no public bulk export: `openretro.org/api/*` returns 404, `oagd.net` sits behind a Cloudflare challenge, and FS-UAE Launcher — the reference consumer, whose source is public — fetches `/api/sync` only after `/api/auth`, returning early when `database_auth` is unset. The data is behind an account.
+
+**Options.**
+- **A. Implement WHDLoad matching anyway.** Rejected: it cannot match ADE's material. A feature whose measured result is always zero is worse than its absence, because it implies the corpus was checked and found wanting.
+- **B. Scrape OpenRetro page by page.** Rejected on two grounds. It is impolite to a volunteer-run site that has deliberately not published a bulk endpoint, and it would produce a dataset ADE could neither redistribute nor let anyone else reproduce — which fails D-010's standard for material as surely as an uncheckable parser fails D-002's.
+- **C. Deliver what the datasets in hand support; record the other two as unavailable, with the conditions that would change it.** Chosen.
+
+**Decision.** Option C. F-013 stands as **partially delivered**: identification is real, and it is TOSEC's.
+
+**What was delivered instead, from the dataset already here.** Every one of the 88,921 TOSEC entries carries MD5 and SHA-1 as well as CRC32, and ADE indexed only CRC32. Checking what that cost produced a better result than the datasets would have — see below.
+
+**Consequences.** F-013's acceptance clause is not met as written and will not be by effort alone. The `VOCABULARY.md` ManifeST contract remains outstanding and is unblocked; it is ADE's own work rather than someone else's data.
+
+**Reversal conditions.** OpenRetro publishing a bulk export, or the author deciding an account-authenticated sync is acceptable for a local tool, reverses the second half immediately: SHA-1 is implemented, tested against `sha1sum`, and already wired into identification, so the work is a fetcher and a parser. WHDLoad reverses only if ADE grows the ability to read LHA archives — a different feature, not a dataset — or if a WHDLoad database keyed on disk-image hashes appears, which none does today.

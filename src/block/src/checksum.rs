@@ -157,9 +157,14 @@ const CRC32_TABLE: [u32; 256] = {
 /// TOSEC datfiles use it to identify one (`ade-catalogue`). Implementing it
 /// twice is how two copies of a checksum silently diverge.
 ///
-/// It is a content hash, not a cryptographic one: 71 collisions were measured
-/// among 88,833 TOSEC entries, so a caller identifying content by it must
-/// report every match rather than assume one.
+/// It is a content hash, not a cryptographic one, and 32 bits is not many, so
+/// a caller identifying content by it must report every match rather than
+/// assume one.
+///
+/// *(The TOSEC Amiga set was cited here as holding 71 such collisions.
+/// Re-measured 2026-08-29: it holds none. The 77 groups sharing a CRC32 also
+/// share their SHA-1 and MD5 — duplicate content, not collisions. The advice
+/// stands; the evidence given for it was wrong.)*
 #[must_use]
 pub fn crc32(data: &[u8]) -> u32 {
     let mut crc: u32 = 0xFFFF_FFFF;

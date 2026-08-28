@@ -24,12 +24,12 @@ Background context (why ADE exists, the documentation landscape survey, and the 
 
 ## Phase 1 — Read-only ADF core (happy path)
 **Goal:** Parse and extract from plain 880 KB DD ADF images, defensively, through the chosen stack.
-**Status:** In progress — first vertical slice landed 2026-08-22
+**Status:** Complete 2026-08-23 — acceptance met and all three improvements against it applied
 **Features in scope:** F-001, F-002 (initial), F-003 (ADF/ADZ), F-010 (initial), F-015 (initial)
 **Deliverables:**
 - [x] **`ade info <image>`** — the first vertical slice, cutting container → block → endian → filesystem so every seam is exercised before integration rather than after. Reports container kind with its evidence, bootblock, and volume as independent facts (C-008), with stable exit codes (F-015).
 - [x] Bootblock parse + checksum; both checksum algorithms in `ade-block::checksum` as separately named functions. RDB *detection* (parsing is Phase 2).
-- [ ] Mount OFS and FFS volumes: rootblock, bitmap, hash-table directory traversal, file header → extension → data blocks, extraction.
+- [x] Mount OFS and FFS volumes: rootblock, bitmap, hash-table directory traversal, file header → extension → data blocks, extraction. *(The same work as "Mount and traverse" below, written twice while planning; both are done.)*
 - [x] Single byte-order module (C-001); bounds-checked block access via `ValidBlock` (AV-004).
 - [x] Content sniffing as an evidence cascade, not a magic lookup (F-003, C-008): verified against 4288 real images, correctly classifying 4270 canonical ADFs, 11 extended-ADFs, 5 extra-cylinder images and 2 size anomalies.
 - [x] Directory-loop detection (AV-001) — a visited set of block numbers on every chain walked: hash chains, file extension chains, and the tree walk. Not a depth limit, which cannot distinguish a deep tree from a two-block loop.
@@ -37,8 +37,8 @@ Background context (why ADE exists, the documentation landscape survey, and the 
 - [x] `ade ls` and `ade extract`.
 - [x] Differential testing against ADFlib (D-002's oracle) — 2894 of 2896 files byte-identical; the two differences are D-012, where ADE recovers content ADFlib refuses.
 - [x] Fuzz harness at the block level (F-001) — six targets over the block parsers, the sniffer, mount/traverse, deliberately hostile structures, and truncated images. Deterministic PRNG, so a failure reproduces from its seed; runs in CI on every push.
-- [ ] Health report proper (F-010): aggregate the faults `ade info` already finds.
-- [ ] Spike validated against three fixtures: one OFS DD, one FFS DD, one multi-partition HDF.
+- [x] Health report proper (F-010): `ade check`, delivered 2026-08-24 and recorded under Phase 2, where it landed early.
+- [x] Spike validated against three fixtures: OFS DD (`Volume::dd(0)`), FFS DD (`Volume::dd(1)`) and a multi-partition device (`Device` with two partitions), all generated rather than committed (D-010).
 **Acceptance:** Round-trip-read extraction matches a reference tool on the clean fixtures *(met: 99.36% byte-identical against ADFlib over 3900 files; every disagreement investigated and attributed to D-012 or to genuine disk damage, none to a reader fault)*; the fuzz corpus runs with zero crashes *(met 2026-08-23: 900,000 cases across six targets, zero failures)*.
 
 **Phase 1 acceptance is met**, and the three improvements raised against it (IMP-001, IMP-002, IMP-003) are all applied. Applying the last of them uncovered **BUG-003**, a live AV-005 unbounded allocation on the plain ADF path, now fixed.
@@ -145,7 +145,7 @@ Neither run is the F-001 bar, which requires a fuzz corpus rather than well-form
 - [ ] In-app Greaseweazle read/write (F-006); end-to-end pipeline wired (F-005).
 - [x] **Auto-identification against TOSEC (F-013)** — `ade identify --datfiles=DIR <image>...` names images by content hash, and `ade batch --datfiles=DIR` catalogues a whole corpus in one pass. `ade-catalogue` parses Logiqx XML datfiles and indexes them by CRC32.
   **4586 of 4652 corpus images identified (98%)** from 88,921 entries across 98 Amiga datfiles, recovering the full TOSEC name — year, publisher, disk number and the `[cr]`/`[b]`/`[m]` provenance tags a renamed file has lost. `1000cc Turbo.adf` becomes `1000cc Turbo (1990)(Energize)[cr CSL][t +3 Supplex]`.
-  **CRC32 is a content hash, not an identity**: 71 collisions measured among 88,833 entries, and size does not separate them because the colliding pairs share a length. None involves an `.adf` and no corpus image lands on one, so the risk is currently theoretical — which is why `identify` returns *every* match and says when there is more than one, rather than choosing.
+  **Several matches usually means duplicate names, not doubt** — corrected 2026-08-29 from a claim of "71 collisions": **77 groups of entries share a CRC32 and a size, and every member of every group carries the same SHA-1 and the same MD5** — duplicate content under different names (the same CD audio track as track 6 and track 10, the same ISO in two sets), not collisions. There are **zero** CRC32 collisions in the set, and not one of the 77 groups involves an `.adf`. `identify` now classifies rather than shrugs, using SHA-1 only when more than one candidate survives.
   Cost over the whole corpus: 13 seconds and 76 MB, against 5.5 seconds and 9 MB without. The dataset load is only 0.17s of that; the rest is CRC32 over 4.2 GB of image data.
   WHDLoad and OpenRetro are not done — TOSEC was the dataset available. The `VOCABULARY.md` contract is still to be defined.
 - [x] **Corpus-scale batch operations (F-014)** — `ade batch <dir|image>...` verifies a whole corpus in one pass and reports a histogram: containers, findings, how many mounted, how many are sound, bytes recovered. Text or JSON (records as JSON Lines, then a summary object). Progress goes to stderr so stdout stays the machine surface.

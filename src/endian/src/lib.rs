@@ -136,6 +136,7 @@ macro_rules! writer {
 
 writer!(put_u16, u16, 2, "Write a big-endian `u16`.");
 writer!(put_u32, u32, 4, "Write a big-endian `u32`.");
+writer!(put_u64, u64, 8, "Write a big-endian `u64`.");
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, reason = "tests may unwrap")]

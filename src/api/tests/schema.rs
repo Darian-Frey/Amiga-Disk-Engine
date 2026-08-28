@@ -343,7 +343,8 @@ fn identify_emits_exactly_these_fields() {
         "test.dat",
     );
     let refs: Vec<&ade_catalogue::Entry> = entries.iter().collect();
-    let json = ade_core::batch::identification_json("disk.adf", &refs).versioned();
+    let json = ade_core::batch::identification_json("disk.adf", &refs, ade_catalogue::Match::Named)
+        .versioned();
     compare(
         "identify",
         &paths(&json),
@@ -352,6 +353,7 @@ fn identify_emits_exactly_these_fields() {
             "path",
             "identified",
             "ambiguous",
+            "match",
             "matches",
             "matches[].name",
             "matches[].source",

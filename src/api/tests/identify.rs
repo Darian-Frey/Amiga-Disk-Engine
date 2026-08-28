@@ -8,7 +8,8 @@
 //! # What these tests are careful about
 //!
 //! CRC32 is a **content hash, not an identity**. Measured across the real
-//! dataset there are 71 collisions among 88,833 entries, and size does not
+//! dataset there are 77 duplicate-content groups among 88,921 entries — measured
+//! 2026-08-29 as duplicates, not collisions — and size does not
 //! separate them. None involves an `.adf` today, but the property is measured
 //! rather than guaranteed — so `identify` returns every match and the tests
 //! pin that it does.
