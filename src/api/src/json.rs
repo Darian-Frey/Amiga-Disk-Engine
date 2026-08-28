@@ -14,6 +14,34 @@
 
 use core::fmt::Write as _;
 
+/// The version of the JSON surface, carried by every document ADE emits.
+///
+/// # The policy (D-015)
+///
+/// **Major** changes when something a consumer relies on stops being true: a
+/// field is renamed or removed, a type changes, or a value's meaning changes
+/// under an unchanged name. That last one is the dangerous case — a rename
+/// breaks a consumer loudly, a redefinition breaks it silently.
+///
+/// **Minor** changes when a field is added. Additions are safe for a consumer
+/// that ignores what it does not recognise, which every JSON reader does by
+/// default, so they do not warrant a major. The minor is still worth carrying:
+/// it lets a caller say "I need at least 1.2" instead of testing for a field
+/// and guessing why it is missing.
+///
+/// # Why this is checkable rather than promised
+///
+/// A version nobody bumps is worse than no version, because it asserts
+/// stability that is not being maintained. So the field names are inventoried
+/// in `src/api/tests/schema.rs`: any change to what ADE emits fails that test,
+/// and the fix is to edit the inventory *and* move this constant — in the same
+/// commit, where a reviewer can see both. The inventory is the mechanism; this
+/// string is what it protects.
+pub const SCHEMA: &str = "1.0";
+
+/// The name of the version field, so nothing spells it two ways.
+pub const SCHEMA_FIELD: &str = "schema";
+
 /// A JSON value, built before it is written so the structure cannot be
 /// malformed by a stray `push_str`.
 #[derive(Debug, Clone, PartialEq)]
@@ -50,6 +78,39 @@ impl Value {
     #[must_use]
     pub fn opt<T>(value: Option<T>, f: impl FnOnce(T) -> Self) -> Self {
         value.map_or(Self::Null, f)
+    }
+
+    /// This value as a top-level document: the schema version, then it.
+    ///
+    /// # Why the version is added here and not by each builder
+    ///
+    /// Because a document is not a property of a value — it is a property of
+    /// *being written to stdout*. `Inspection::to_json` is a whole document
+    /// under `ade info` and a nested field under `ade check`, and a version
+    /// stamped inside it would appear twice in the second case, on an object
+    /// that is not a document.
+    ///
+    /// So every builder returns a plain object and the single emission point
+    /// in the CLI calls this. That is the shape BUG-008 argued for: a rule one
+    /// function enforces rather than one every new command must remember.
+    ///
+    /// **Every document gets it, including each line of a JSON Lines stream.**
+    /// Versioning only the summary of such a stream fails in exactly the case
+    /// the stream exists for — a consumer reading record by record, or picking
+    /// up a run that was interrupted, has no summary to consult. Twelve bytes
+    /// a line is the price.
+    ///
+    /// The version goes first so it can be read without parsing the rest.
+    #[must_use]
+    pub fn versioned(self) -> Self {
+        let mut out = vec![(SCHEMA_FIELD, Self::str(SCHEMA))];
+        match self {
+            Self::Obj(fields) => out.extend(fields),
+            // Nothing emits a bare array or scalar as a document today. If
+            // something does, it is still versioned rather than quietly not.
+            other => out.push(("value", other)),
+        }
+        Self::Obj(out)
     }
 
     /// Render to a compact string.

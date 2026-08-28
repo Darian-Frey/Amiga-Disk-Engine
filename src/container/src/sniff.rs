@@ -50,6 +50,28 @@ pub enum Kind {
 }
 
 impl Kind {
+    /// A stable identifier for this container kind.
+    ///
+    /// Distinct from [`Display`](fmt::Display), which produces a human
+    /// sentence — `ADF (DD, 80 cylinders)` — carrying a geometry that varies
+    /// between images of the same kind. That is the right thing to read and
+    /// the wrong thing to match on, and F-015 draws exactly this line for
+    /// faults already: the message may be reworded, the code may not.
+    #[must_use]
+    pub const fn code(self) -> &'static str {
+        match self {
+            Self::Adf { .. } => "adf",
+            Self::ExtendedAdf { .. } => "extended-adf",
+            Self::RigidDisk => "rdb",
+            Self::Hardfile => "hardfile",
+            Self::Gzip => "gzip",
+            Self::Dms => "dms",
+            Self::Scp => "scp",
+            Self::Ipf => "ipf",
+            Self::Unknown => "unknown",
+        }
+    }
+
     /// Whether block 0 of this container is an AmigaDOS bootblock.
     ///
     /// Only a raw block image has one. An extended ADF opens with a `UAE-1ADF`

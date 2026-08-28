@@ -68,7 +68,7 @@ fn a_generated_capture_decodes_back_to_the_image_it_came_from() {
         eprintln!("skipping: gw not installed");
         return;
     }
-    let dir = tempdir();
+    let dir = tempdir("roundtrip");
     let adf = fixture(&dir);
     let scp = dir.join("fixture.scp");
     if !encode(&adf, &scp) {
@@ -98,7 +98,7 @@ fn the_header_the_oracle_writes_is_the_header_the_spec_describes() {
         eprintln!("skipping: gw not installed");
         return;
     }
-    let dir = tempdir();
+    let dir = tempdir("header");
     let adf = fixture(&dir);
     let scp = dir.join("fixture.scp");
     if !encode(&adf, &scp) {
@@ -134,7 +134,7 @@ fn a_capture_reads_as_a_browsable_volume() {
         eprintln!("skipping: gw not installed");
         return;
     }
-    let dir = tempdir();
+    let dir = tempdir("browse");
     let adf = fixture(&dir);
     let scp = dir.join("fixture.scp");
     if !encode(&adf, &scp) {
@@ -158,10 +158,16 @@ fn a_capture_reads_as_a_browsable_volume() {
     let _ = fs::remove_dir_all(&dir);
 }
 
-/// A scratch directory of our own, since the workspace has no temp-dir crate
-/// and will not gain one for a test.
-fn tempdir() -> std::path::PathBuf {
-    let base = std::env::temp_dir().join(format!("ade-scp-{}", std::process::id()));
+/// A scratch directory of this test's own, since the workspace has no temp-dir
+/// crate and will not gain one for a test.
+///
+/// `tag` is not decoration. These tests run **concurrently in one process**,
+/// so a directory named only for the process is shared, and each test removing
+/// it at the end deletes the fixtures the others are still using. That failed
+/// roughly one run in three — a flake that looks like an intermittent bug in
+/// the code under test and is nothing of the kind.
+fn tempdir(tag: &str) -> std::path::PathBuf {
+    let base = std::env::temp_dir().join(format!("ade-scp-{}-{tag}", std::process::id()));
     fs::create_dir_all(&base).unwrap();
     base
 }

@@ -29,6 +29,8 @@
 
 use ade_container::Kind;
 
+use crate::json::Value;
+
 /// What a conversion between two formats would cost.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Conversion {
@@ -70,6 +72,62 @@ impl Conversion {
             Self::Refused { .. } => "refused",
         }
     }
+}
+
+impl Conversion {
+    /// One conversion as JSON (F-015, BUG-007).
+    ///
+    /// `kind` and `reason` are separate fields because they answer different
+    /// questions, and F-016 turns on the difference: *refused* is a decision
+    /// that does not expire, *not implemented* is a gap with a cause, and a
+    /// caller deciding whether to wait or to look elsewhere needs to tell them
+    /// apart. Collapsing both into one human-readable sentence would leave it
+    /// parsing prose to find out.
+    #[must_use]
+    pub fn to_json(&self) -> Value {
+        let reason = match self {
+            Self::Lossless => None,
+            Self::Lossy { lost } => Some(*lost),
+            Self::NotImplemented { why } | Self::Refused { why } => Some(*why),
+        };
+        Value::Obj(vec![
+            ("kind", Value::str(self.label())),
+            ("possible", Value::Bool(self.is_possible())),
+            ("reason", Value::opt(reason, Value::str)),
+        ])
+    }
+}
+
+/// The whole conversion matrix as JSON (F-015, BUG-007).
+///
+/// Every ordered pair, including the impossible ones — the matrix is the
+/// answer, and a caller asking "can I convert this to that" needs the pairs
+/// that say no as much as the ones that say yes. Identity pairs are omitted,
+/// as they are in the text form: a format converts to itself by copying.
+#[must_use]
+pub fn matrix_json() -> Value {
+    let kinds = known_formats();
+    let mut rows = Vec::new();
+    for from in &kinds {
+        for to in &kinds {
+            if core::mem::discriminant(from) == core::mem::discriminant(to) {
+                continue;
+            }
+            let verdict = conversion(*from, *to);
+            rows.push(Value::Obj(vec![
+                // Codes, not the display strings: `ADF (DD, 80 cylinders)`
+                // carries a geometry that varies between images of one kind,
+                // so a caller matching on it would be parsing prose. The
+                // labels are alongside for anyone rendering the matrix.
+                ("from", Value::str(from.code())),
+                ("to", Value::str(to.code())),
+                ("from_label", Value::str(from.to_string())),
+                ("to_label", Value::str(to.to_string())),
+                ("conversion", verdict.to_json()),
+            ]));
+        }
+    }
+    Value::Obj(vec![("conversions", Value::Arr(rows))])
 }
 
 impl core::fmt::Display for Conversion {

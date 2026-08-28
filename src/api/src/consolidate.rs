@@ -33,6 +33,8 @@
 
 use std::collections::BTreeMap;
 
+use crate::json::Value;
+
 /// Bytes in one sector.
 const SECTOR: usize = 512;
 
@@ -84,6 +86,40 @@ impl TrackReport {
     pub fn is_unanimous(&self) -> bool {
         self.disputed.is_empty()
     }
+
+    /// One track's disagreements as JSON (F-015, BUG-007).
+    ///
+    /// **The sector numbers are within this track, not absolute.** Sector 2 of
+    /// track 1 is absolute sector 13, and this reports 2. `diff` reports
+    /// absolute indices because it has no track to hang them from; here they
+    /// sit inside the track that owns them, and repeating the absolute number
+    /// would be reporting the track twice. Worth stating because both fields
+    /// are called `sectors` in prose, and a caller comparing the two outputs
+    /// without knowing this would find them disagreeing about the same disk.
+    #[must_use]
+    pub fn to_json(&self) -> Value {
+        Value::Obj(vec![
+            ("track", Value::Num(self.track as u64)),
+            (
+                "disputed",
+                Value::Arr(
+                    self.disputed
+                        .iter()
+                        .map(|s| Value::Num(*s as u64))
+                        .collect(),
+                ),
+            ),
+            (
+                "unresolved",
+                Value::Arr(
+                    self.unresolved
+                        .iter()
+                        .map(|s| Value::Num(*s as u64))
+                        .collect(),
+                ),
+            ),
+        ])
+    }
 }
 
 /// The result of consolidating several dumps.
@@ -121,6 +157,36 @@ impl Consolidation {
         self.unanimous_sectors
             .saturating_add(self.resolved_sectors)
             .saturating_add(self.unresolved_sectors)
+    }
+
+    /// The consolidation as JSON (F-015, BUG-007).
+    ///
+    /// `can_vote` is false with two dumps, and it is not a convenience: every
+    /// disagreement between two dumps ties by definition, so `unresolved` is
+    /// arithmetic rather than damage. A caller that sorted by `unresolved`
+    /// without it would rank two-dump runs as the most broken thing it had.
+    ///
+    /// The merged bytes are deliberately absent. They can be megabytes, JSON
+    /// is the wrong container for them, and `--output` already writes them to
+    /// a file.
+    #[must_use]
+    pub fn to_json(&self) -> Value {
+        Value::Obj(vec![
+            ("sources", Value::Num(self.sources as u64)),
+            ("sectors_total", Value::Num(self.total_sectors() as u64)),
+            ("unanimous", Value::Bool(self.is_unanimous())),
+            ("agreed_sectors", Value::Num(self.unanimous_sectors as u64)),
+            ("resolved_sectors", Value::Num(self.resolved_sectors as u64)),
+            (
+                "unresolved_sectors",
+                Value::Num(self.unresolved_sectors as u64),
+            ),
+            ("can_vote", Value::Bool(self.sources > 2)),
+            (
+                "tracks",
+                Value::Arr(self.tracks.iter().map(TrackReport::to_json).collect()),
+            ),
+        ])
     }
 }
 
@@ -284,6 +350,31 @@ impl Diff {
     #[must_use]
     pub const fn is_identical(&self) -> bool {
         self.bytes_differing == 0
+    }
+
+    /// The comparison as JSON (F-015, BUG-007).
+    ///
+    /// The differing sectors are listed in full rather than summarised. This
+    /// is the machine surface, and the whole reason to compare two dumps is to
+    /// act on *which* sectors moved — a count would make the caller run the
+    /// comparison again itself. A disk holds 1760 of them, so the list is
+    /// bounded by the format.
+    #[must_use]
+    pub fn to_json(&self) -> Value {
+        Value::Obj(vec![
+            ("identical", Value::Bool(self.is_identical())),
+            ("sectors_total", Value::Num(self.sectors_total as u64)),
+            ("sectors_differing", Value::Num(self.sectors.len() as u64)),
+            ("bytes_differing", Value::Num(self.bytes_differing as u64)),
+            (
+                "sectors",
+                Value::Arr(self.sectors.iter().map(|s| Value::Num(*s as u64)).collect()),
+            ),
+            (
+                "tracks",
+                Value::Arr(self.tracks.iter().map(|t| Value::Num(*t as u64)).collect()),
+            ),
+        ])
     }
 }
 

@@ -134,11 +134,23 @@ impl Summary {
                 ),
             ),
             (
+                // An array of pairs, for the same reason `containers` is one —
+                // and here it matters more. These keys are **fault codes**, so
+                // an object keyed on them changes shape with the data: a run
+                // over a healthy corpus and a run over a broken one produce
+                // documents with different fields, and no inventory can pin
+                // that (D-015). Changed before the schema was declared 1.0
+                // precisely so it would not need a major version later.
                 "findings",
-                Value::Obj(
+                Value::Arr(
                     self.findings
                         .iter()
-                        .map(|(k, v)| (*k, Value::Num(*v as u64)))
+                        .map(|(code, images)| {
+                            Value::Obj(vec![
+                                ("code", Value::str(*code)),
+                                ("images", Value::Num(*images as u64)),
+                            ])
+                        })
                         .collect(),
                 ),
             ),
@@ -187,6 +199,38 @@ impl Record {
             ),
         ])
     }
+}
+
+/// One image's identification as JSON (F-015, BUG-007).
+///
+/// Lives here because this is the module that already knows about the
+/// catalogue; `ade-catalogue` sits below the JSON writer and cannot reach it.
+///
+/// **Every match is listed, and `ambiguous` says when there is more than one.**
+/// CRC32 is a content hash, not an identity — 71 collisions were measured
+/// within the TOSEC dataset — so ADE does not choose, and a caller taking
+/// `matches[0]` without checking `ambiguous` would be choosing on its behalf.
+#[must_use]
+pub fn identification_json(path: &str, matches: &[&ade_catalogue::Entry]) -> Value {
+    Value::Obj(vec![
+        ("path", Value::str(path)),
+        ("identified", Value::Bool(!matches.is_empty())),
+        ("ambiguous", Value::Bool(matches.len() > 1)),
+        (
+            "matches",
+            Value::Arr(
+                matches
+                    .iter()
+                    .map(|e| {
+                        Value::Obj(vec![
+                            ("name", Value::str(e.name.clone())),
+                            ("source", Value::str(e.source.clone())),
+                        ])
+                    })
+                    .collect(),
+            ),
+        ),
+    ])
 }
 
 /// Examine one image, turning any failure into a record rather than an error.

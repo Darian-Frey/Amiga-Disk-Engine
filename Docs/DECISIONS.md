@@ -429,3 +429,38 @@ This is the same standard D-013 applied to LNFS: the work is not hard, it is *un
 Roughly 20% of corpus disks yield reportable text after filtering, and 91% of the runs kept contain a space — the measure used to distinguish prose from 68k opcodes that happen to land in the printable range.
 
 **Reversal conditions.** A published, checkable signature set — CRCs or byte patterns with provenance — reverses this immediately; the extraction and reporting path is already in place and a matcher would sit on top of it. Acquiring real infected disks would also reverse it, by making a scanner testable against true positives instead of against descriptions. **Neither is a reason to ship a matcher before then.**
+
+### D-015 The JSON surface carries a version, and an inventory enforces it
+**Decided:** 2026-08-28
+**Recorded:** 2026-08-28
+**Status:** Accepted
+**Authors:** Darian-Frey (decision); Claude (analysis)
+**Related:** F-015, F-016, IMP-001, BUG-007, D-003
+
+**Context.** F-015 has said since 2026-08-22 that "field names and fault codes are stable". That was a promise with nothing behind it. Two things had already gone wrong under it: four commands accepted `--format=json` and printed prose for six days (BUG-007), and nobody noticed, because a machine surface that is never machine-read reports nothing when it breaks.
+
+**A rename does not fail loudly.** This is the specific reason a promise is insufficient here. If ADE renames `bytes_recovered`, a consumer reading that key does not get an error — it gets a *missing value*, which most code treats as zero or null and carries on with. The failure surfaces later, somewhere else, as a wrong number. Compare a renamed function: the build breaks immediately, in the right place.
+
+**Options.**
+- **A. Leave it as a documented promise.** Rejected: it is what we had, and it has already failed once.
+- **B. Version the output only.** Rejected on its own. A version nobody remembers to bump is *worse* than no version, because it asserts a stability that is not being maintained — the consumer now has a reason to trust what it should be checking.
+- **C. Version the output, and inventory every field in a test.** Chosen.
+
+**Decision.** Option C, in three parts.
+
+**Every document carries `schema`, first field.** Including each line of a JSON Lines stream, which is the case versioning is *for*: a consumer reading record by record, or resuming an interrupted run, has no summary to consult. Twelve bytes a line.
+
+**The version is added at one point.** `Value::versioned()` is called by the CLI's single JSON emission path, not by each builder — because being a document is a property of reaching stdout, not of the value. `Inspection::to_json` is a whole document under `ade info` and a nested field under `ade check`; a version stamped inside it would appear twice in the second case, on an object that is not a document. One emission point is also what BUG-007 and BUG-008 both argued for: the same omission happened twice in commands added later, and the answer is a rule one function enforces rather than one every contributor must remember.
+
+**Major and minor mean different things.** Major: a field is renamed, removed, retyped, or **redefined under an unchanged name** — that last is the dangerous one, since a rename breaks a consumer loudly and a redefinition breaks it silently. Minor: a field is added, which is safe for any consumer that ignores what it does not recognise.
+
+**The inventory is the mechanism.** `src/api/tests/schema.rs` lists every field path ADE can emit, per document. Any change to the output fails it, and the fix is to edit the inventory *and* move `json::SCHEMA` in one commit, where a reviewer sees both. This is the same shape as `tools/check-layering.py` (D-003) and `clippy.toml` (C-001): the policy is not that the thing cannot change, but that it cannot change **quietly**.
+
+**Two consequences fell out of writing the inventory**, and both were defects rather than paperwork:
+
+- **An empty array shows none of its element fields**, so a clean fixture would have inventoried `findings` as a leaf and quietly stopped covering `findings[].code`. Each document now has an input that actually produces its optional parts — a damaged image for findings, a partitioned device for `rdb.*` and `partitions[].*`.
+- **`batch`'s summary keyed its findings on fault codes**, so the document's *shape* changed with the data: a healthy corpus and a broken one produced different fields, and no inventory can pin that. Changed to an array of `{code, images}` pairs, matching `containers` — deliberately **before** declaring 1.0, so it did not need a major version later.
+
+**Consequences.** Every reporting command emits versioned JSON. The surface starts at **1.0**. Adding a field is cheap and visible; renaming one is possible and visible; doing either by accident is not possible. The inventory costs a test edit per deliberate change, which is the point.
+
+**Reversal conditions.** If the inventory becomes a rubber stamp — updated reflexively to make the build pass, without the version moving — it has stopped working, and the honest response is to say so rather than to keep the ritual. Should ADE ever gain a JSON *parser* (it has none, and F-015 does not need one), a round-trip test would be stronger than an inventory and should replace it.

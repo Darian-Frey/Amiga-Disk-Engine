@@ -9,21 +9,13 @@ Severity vocabulary: low | medium | high.
 
 ## Open
 
-### BUG-008 `ade formats` panics on a closed pipe
-**Severity:** low
-**Status:** open
-**Found:** 2026-08-28, running `ade formats | head` while checking what SCP conversion reported.
-**Where:** [cli/src/main.rs](../cli/src/main.rs), the `formats` arm.
+_None._
 
-**What is wrong.** `ade formats | head` panics with `failed printing to stdout: Broken pipe (os error 32)`. The matrix is 70-odd lines, so piping it to `head` or `grep -m1` is the obvious way to read it.
-
-**This is a known defect returning.** IMP-001 fixed exactly this for `info` and `ls` on 2026-08-22: `println!` panics on a closed pipe, `SIGPIPE` cannot be restored without `unsafe`, and all output was routed through an `emit` helper that treats a closed pipe as the ordinary end of a command. `formats` was added afterwards and writes with `println!` directly, so it never got the fix — the helper exists and is simply not used here.
-
-**Correct behaviour.** Route the matrix through `emit` like every other command. Worth checking the other later arms at the same time, since the same omission is available to each of them.
+## Fixed
 
 ### BUG-007 `--format=json` is accepted and silently ignored by four commands
 **Severity:** medium
-**Status:** open
+**Status:** fixed
 **Found:** 2026-08-28, auditing F-015's status against what the binary does.
 **Where:** [cli/src/main.rs](../cli/src/main.rs), the `diff`, `consolidate`, `identify` and `formats` arms.
 
@@ -35,7 +27,44 @@ Severity vocabulary: low | medium | high.
 
 **Not a regression.** The flag has been global since IMP-001 on 2026-08-22, and each command added since simply did not wire it up.
 
-## Fixed
+**Fixed 2026-08-28 by emitting, not by rejecting.** All four now honour the flag: `formats` produces the whole conversion matrix, `diff` and `consolidate` a document each, and `identify` one JSON object per image as JSON Lines — the shape `batch` already uses, so a run over thousands of images is readable as it goes rather than only once it ends.
+
+**The new shapes were the part worth thinking about**, because F-015 makes them a commitment the moment they ship, and a field is unconstrained exactly once:
+
+- **The conversion matrix is keyed on codes, not on prose.** `Kind` gained `code()` — `adf`, `extended-adf`, `scp` — because `Display` produces `ADF (DD, 80 cylinders)`, a sentence carrying a geometry that varies between images of one kind. Matching on that is parsing prose. The display strings are alongside as `from_label` / `to_label` for anything rendering the matrix.
+- **A conversion separates what it is from why.** `kind` is `lossless` / `lossy` / `not implemented` / `refused`; `reason` is the sentence. F-016 turns on the difference between the last two — refused is a decision that does not expire, not-implemented is a gap with a cause — and they invite opposite follow-up, so a caller must not have to read English to tell them apart.
+- **`consolidate` reports `can_vote`.** With two dumps every disagreement ties by definition, so `unresolved_sectors` is arithmetic rather than damage; a caller ranking by it without this field would call every two-dump run the most broken thing it had seen.
+- **`diff` lists which sectors moved, not merely how many.** The whole reason to compare two dumps is to act on the answer, and a disk holds 1760 sectors, so the list is bounded by the format rather than by a cap.
+- **`identify` returns every match with `ambiguous`.** CRC32 is a content hash, not an identity — 71 collisions were measured within the TOSEC dataset — so ADE does not choose, and a caller taking `matches[0]` without checking would be choosing on its behalf.
+
+**One inconsistency found and left alone**: `diff`'s sector numbers are absolute while `consolidate`'s are within their track — sector 2 of track 1 is absolute sector 13, and the two commands report it differently. Both are right where they sit, since `consolidate`'s numbers live inside the track object that owns them. It is now stated in the doc comment rather than left for someone to discover by comparing two outputs of the same disk.
+
+**`--output`'s confirmation moved to stderr under JSON only.** Announcing the merged image on stdout would put a line of prose in the middle of a JSON document, which is then not a JSON document. The first attempt moved it for *both* formats and an existing test caught it — fixing the JSON surface is no reason to move a line a text-mode script may already be reading, and "the text output is unchanged" had been asserted a few minutes earlier on the case that happened not to use `--output`.
+
+**Verified**: 400 corpus images through `identify --format=json` gave 400 valid JSON Lines, zero malformed, zero non-ASCII; 50 documents from `diff` and `consolidate` over corpus pairs, zero malformed. Text output for all four commands is byte-identical to before. 12 new tests — 7 on the shapes, 5 on the flag being honoured, the latter checking that the flag *changes what comes out*, since a test asserting only "exit code 0" would have passed throughout the bug's life.
+
+### BUG-008 `ade formats` panics on a closed pipe
+**Severity:** low
+**Status:** fixed
+**Found:** 2026-08-28, running `ade formats | head` while checking what SCP conversion reported.
+**Where:** [cli/src/main.rs](../cli/src/main.rs), the `formats` arm.
+
+**What is wrong.** `ade formats | head` panics with `failed printing to stdout: Broken pipe (os error 32)`. The matrix is 70-odd lines, so piping it to `head` or `grep -m1` is the obvious way to read it.
+
+**This is a known defect returning.** IMP-001 fixed exactly this for `info` and `ls` on 2026-08-22: `println!` panics on a closed pipe, `SIGPIPE` cannot be restored without `unsafe`, and all output was routed through an `emit` helper that treats a closed pipe as the ordinary end of a command. `formats` was added afterwards and writes with `println!` directly, so it never got the fix — the helper exists and is simply not used here.
+
+**Correct behaviour.** Route the matrix through `emit` like every other command. Worth checking the other later arms at the same time, since the same omission is available to each of them.
+
+**Fixed 2026-08-28, and it was six commands rather than one.** Checking the other arms found `--help`, `--version`, `convert`, `diff` and `consolidate` doing the same thing — every command written after IMP-001, and none of the ones written before it. The defect is not really "`formats` used `println!`"; it is that the rule lived only in a doc comment, where each new command had to rediscover it.
+
+So three things changed rather than one. The direct writes are gone. `emit_lines` now exists for the common case — a command with a block of output — so the pattern to copy is one call rather than a loop somebody might not write. And `cli/tests/pipes.rs` runs commands into a reader that stops, asserting none exits 101, which is what a panic looks like from outside.
+
+**The test was checked against the bug**, not just against the fix: restoring `println!` in `formats` makes it fail with `` `ade formats` panicked when its output was not read ``. A regression test that has never seen the regression is a guess.
+
+**One consequence worth knowing.** `println!` flushes on every newline; a locked writer flushed once at the end does not. So output now reaches the pipe in one block, which is why `--help` never panicked in practice even before the fix — 1.5 KB fits the 64 KB pipe buffer, and the writer never learns the reader is gone. `formats` panicked because `println!` flushed line by line and met the closed pipe on line two. That also means `cli/tests/pipes.rs` is a net rather than a proof: a small command may pass whether or not it is correct, which is why the deterministic check on `emit_lines` lives in `main.rs`'s own tests against a writer that fails on demand.
+
+**Verified identical.** `formats`, `--help`, `--version`, `diff` and `consolidate` produce byte-identical output before and after.
+
 
 ### BUG-006 The fixture generator panicked on any volume larger than ~2 MB
 **Severity:** medium

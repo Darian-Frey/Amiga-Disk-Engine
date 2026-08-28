@@ -73,6 +73,16 @@ const EXIT_DATA_AT_RISK: u8 = 5;
 /// unacceptable — and restoring the default `SIGPIPE` disposition needs a
 /// `libc` call behind `unsafe`, which the workspace forbids (D-001). So every
 /// line of output goes through here, and a closed pipe simply stops the loop.
+///
+/// # This was a claim before it was true (BUG-008)
+///
+/// "Every line of output goes through here" was written when `info` and `ls`
+/// were the only commands there were (IMP-001). Six arms added afterwards —
+/// `--help`, `--version`, `convert`, `formats`, `diff` and `consolidate` —
+/// each wrote with `println!`, and `ade formats | head` panicked. A rule that
+/// lives only in a doc comment is one every later contributor has to
+/// rediscover, so [`emit_lines`] now exists for the common case of a block of
+/// output, and `cli/tests/pipes.rs` runs commands into a reader that stops.
 fn emit(out: &mut impl Write, line: &str) -> bool {
     match writeln!(out, "{line}") {
         Ok(()) => true,
@@ -86,6 +96,27 @@ fn emit(out: &mut impl Write, line: &str) -> bool {
             false
         }
     }
+}
+
+/// Write one JSON document, stamped with the schema version (F-015, D-015).
+///
+/// **The single point where JSON reaches stdout.** Every command's machine
+/// output goes through here, so the version cannot be forgotten by a command
+/// added later — which is precisely how `--format=json` came to be silently
+/// ignored by four commands (BUG-007) and how six commands came to panic on a
+/// closed pipe (BUG-008). The same mistake twice is a design signal.
+fn emit_json(out: &mut impl Write, value: ade_core::json::Value) -> bool {
+    emit(out, &value.versioned().to_json())
+}
+
+/// Write a block of lines, stopping early if the stream closes.
+fn emit_lines(out: &mut impl Write, lines: &[String]) {
+    for line in lines {
+        if !emit(out, line) {
+            return;
+        }
+    }
+    let _ = out.flush();
 }
 
 /// How to render.
@@ -198,15 +229,19 @@ fn main() -> ExitCode {
             args.partition.as_deref(),
         ),
         ("convert", 2) => convert(Path::new(p(0)), Path::new(p(1)), args.raw),
-        ("formats", 0) => formats(),
+        ("formats", 0) => formats(args.format),
         ("batch", n) if n >= 1 => batch(&args.positional, args.format, args.datfiles.as_deref()),
-        ("identify", n) if n >= 1 => identify(&args.positional, args.datfiles.as_deref()),
-        ("diff", 2) => diff_images(Path::new(p(0)), Path::new(p(1))),
+        ("identify", n) if n >= 1 => {
+            identify(&args.positional, args.datfiles.as_deref(), args.format)
+        }
+        ("diff", 2) => diff_images(Path::new(p(0)), Path::new(p(1)), args.format),
         ("consolidate", n) if n >= 2 => {
-            consolidate_images(&args.positional, args.output.as_deref())
+            consolidate_images(&args.positional, args.output.as_deref(), args.format)
         }
         ("--version" | "-V", 0) => {
-            println!("ade {}", ade_core::version());
+            let mut out = std::io::stdout().lock();
+            emit(&mut out, &format!("ade {}", ade_core::version()));
+            let _ = out.flush();
             ExitCode::from(EXIT_CLEAN)
         }
         ("--help" | "-h", 0) => {
@@ -221,33 +256,38 @@ fn main() -> ExitCode {
 }
 
 fn usage() {
-    println!("ade {} — Amiga Disk Engine", ade_core::version());
-    println!();
-    println!("USAGE:");
-    println!("    ade info <image>                   inspect a disk image");
-    println!("    ade check <image>                  full health report (F-010)");
-    println!("    ade ls <image> [path]              list a directory");
-    println!("    ade extract <image> <path> [dest]  extract a file");
-    println!("    ade convert <in> <out>             convert between containers (F-016)");
-    println!("    ade formats                        what converts to what, and what it costs");
-    println!("    ade batch <dir|image>...           verify a whole corpus (F-014)");
-    println!("    ade identify <image>...            name images from TOSEC datfiles (F-013)");
-    println!("    ade diff <a> <b>                   where two dumps of a disk differ (F-009)");
-    println!("    ade consolidate <a> <b> [...]      what several dumps agree on (F-008)");
-    println!("    ade --version");
-    println!();
-    println!("OPTIONS:");
-    println!("    --format=text   human-readable (default); layout is not stable");
-    println!("    --format=json   machine-readable; field names and fault codes are stable");
-    println!("    --partition=P   which partition of a hard disk, by name (DH0) or index (0)");
-    println!("    --raw           convert writes raw MFM tracks (an extended ADF)");
-    println!("    --output=P      consolidate writes the merged image to P");
-    println!("    --datfiles=D    directory of TOSEC .dat files, for identify");
-    println!();
-    println!("EXIT CODES:");
-    println!("    0  clean   1  faults   2  usage   3  unreadable   4  no volume");
-    println!();
-    println!("`check` exits 1 on any warning, and 5 when an error would lose data.");
+    let lines = vec![
+        format!("ade {} — Amiga Disk Engine", ade_core::version()),
+        String::new(),
+        "USAGE:".to_owned(),
+        "    ade info <image>                   inspect a disk image".to_owned(),
+        "    ade check <image>                  full health report (F-010)".to_owned(),
+        "    ade ls <image> [path]              list a directory".to_owned(),
+        "    ade extract <image> <path> [dest]  extract a file".to_owned(),
+        "    ade convert <in> <out>             convert between containers (F-016)".to_owned(),
+        "    ade formats                        what converts to what, and what it costs"
+            .to_owned(),
+        "    ade batch <dir|image>...           verify a whole corpus (F-014)".to_owned(),
+        "    ade identify <image>...            name images from TOSEC datfiles (F-013)".to_owned(),
+        "    ade diff <a> <b>                   where two dumps of a disk differ (F-009)"
+            .to_owned(),
+        "    ade consolidate <a> <b> [...]      what several dumps agree on (F-008)".to_owned(),
+        "    ade --version".to_owned(),
+        String::new(),
+        "OPTIONS:".to_owned(),
+        "    --format=text   human-readable (default); layout is not stable".to_owned(),
+        "    --format=json   machine-readable; field names and fault codes are stable".to_owned(),
+        "    --partition=P   which partition of a hard disk, by name (DH0) or index (0)".to_owned(),
+        "    --raw           convert writes raw MFM tracks (an extended ADF)".to_owned(),
+        "    --output=P      consolidate writes the merged image to P".to_owned(),
+        "    --datfiles=D    directory of TOSEC .dat files, for identify".to_owned(),
+        String::new(),
+        "EXIT CODES:".to_owned(),
+        "    0  clean   1  faults   2  usage   3  unreadable   4  no volume".to_owned(),
+        String::new(),
+        "`check` exits 1 on any warning, and 5 when an error would lose data.".to_owned(),
+    ];
+    emit_lines(&mut std::io::stdout().lock(), &lines);
 }
 
 fn info(path: &Path, format: Format) -> ExitCode {
@@ -261,7 +301,7 @@ fn info(path: &Path, format: Format) -> ExitCode {
     let mut out = std::io::stdout().lock();
     match format {
         Format::Json => {
-            emit(&mut out, &inspection.to_json().to_json());
+            emit_json(&mut out, inspection.to_json());
         }
         Format::Text => report_text(&mut out, path, &inspection),
     }
@@ -671,8 +711,7 @@ fn list(path: &Path, dir: Option<&str>, format: Format, partition: Option<&str>)
     match format {
         Format::Json => {
             for e in &entries {
-                let json = entry_to_json(e, &volume.path_components(e)).to_json();
-                if !emit(&mut out, &json) {
+                if !emit_json(&mut out, entry_to_json(e, &volume.path_components(e))) {
                     break;
                 }
             }
@@ -811,7 +850,7 @@ fn check(path: &Path, format: Format, partition: Option<&str>) -> ExitCode {
     let mut out = std::io::stdout().lock();
     match format {
         Format::Json => {
-            emit(&mut out, &health.to_json().to_json());
+            emit_json(&mut out, health.to_json());
         }
         Format::Text => report_health(&mut out, path, &health),
     }
@@ -1036,8 +1075,10 @@ fn convert(input: &Path, output: &Path, raw: bool) -> ExitCode {
     } else {
         to.to_string()
     };
-    println!("{from}  ->  {target}");
-    println!("  {verdict}");
+    emit_lines(
+        &mut std::io::stdout().lock(),
+        &[format!("{from}  ->  {target}"), format!("  {verdict}")],
+    );
 
     if !verdict.is_possible() {
         return ExitCode::from(EXIT_USAGE);
@@ -1089,29 +1130,45 @@ fn convert(input: &Path, output: &Path, raw: bool) -> ExitCode {
         eprintln!("ade: {}: {e}", output.display());
         return ExitCode::from(EXIT_UNREADABLE);
     }
-    println!("  wrote {} bytes to {}", out_bytes.len(), output.display());
+    emit_lines(
+        &mut std::io::stdout().lock(),
+        &[format!(
+            "  wrote {} bytes to {}",
+            out_bytes.len(),
+            output.display()
+        )],
+    );
     ExitCode::from(EXIT_CLEAN)
 }
 
 /// Print the conversion matrix (F-016).
-fn formats() -> ExitCode {
+fn formats(format: Format) -> ExitCode {
+    if format == Format::Json {
+        let mut out = std::io::stdout().lock();
+        emit_json(&mut out, ade_core::convert::matrix_json());
+        let _ = out.flush();
+        return ExitCode::from(EXIT_CLEAN);
+    }
     let kinds = ade_core::convert::known_formats();
-    println!("What ADE can convert, and what it would cost.");
-    println!();
+    let mut lines = vec![
+        "What ADE can convert, and what it would cost.".to_owned(),
+        String::new(),
+    ];
     for from in &kinds {
-        println!("  from {from}:");
+        lines.push(format!("  from {from}:"));
         for to in &kinds {
-            let verdict = conversion(*from, *to);
             // A format to itself is a copy; saying so for every row is noise.
             if std::mem::discriminant(from) == std::mem::discriminant(to) {
                 continue;
             }
-            println!("    -> {:<32} {verdict}", to.to_string());
+            let verdict = conversion(*from, *to);
+            lines.push(format!("    -> {:<32} {verdict}", to.to_string()));
         }
-        println!();
+        lines.push(String::new());
     }
-    println!("Lossy conversions are refused outright, not warned about: the loss");
-    println!("is not recoverable, and a warning nobody reads is how it happens.");
+    lines.push("Lossy conversions are refused outright, not warned about: the loss".to_owned());
+    lines.push("is not recoverable, and a warning nobody reads is how it happens.".to_owned());
+    emit_lines(&mut std::io::stdout().lock(), &lines);
     ExitCode::from(EXIT_CLEAN)
 }
 
@@ -1187,7 +1244,7 @@ fn read_all(paths: &[String]) -> Result<Vec<Vec<u8>>, ExitCode> {
 }
 
 /// Report where two dumps of a disk differ (F-009).
-fn diff_images(a: &Path, b: &Path) -> ExitCode {
+fn diff_images(a: &Path, b: &Path, format: Format) -> ExitCode {
     let images = match read_all(&[a.display().to_string(), b.display().to_string()]) {
         Ok(i) => i,
         Err(code) => return code,
@@ -1203,24 +1260,39 @@ fn diff_images(a: &Path, b: &Path) -> ExitCode {
         }
     };
 
-    println!("{}", a.display());
-    println!("{}", b.display());
+    if format == Format::Json {
+        let mut out = std::io::stdout().lock();
+        emit_json(&mut out, report.to_json());
+        let _ = out.flush();
+        return ExitCode::from(if report.is_identical() {
+            EXIT_CLEAN
+        } else {
+            EXIT_FAULTS
+        });
+    }
+
+    let mut lines = vec![a.display().to_string(), b.display().to_string()];
     if report.is_identical() {
-        println!("  identical — {} sectors compared", report.sectors_total);
+        lines.push(format!(
+            "  identical — {} sectors compared",
+            report.sectors_total
+        ));
+        emit_lines(&mut std::io::stdout().lock(), &lines);
         return ExitCode::from(EXIT_CLEAN);
     }
-    println!(
+    lines.push(format!(
         "  {} of {} sectors differ, {} bytes",
         report.sectors.len(),
         report.sectors_total,
         report.bytes_differing
-    );
-    println!("  tracks  {}", summarise(&report.tracks));
+    ));
+    lines.push(format!("  tracks  {}", summarise(&report.tracks)));
+    emit_lines(&mut std::io::stdout().lock(), &lines);
     ExitCode::from(EXIT_FAULTS)
 }
 
 /// Report what several dumps of a disk agree on (F-008).
-fn consolidate_images(paths: &[String], output: Option<&Path>) -> ExitCode {
+fn consolidate_images(paths: &[String], output: Option<&Path>, format: Format) -> ExitCode {
     let images = match read_all(paths) {
         Ok(i) => i,
         Err(code) => return code,
@@ -1233,52 +1305,85 @@ fn consolidate_images(paths: &[String], output: Option<&Path>) -> ExitCode {
         }
     };
 
-    println!(
-        "{} dumps, {} sectors each",
-        report.sources,
-        report.total_sectors()
-    );
-    println!("  agreed      {} sectors", report.unanimous_sectors);
-    println!(
-        "  resolved    {} sectors by plurality",
-        report.resolved_sectors
-    );
-    println!(
-        "  unresolved  {} sectors with no majority",
-        report.unresolved_sectors
-    );
+    if format == Format::Json {
+        let mut out = std::io::stdout().lock();
+        emit_json(&mut out, report.to_json());
+        let _ = out.flush();
+        // The merged image still goes to `--output` if asked for: JSON is the
+        // report, not the disk.
+        return write_merged(&report, output, format);
+    }
+
+    let mut lines = vec![
+        format!(
+            "{} dumps, {} sectors each",
+            report.sources,
+            report.total_sectors()
+        ),
+        format!("  agreed      {} sectors", report.unanimous_sectors),
+        format!(
+            "  resolved    {} sectors by plurality",
+            report.resolved_sectors
+        ),
+        format!(
+            "  unresolved  {} sectors with no majority",
+            report.unresolved_sectors
+        ),
+    ];
     if report.sources == 2 && report.unresolved_sectors > 0 {
         // Worth saying plainly: with two dumps every disagreement is a tie by
         // definition, so "unresolved" here is arithmetic, not damage.
-        println!("              (two dumps cannot vote — every difference ties)");
+        lines.push("              (two dumps cannot vote — every difference ties)".to_owned());
     }
 
     if !report.tracks.is_empty() {
-        println!("  tracks that disagree");
+        lines.push("  tracks that disagree".to_owned());
         for track in report.tracks.iter().take(12) {
             let unresolved = if track.unresolved.is_empty() {
                 String::new()
             } else {
                 format!(", {} unresolved", track.unresolved.len())
             };
-            println!(
+            lines.push(format!(
                 "    {:3}  sectors {:?}{unresolved}",
                 track.track, track.disputed
-            );
+            ));
         }
         if report.tracks.len() > 12 {
-            println!(
+            lines.push(format!(
                 "    ... and {} more tracks",
                 report.tracks.len().saturating_sub(12)
-            );
+            ));
         }
     }
 
     // Agreement is not correctness: these may be dumps of different physical
     // copies, so a plurality says what most dumps hold, not what is right.
-    println!();
-    println!("This reports agreement between dumps, not which dump is correct.");
+    lines.push(String::new());
+    lines.push("This reports agreement between dumps, not which dump is correct.".to_owned());
+    emit_lines(&mut std::io::stdout().lock(), &lines);
 
+    write_merged(&report, output, format)
+}
+
+/// Write the merged image if `--output` asked for one, and report the outcome.
+///
+/// Shared by both output formats: the merge is the same work whether the
+/// report that accompanies it is prose or JSON, and having one copy is what
+/// keeps the two from disagreeing about whether a file was written.
+///
+/// # Where the confirmation goes depends on the format
+///
+/// Under JSON it goes to stderr, because a line of prose in the middle of a
+/// JSON document means it is no longer one. Under text it stays on stdout,
+/// where it has always been — fixing the JSON surface is no reason to move a
+/// line a text-mode script may already be reading. A test caught this being
+/// moved for both.
+fn write_merged(
+    report: &ade_core::Consolidation,
+    output: Option<&Path>,
+    format: Format,
+) -> ExitCode {
     if let Some(path) = output {
         if path.exists() {
             eprintln!(
@@ -1291,7 +1396,12 @@ fn consolidate_images(paths: &[String], output: Option<&Path>) -> ExitCode {
             eprintln!("ade: {}: {e}", path.display());
             return ExitCode::from(EXIT_UNREADABLE);
         }
-        println!("wrote {} bytes to {}", report.bytes.len(), path.display());
+        let line = format!("wrote {} bytes to {}", report.bytes.len(), path.display());
+        if format == Format::Json {
+            eprintln!("{line}");
+        } else {
+            emit_lines(&mut std::io::stdout().lock(), &[line]);
+        }
     }
 
     ExitCode::from(if report.is_unanimous() {
@@ -1367,11 +1477,11 @@ fn batch(paths: &[String], format: Format, datfiles: Option<&Path>) -> ExitCode 
             // Records first as JSON Lines, then the summary object, so a
             // consumer can stream the former and still get the latter.
             for record in &summary.records {
-                if !emit(&mut out, &record.to_json().to_json()) {
+                if !emit_json(&mut out, record.to_json()) {
                     return ExitCode::from(EXIT_CLEAN);
                 }
             }
-            emit(&mut out, &summary.to_json().to_json());
+            emit_json(&mut out, summary.to_json());
         }
         Format::Text => report_batch(&mut out, &summary),
     }
@@ -1456,7 +1566,7 @@ fn percent(part: usize, whole: usize) -> usize {
 }
 
 /// Name images by content hash against a dataset (F-013).
-fn identify(paths: &[String], datfiles: Option<&Path>) -> ExitCode {
+fn identify(paths: &[String], datfiles: Option<&Path>, format: Format) -> ExitCode {
     let Some(dir) = datfiles else {
         eprintln!("ade: identify needs --datfiles=<directory of .dat files>");
         return ExitCode::from(EXIT_USAGE);
@@ -1490,12 +1600,29 @@ fn identify(paths: &[String], datfiles: Option<&Path>) -> ExitCode {
         let matches = catalogue.identify(&bytes);
         if matches.is_empty() {
             unknown = unknown.saturating_add(1);
+        } else {
+            named = named.saturating_add(1);
+        }
+
+        if format == Format::Json {
+            // One object per image, as JSON Lines — the same shape `batch`
+            // uses, and for the same reason: a run over four thousand images
+            // should be readable as it goes rather than only once it ends.
+            if !emit_json(
+                &mut out,
+                ade_core::batch::identification_json(path, &matches),
+            ) {
+                return ExitCode::from(EXIT_CLEAN);
+            }
+            continue;
+        }
+
+        if matches.is_empty() {
             if !emit(&mut out, &format!("{path}\n  unknown — not in the dataset")) {
                 return ExitCode::from(EXIT_CLEAN);
             }
             continue;
         }
-        named = named.saturating_add(1);
         let mut lines = vec![path.clone()];
         for entry in &matches {
             lines.push(format!("  {}", entry.name));
@@ -1518,4 +1645,80 @@ fn identify(paths: &[String], datfiles: Option<&Path>) -> ExitCode {
     let _ = out.flush();
     eprintln!("{named} identified, {unknown} unknown");
     ExitCode::from(if unknown > 0 { EXIT_FAULTS } else { EXIT_CLEAN })
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::panic,
+    clippy::indexing_slicing,
+    reason = "test scaffolding: a failure to set up is a test failure"
+)]
+mod tests {
+    use super::{emit, emit_lines};
+    use std::io::{Error, ErrorKind, Write};
+
+    /// A writer that accepts whole lines until `allow` of them have gone
+    /// through, then reports a closed pipe — which is what `| head -1` does to
+    /// whatever is on the left of it.
+    ///
+    /// Counting lines rather than writes, because `writeln!` does not make one
+    /// write per line: it writes the text and the newline separately, so a
+    /// write counter would cut a line in half and prove nothing about output.
+    struct ClosingPipe {
+        allow: usize,
+        buf: String,
+    }
+
+    impl ClosingPipe {
+        fn new(allow: usize) -> Self {
+            Self {
+                allow,
+                buf: String::new(),
+            }
+        }
+
+        fn lines(&self) -> Vec<&str> {
+            self.buf.lines().collect()
+        }
+    }
+
+    impl Write for ClosingPipe {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            if self.buf.matches('\n').count() >= self.allow {
+                return Err(Error::new(ErrorKind::BrokenPipe, "closed"));
+            }
+            self.buf.push_str(&String::from_utf8_lossy(buf));
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn a_closed_pipe_stops_the_output_rather_than_failing() {
+        let mut pipe = ClosingPipe::new(0);
+        assert!(!emit(&mut pipe, "anything"));
+    }
+
+    #[test]
+    fn emit_lines_stops_at_the_line_the_pipe_closed_on() {
+        // The behaviour that matters is not "does not panic" but "writes what
+        // it can and stops". A loop that kept going would spend the rest of a
+        // corpus run writing into a pipe nobody is reading.
+        let lines: Vec<String> = (0..100).map(|i| format!("line {i}")).collect();
+        let mut pipe = ClosingPipe::new(3);
+        emit_lines(&mut pipe, &lines);
+        assert_eq!(pipe.lines(), vec!["line 0", "line 1", "line 2"]);
+    }
+
+    #[test]
+    fn output_that_fits_is_written_in_full() {
+        let lines: Vec<String> = (0..5).map(|i| format!("line {i}")).collect();
+        let mut pipe = ClosingPipe::new(usize::MAX);
+        emit_lines(&mut pipe, &lines);
+        assert_eq!(pipe.lines().len(), 5);
+        assert_eq!(pipe.lines()[4], "line 4");
+    }
 }
