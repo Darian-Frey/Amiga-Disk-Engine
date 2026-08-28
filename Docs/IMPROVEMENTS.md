@@ -11,8 +11,26 @@ Effort vocabulary: trivial | small | medium | large.
 
 ## Suggested
 
-### IMP-006 The C ABI rebuilds the whole image on every call that reads it
+### IMP-005 An open image is held whole in memory, so the GUI scales with images open
 **Status:** suggested
+**Effort:** medium
+**Found:** 2026-08-27, measuring the GUI's cross-image search against 400 corpus images.
+**Where:** [bridge/src/lib.rs](../bridge/src/lib.rs) `ade_image_open`, and the `ade-core` open path beneath it.
+
+**What works today.** Opening reads the file into memory and keeps it there for the lifetime of the handle. 400 floppy images opened in 580 ms and searched in 79 ms — but at **400 MB resident**, almost exactly the sum of their sizes. The CLI never notices, because `ade batch` reads one image, examines it and drops it; that is how a 4652-image corpus runs at 9 MB peak. The GUI does notice, because the whole point of the multi-image model is that every image stays open.
+
+**Why it could be better.** A person cataloguing a collection may reasonably drop a few hundred floppies in, and a hardfile is not 880 KB — one 500 MB HDF is larger than the entire floppy corpus opened at once. The ceiling is not a floppy count, it is total bytes, and nothing currently reports approaching it.
+
+**Trade-offs.** Memory-mapping or a windowed reader would cut resident size to what is actually touched, but both break the current guarantee that a decompressed container (ADZ, HDZ) and a plain one behave identically — a gzip stream has no seekable backing file, so one of them must stay materialised. It would also put I/O errors on paths that today cannot fail, which is a change to every signature that reads a block. The honest interim measure is far cheaper: report the total resident cost in the GUI and let a person see it climb.
+
+**Partly addressed 2026-08-28 by IMP-006.** What is held is now the *assembled* image rather than the file, so a flux capture costs its 880 KB volume instead of its 30 MB of timings, and a compressed container costs what it decompresses to. Four captures fell from 153.6 MB resident to 36.8 MB. A plain ADF is unchanged, since assembled and raw are the same bytes — so the 400-floppy figure above still stands, and this entry with it.
+
+**Not urgent.** 400 images is well beyond what the acceptance criteria ask for, and the failure mode is a slow machine rather than a wrong answer.
+
+## Applied
+
+### IMP-006 The C ABI rebuilds the whole image on every call that reads it
+**Status:** applied
 **Effort:** small
 **Found:** 2026-08-28, extending the bridge with partition support and reading the code it would sit beside. **Measured the same day**, and the measurement changed the entry — see below.
 **Where:** [bridge/src/lib.rs](../bridge/src/lib.rs), `ade_dir_open`, `ade_walk_open`, `ade_file_read`, and `with_volume` beneath all three.
@@ -36,21 +54,21 @@ That is the difference between a window that feels instant and one that does not
 
 **Deliberately not fixed inline** (Maintenance Rule 8). It was noticed while adding code next to it, which is when a cleanup is most tempting and least reviewed.
 
-### IMP-005 An open image is held whole in memory, so the GUI scales with images open
-**Status:** suggested
-**Effort:** medium
-**Found:** 2026-08-27, measuring the GUI's cross-image search against 400 corpus images.
-**Where:** [bridge/src/lib.rs](../bridge/src/lib.rs) `ade_image_open`, and the `ade-core` open path beneath it.
+**Applied 2026-08-28.** `AdeImage` holds the mounted `Image` instead of the raw bytes, and the health count is computed once at open rather than per call. Nothing borrowed had to become reference-counted, which was the trade-off this entry was worried about: `Inspection` and `Image` are independent values and sit side by side without complaint.
 
-**What works today.** Opening reads the file into memory and keeps it there for the lifetime of the handle. 400 floppy images opened in 580 ms and searched in 79 ms — but at **400 MB resident**, almost exactly the sum of their sizes. The CLI never notices, because `ade batch` reads one image, examines it and drops it; that is how a 4652-image corpus runs at 9 MB peak. The GUI does notice, because the whole point of the multi-image model is that every image stays open.
+| with two 30 MB flux captures open | before | after |
+|---|---|---|
+| expand 84 drawers | 8681 ms | **63 ms** |
+| select 84 rows | 11023 ms | **1115 ms** |
+| search across them | 839 ms | **1 ms** |
+| drag out 12 files | 1276 ms | **0 ms** |
 
-**Why it could be better.** A person cataloguing a collection may reasonably drop a few hundred floppies in, and a hardfile is not 880 KB — one 500 MB HDF is larger than the entire floppy corpus opened at once. The ceiling is not a floppy count, it is total bytes, and nothing currently reports approaching it.
+**And it cut memory rather than trading for it**, which is the opposite of what caching usually costs. Four 30 MB captures held 153.6 MB resident before and **36.8 MB** after — below the on-disk size, because what is now kept is the *assembled* 880 KB volume rather than the flux it came from. That improves [[imp-005]]'s figures for every container that is not already a plain ADF.
 
-**Trade-offs.** Memory-mapping or a windowed reader would cut resident size to what is actually touched, but both break the current guarantee that a decompressed container (ADZ, HDZ) and a plain one behave identically — a gzip stream has no seekable backing file, so one of them must stay materialised. It would also put I/O errors on paths that today cannot fail, which is a change to every signature that reads a block. The honest interim measure is far cheaper: report the total resident cost in the GUI and let a person see it climb.
+**The mounted image had to become optional**, and that is the part worth remembering. A container ADE cannot mount — a truncated file, an unrecognised format — still opens, because the container and the reason are exactly what a person wants from such a file, and a quarter of real images hold no AmigaDOS volume. The first version returned null there and would have made the GUI refuse to describe the very disks someone is puzzled by. `bridge/tests/abi.rs` pins it.
 
-**Not urgent.** 400 images is well beyond what the acceptance criteria ask for, and the failure mode is a slow machine rather than a wrong answer.
+**The finding count is now cached**, so a second risk appeared: a cached number can quietly become a *different* number. The test checks it against `examine`'s own answer rather than against itself.
 
-## Applied
 
 ### IMP-004 The fixture generator cannot build file extension blocks
 **Status:** applied

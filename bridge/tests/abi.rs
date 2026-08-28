@@ -527,3 +527,55 @@ fn partition_calls_tolerate_null_like_everything_else() {
         ade::ade_partitions_free(std::ptr::null_mut());
     }
 }
+
+#[test]
+fn a_container_with_no_usable_geometry_still_opens() {
+    // The handle is how a caller learns *why* an image is unreadable. Refusing
+    // to open one would leave a front end with nothing to say about exactly
+    // the disks a person is puzzled by — and the mounted image being optional
+    // (IMP-006) is what makes this easy to get wrong.
+    let (path, c_path) = fixture("nogeom", &[0xA5u8; 4096]);
+    let mut err = AdeResult::Ok;
+    // SAFETY: a valid path and a writable error slot.
+    let image = unsafe { ade::ade_image_open(c_path.as_ptr(), &raw mut err) };
+    assert!(!image.is_null(), "a truncated file should still open");
+    // SAFETY: a live handle.
+    assert!(!unsafe { ade::ade_image_has_volume(image) });
+    // SAFETY: a live handle; there is a reason and it is a C string.
+    let absent = unsafe { ade::ade_image_volume_absent(image) };
+    assert!(!absent.is_null(), "and should say why");
+
+    // Reading finds nothing rather than crashing.
+    // SAFETY: a live handle with no mounted image behind it.
+    unsafe {
+        assert!(ade::ade_dir_open(image, ade::ADE_WHOLE_IMAGE, 880).is_null());
+        assert!(ade::ade_walk_open(image, ade::ADE_WHOLE_IMAGE).is_null());
+        assert!(ade::ade_file_read(image, ade::ADE_WHOLE_IMAGE, 880).is_null());
+        assert!(ade::ade_partitions_open(image).is_null());
+        ade::ade_image_free(image);
+    }
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn the_finding_count_is_the_health_check_not_the_inspection() {
+    // Counted once at open now rather than per call (IMP-006). The risk in
+    // moving it is that it quietly becomes a *different* number — the
+    // inspection's faults are not the health check's findings — so this pins
+    // it against the engine's own answer.
+    let disk = sound_disk();
+    let (path, c_path) = fixture("findings", &disk);
+    let mut err = AdeResult::Ok;
+    // SAFETY: a valid path and a writable error slot.
+    let image = unsafe { ade::ade_image_open(c_path.as_ptr(), &raw mut err) };
+    // SAFETY: a live handle.
+    let reported = unsafe { ade::ade_image_finding_count(image) };
+    assert_eq!(reported, ade_core::health::examine(disk).findings.len());
+    // Stable across calls, which a cached value could get wrong in the other
+    // direction by being computed from something that moved.
+    // SAFETY: a live handle.
+    assert_eq!(unsafe { ade::ade_image_finding_count(image) }, reported);
+    // SAFETY: a live handle.
+    unsafe { ade::ade_image_free(image) };
+    let _ = std::fs::remove_file(&path);
+}

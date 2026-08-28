@@ -38,7 +38,7 @@ use std::path::PathBuf;
 
 use ade_core::layers::filesystem::entry::EntryKind;
 use ade_core::layers::filesystem::volume::Volume;
-use ade_core::{Image, Inspection, examine, inspect_path};
+use ade_core::{Image, Inspection, examine, inspect_bytes};
 
 /// How a call turned out.
 ///
@@ -202,9 +202,34 @@ pub struct AdePartitions {
 }
 
 /// An open image. Opaque to C.
+///
+/// # Everything expensive is done once, at open
+///
+/// The mounted [`Image`] is held rather than the raw bytes, and the health
+/// count is computed here rather than on demand. Both were per-call before
+/// (IMP-006), and the cost was not the copy: `Image::from_bytes` reassembles
+/// the container, so every directory expansion re-decoded 160 tracks of an SCP
+/// or re-inflated an ADZ. Measured at ~131 ms per interaction with 30 MB
+/// captures open, against ~16 ms on plain ADFs.
 pub struct AdeImage {
-    bytes: Vec<u8>,
+    /// The mounted image. Volumes borrow from this, which is why it is stored
+    /// rather than rebuilt: a `Volume` cannot outlive the `Image` it came
+    /// from, and rebuilding per call was the way to sidestep that.
+    ///
+    /// `None` when the bytes match no usable geometry — a truncated file, or a
+    /// container ADE does not read. **The handle still opens**, because the
+    /// container and the reason are worth having and are the whole point of
+    /// opening such a file: a quarter of real images hold no AmigaDOS volume,
+    /// and a front end that could not open them would be refusing to describe
+    /// exactly the disks a person is puzzled by.
+    image: Option<Image>,
     inspection: Inspection,
+    /// Findings from a full health check, counted at open.
+    ///
+    /// `examine` walks the whole volume and cross-checks the bitmap, so
+    /// running it per call — which is what a badge in a GUI asks for — cost
+    /// more than everything else the window did.
+    findings: usize,
     container: CString,
     absent: Option<CString>,
 }
@@ -248,13 +273,16 @@ fn with_volume<T>(
     partition: u32,
     body: impl FnOnce(&Volume<'_>) -> Option<T>,
 ) -> Option<T> {
-    let handle = Image::from_bytes(image.bytes.clone()).ok()?;
+    let handle = image.image.as_ref()?;
     if partition == ADE_WHOLE_IMAGE {
         let volume = handle.volume().ok()?;
         return body(&volume);
     }
     let (partitions, _faults) = handle.partitions().ok()?;
     let chosen = partitions.get(partition as usize)?;
+    // The window borrows the image and the volume borrows the window, so both
+    // are bound here rather than chained: a temporary window would be dropped
+    // while the volume still pointed into it.
     let window = handle.partition_window(chosen).ok()?;
     let volume = Volume::mount(&window).ok()?;
     body(&volume)
@@ -312,14 +340,16 @@ pub unsafe extern "C" fn ade_image_open(
     let path = PathBuf::from(text);
 
     guard(std::ptr::null_mut(), || {
+        // Read once. `inspect_path` would read the file a second time.
         let Ok(bytes) = std::fs::read(&path) else {
             set(AdeResult::Io);
             return std::ptr::null_mut();
         };
-        let Ok(inspection) = inspect_path(&path) else {
-            set(AdeResult::Io);
-            return std::ptr::null_mut();
-        };
+        let inspection = inspect_bytes(bytes.clone());
+        let findings = examine(bytes.clone()).findings.len();
+        // A container ADE cannot mount still gets a handle: the caller wants
+        // the container and the reason. The reading calls simply find nothing.
+        let handle = Image::from_bytes(bytes).ok();
         let container = CString::new(inspection.detection.kind.to_string()).unwrap_or_default();
         let absent = inspection
             .volume_absent
@@ -327,8 +357,9 @@ pub unsafe extern "C" fn ade_image_open(
             .and_then(|s| CString::new(s.as_str()).ok());
         set(AdeResult::Ok);
         Box::into_raw(Box::new(AdeImage {
-            bytes,
+            image: handle,
             inspection,
+            findings,
             container,
             absent,
         }))
@@ -441,7 +472,7 @@ pub unsafe extern "C" fn ade_image_root_block(image: *const AdeImage) -> u32 {
 /// `image` must be a live handle or null.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ade_image_finding_count(image: *const AdeImage) -> usize {
-    with_image(image, 0, |i| examine(i.bytes.clone()).findings.len())
+    with_image(image, 0, |i| i.findings)
 }
 
 /// List a directory.
@@ -573,7 +604,7 @@ pub unsafe extern "C" fn ade_walk_open(image: *const AdeImage, partition: u32) -
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ade_partitions_open(image: *const AdeImage) -> *mut AdePartitions {
     with_image(image, std::ptr::null_mut(), |image| {
-        let Ok(handle) = Image::from_bytes(image.bytes.clone()) else {
+        let Some(handle) = image.image.as_ref() else {
             return std::ptr::null_mut();
         };
         // A broken chain yields the partitions found before it rather than
