@@ -206,8 +206,12 @@ Status vocabulary: **Not started** | **In progress** | **Partially delivered** (
 **Effort:** M · **Phase:** 2, 5
 **Acceptance:**
 - Parse an RDB partition table in an HDF and browse/edit each volume through the GUI.
-**Status:** Partially delivered (2026-08-24) — reading is done, the GUI is not.
+**Status:** Browsing delivered 2026-08-28; editing is deferred by D-004
 **Notes:** rdbtool is CLI-only; friendly multi-partition HDF editing is essentially absent. Bounded by C-002.
+**Partitions are a level of the tree, not a menu.** A device holds no volume of its own — every volume is inside a partition — so the window shows each partition under the image, with its files under it. A picker would have made the disk look like one volume with a switch beside it, which is what a partition-blind reader assumes and is exactly the misunderstanding to avoid. A partition that holds no AmigaDOS volume says so on its row: `PFS\0` and `SFS\0` partitions are real partitions ADE cannot read, and an empty listing would read as an empty disk.
+**The ABI grew a partition selector rather than a second family of calls.** `ade_dir_open`, `ade_walk_open` and `ade_file_read` each take one, with `ADE_WHOLE_IMAGE` for an image that holds its own volume. A device is not a special case of an image; it is what an image is when it has an RDB.
+**A partition is not an offset.** It carries its own block size and reserved-block count, and the rootblock is computed from both (C-007), so the engine resolves it and the front end passes an index. A caller adding `first_block` to an assumed layout would miss the rootblock of any partition reserving other than two blocks.
+**Editing remains out**, per D-004: read paths ship before their write counterparts, and nothing writes to an image yet.
 
 The parser reads `RDSK`, the `PART` chain and a minimal `FSHD`/`LSEG`, and every partition mounts through a bounds-checked window. `ade info` prints the table, and `ls`/`extract`/`check` take `--partition=` by drive name or index. What remains is the browse/edit surface in the GUI, which belongs to Phase 5, and editing itself, which D-004 defers to Phase 4.
 

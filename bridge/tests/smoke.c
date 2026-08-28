@@ -54,9 +54,9 @@ int main(int argc, char **argv) {
     check(ade_image_size(NULL) == 0, "size(NULL) is 0");
     check(ade_image_has_volume(NULL) == false, "has_volume(NULL) is false");
     check(ade_image_volume_name(NULL).len == 0, "volume_name(NULL) is empty");
-    check(ade_dir_open(NULL, 880) == NULL, "dir_open(NULL) is NULL");
+    check(ade_dir_open(NULL, ADE_WHOLE_IMAGE, 880) == NULL, "dir_open(NULL) is NULL");
     check(ade_listing_count(NULL) == 0, "listing_count(NULL) is 0");
-    check(ade_file_read(NULL, 880) == NULL, "file_read(NULL) is NULL");
+    check(ade_file_read(NULL, ADE_WHOLE_IMAGE, 880) == NULL, "file_read(NULL) is NULL");
     ade_image_free(NULL);      /* must not crash */
     ade_listing_free(NULL);
     ade_buffer_free(NULL);
@@ -73,8 +73,38 @@ int main(int argc, char **argv) {
     printf("size:      %llu\n", (unsigned long long)ade_image_size(image));
     check(ade_image_size(image) > 0, "size is non-zero");
 
+    // The partition table, where there is one. A floppy has none, and null
+    // here is the answer rather than a failure.
+    AdePartitions *table = ade_partitions_open(image);
+    if (table) {
+        size_t n = ade_partitions_count(table);
+        printf("partitions: %zu\n", n);
+        for (size_t i = 0; i < n; i++) {
+            AdePartition p;
+            if (ade_partitions_entry(table, i, &p) != ADE_OK) continue;
+            printf("  ");
+            print_name(p.name);
+            printf("  %u blocks of %u, root %u, %s\n", p.blocks, p.block_size,
+                   p.root_block, p.mounts ? "mounts" : "no AmigaDOS volume");
+            if (p.mounts) {
+                AdeListing *inner = ade_dir_open(image, (uint32_t)i, p.root_block);
+                check(inner != NULL, "a partition lists");
+                ade_listing_free(inner);
+            }
+        }
+        ade_partitions_free(table);
+    } else {
+        printf("partitions: none (not a device)\n");
+    }
+    check(ade_partitions_count(NULL) == 0, "partitions_count(NULL) is 0");
+    ade_partitions_free(NULL);
+
+
+    // A device holds no volume of its own — every volume is inside a
+    // partition — so this check comes *after* the partition table, not before.
+    // Bailing here first meant a hard disk was never exercised at all.
     if (!ade_image_has_volume(image)) {
-        printf("no volume: %s\n", ade_image_volume_absent(image));
+        printf("no volume of its own (a device keeps its volumes in partitions)\n");
         ade_image_free(image);
         return failures ? 1 : 0;
     }
@@ -87,7 +117,7 @@ int main(int argc, char **argv) {
     check(root > 0, "root block is not zero");
     printf("findings:  %zu\n", ade_image_finding_count(image));
 
-    AdeListing *listing = ade_dir_open(image, root);
+    AdeListing *listing = ade_dir_open(image, ADE_WHOLE_IMAGE, root);
     check(listing != NULL, "listed the root directory");
     if (listing) {
         size_t n = ade_listing_count(listing);
@@ -112,7 +142,7 @@ int main(int argc, char **argv) {
         }
 
         if (file_block) {
-            AdeBuffer *buf = ade_file_read(image, file_block);
+            AdeBuffer *buf = ade_file_read(image, ADE_WHOLE_IMAGE, file_block);
             check(buf != NULL, "read a file");
             if (buf) {
                 AdeBytes bytes = ade_buffer_bytes(buf);
@@ -128,7 +158,7 @@ int main(int argc, char **argv) {
     // The whole volume, flattened. This is what a front end searches, and the
     // reason it is here rather than in the front end: the traversal carries
     // the cycle detection (AV-001).
-    AdeListing *walk = ade_walk_open(image);
+    AdeListing *walk = ade_walk_open(image, ADE_WHOLE_IMAGE);
     check(walk != NULL, "walked the volume");
     if (walk) {
         size_t n = ade_listing_count(walk);

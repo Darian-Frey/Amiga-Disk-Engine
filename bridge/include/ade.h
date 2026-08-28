@@ -79,9 +79,35 @@ typedef struct {
     uint32_t     ticks;
 } AdeEntry;
 
-typedef struct AdeImage   AdeImage;   /* an open image   */
-typedef struct AdeListing AdeListing; /* a directory listing */
-typedef struct AdeBuffer  AdeBuffer;  /* a file's contents  */
+typedef struct AdeImage      AdeImage;      /* an open image        */
+typedef struct AdeListing    AdeListing;    /* a directory listing  */
+typedef struct AdeBuffer     AdeBuffer;     /* a file's contents    */
+typedef struct AdePartitions AdePartitions; /* a device's partitions */
+
+/* Pass as `partition` to mean "the image's own volume, not a partition".
+ *
+ * A floppy has one volume and no partition table; a hard disk has a partition
+ * table and no volume of its own. One selector covers both, which is why the
+ * reading calls take it rather than coming in two families. */
+#define ADE_WHOLE_IMAGE ((uint32_t)0xFFFFFFFFu)
+
+/* One partition of a device. Names borrow from the AdePartitions they came
+ * from and are valid until it is freed. */
+typedef struct {
+    AdeBytes name;        /* the drive name, "DH0", Latin-1            */
+    AdeBytes volume_name; /* the volume's own name; empty if unmounted */
+    uint32_t dostype;
+    uint32_t first_block; /* on the device                             */
+    uint32_t blocks;
+    uint32_t block_size;  /* usually 512, and not always               */
+    uint32_t reserved;    /* blocks at the front; fixes the rootblock  */
+    uint32_t root_block;  /* relative to the partition; 0 if unmounted */
+    bool     bootable;    /* flagged bootable                          */
+    /* Whether an AmigaDOS volume actually mounts. Worth more than `bootable`:
+     * a partition can be flagged bootable and hold nothing, or hold a good
+     * volume and not be bootable, or be a PFS/SFS partition ADE cannot read. */
+    bool     mounts;
+} AdePartition;
 
 /* ADE's version. Static; never freed. */
 const char *ade_version(void);
@@ -100,15 +126,33 @@ uint64_t ade_image_size(const AdeImage *image);
 bool     ade_image_has_volume(const AdeImage *image);
 /* Latin-1, borrowed from the image. Empty when there is no volume. */
 AdeBytes ade_image_volume_name(const AdeImage *image);
-/* The root directory's block, for ade_dir_open. Zero when there is no volume. */
+/* The root directory's block, for ade_dir_open with ADE_WHOLE_IMAGE. Zero when
+ * there is no volume — which is every hard disk, whose volumes are inside its
+ * partitions. */
 uint32_t ade_image_root_block(const AdeImage *image);
 /* How many findings a health check reports. */
 size_t   ade_image_finding_count(const AdeImage *image);
 
-/* List a directory. `block` is a root block or an entry's block. Returns NULL
- * if there is no volume or the block is not a directory. Free with
- * ade_listing_free. */
-AdeListing *ade_dir_open(const AdeImage *image, uint32_t block);
+/* A device's partition table, or NULL if it has no Rigid Disk Block — which is
+ * most images, and not a fault. Free with ade_partitions_free.
+ *
+ * Do not take `first_block` and read from there yourself. A partition carries
+ * its own block size and its own reserved-block count, and the rootblock is
+ * computed from both: a partition with four reserved blocks instead of two
+ * puts its rootblock where a caller assuming the usual layout will not find
+ * it. Pass the partition's index to the reading calls instead. */
+AdePartitions *ade_partitions_open(const AdeImage *image);
+size_t         ade_partitions_count(const AdePartitions *partitions);
+/* Copies partition `index` into `*out`. ADE_NOT_FOUND past the end. */
+AdeResult      ade_partitions_entry(const AdePartitions *partitions, size_t index,
+                                    AdePartition *out);
+void           ade_partitions_free(AdePartitions *partitions);
+
+/* List a directory. `block` is a root block or an entry's block; `partition`
+ * is an index from ade_partitions_open, or ADE_WHOLE_IMAGE for an image that
+ * holds its own volume. Returns NULL if there is no such volume or the block
+ * is not a directory. Free with ade_listing_free. */
+AdeListing *ade_dir_open(const AdeImage *image, uint32_t partition, uint32_t block);
 
 /* Every entry on the volume, flattened, with full paths. Use this rather than
  * recursing through ade_dir_open yourself: walking an Amiga volume safely is
@@ -116,7 +160,7 @@ AdeListing *ade_dir_open(const AdeImage *image, uint32_t block);
  * reachable on an uncorrupted disk, and the engine's walk carries a visited
  * set and a depth bound — a cycle grows the path strings without bound even
  * while the entry count stays inside its cap. Free with ade_listing_free. */
-AdeListing *ade_walk_open(const AdeImage *image);
+AdeListing *ade_walk_open(const AdeImage *image, uint32_t partition);
 size_t      ade_listing_count(const AdeListing *listing);
 /* Copies entry `index` into `*out`. ADE_NOT_FOUND past the end. The name in
  * the entry borrows from the listing. */
@@ -125,7 +169,7 @@ void        ade_listing_free(AdeListing *listing);
 
 /* Read a file by its entry block. NULL if it is not a readable file. Free with
  * ade_buffer_free. */
-AdeBuffer *ade_file_read(const AdeImage *image, uint32_t block);
+AdeBuffer *ade_file_read(const AdeImage *image, uint32_t partition, uint32_t block);
 /* Borrowed from the buffer; valid until it is freed. */
 AdeBytes   ade_buffer_bytes(const AdeBuffer *buffer);
 void       ade_buffer_free(AdeBuffer *buffer);

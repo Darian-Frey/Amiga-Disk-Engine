@@ -72,16 +72,29 @@ if(Qt6Test_FOUND)
     # tool. D-010 commits no binaries, so anything needing a real image makes
     # one; doing it here keeps it out of the test's own runtime.
     set(ADE_TEST_IMAGE "${CMAKE_CURRENT_BINARY_DIR}/gui-fixture.adf")
-    add_custom_command(
-        OUTPUT "${ADE_TEST_IMAGE}"
+    # A partitioned hard disk too, since a device is a different shape rather
+    # than a bigger floppy: it holds no volume of its own (F-018).
+    set(ADE_TEST_DEVICE "${CMAKE_CURRENT_BINARY_DIR}/gui-fixture.hdf")
+
+    # Always re-run, like the bridge above, rather than treating the images as
+    # build outputs that exist or do not. As outputs they went stale the moment
+    # the generator changed: a test asserting on a file the fixture tool had
+    # been taught to write would fail against the version written before it,
+    # and the failure looks like a bug in the window. cargo is incremental and
+    # knows whether anything changed; CMake, given only the image path, does
+    # not.
+    add_custom_target(ade_gui_fixture ALL
         COMMAND cargo run --quiet ${CARGO_FLAG} -p ade-fixtures --bin mkfixture
                 --manifest-path "${ADE_ROOT}/Cargo.toml" -- "${ADE_TEST_IMAGE}"
-        COMMENT "Generating the GUI test image"
+        COMMAND cargo run --quiet ${CARGO_FLAG} -p ade-fixtures --bin mkfixture
+                --manifest-path "${ADE_ROOT}/Cargo.toml" -- "${ADE_TEST_DEVICE}" --device
+        BYPRODUCTS "${ADE_TEST_IMAGE}" "${ADE_TEST_DEVICE}"
+        COMMENT "Generating the GUI test images"
         VERBATIM
     )
-    add_custom_target(ade_gui_fixture DEPENDS "${ADE_TEST_IMAGE}")
     add_dependencies(ade-gui-tests ade_gui_fixture)
-    target_compile_definitions(ade-gui-tests PRIVATE ADE_TEST_IMAGE="${ADE_TEST_IMAGE}")
+    target_compile_definitions(ade-gui-tests PRIVATE ADE_TEST_IMAGE="${ADE_TEST_IMAGE}"
+                                                     ADE_TEST_DEVICE="${ADE_TEST_DEVICE}")
     target_link_libraries(ade-gui-tests PRIVATE Qt6::Widgets Qt6::Test "${ADE_LIB}" pthread dl m)
     target_compile_options(ade-gui-tests PRIVATE -Wall -Wextra)
     add_test(NAME gui COMMAND ade-gui-tests)

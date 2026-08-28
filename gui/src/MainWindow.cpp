@@ -34,6 +34,11 @@ constexpr int RolePopulated = Qt::UserRole + 3;
 // Which open image an item belongs to. Every item carries it, so a click in
 // the tree or in the search results knows which disk it means.
 constexpr int RoleImage = Qt::UserRole + 4;
+// Which partition of that image, or ADE_WHOLE_IMAGE for one that holds its own
+// volume. Carried by every item for the same reason: a block number means
+// nothing without the volume it belongs to, and on a hard disk the same number
+// is a different block in every partition.
+constexpr int RolePartition = Qt::UserRole + 5;
 
 // How much of a file to show. A preview is a preview: reading a whole 512 KB
 // file into a text widget to look at its first line is a poor trade.
@@ -211,7 +216,10 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
         if (item->data(0, RolePopulated).toBool()) return;
         item->setData(0, RolePopulated, true);
         const Open *open = imageFor(item);
-        if (open) populate(item, *open, item->data(0, RoleBlock).toUInt());
+        if (open) {
+            populate(item, *open, item->data(0, RolePartition).toUInt(),
+                     item->data(0, RoleBlock).toUInt());
+        }
     });
 
     statusBar()->showMessage(QStringLiteral("Open a disk image, or drop one here"));
@@ -283,8 +291,24 @@ void MainWindow::addImageRoot(Open &open) {
     bold.setBold(true);
     root->setFont(ColName, bold);
 
+    // A hard disk holds no volume of its own: every volume is inside a
+    // partition, so the partitions are a level of the tree rather than
+    // something to choose between in a menu. Nothing else in the window
+    // changes — a partition is just another thing with files under it.
+    const ade::Partitions partitions = open.image.partitions();
+    if (partitions) {
+        for (size_t i = 0; i < partitions.count(); ++i) {
+            AdePartition partition{};
+            if (!partitions.at(i, &partition)) continue;
+            addPartition(root, open, static_cast<quint32>(i), partition);
+        }
+        root->setExpanded(true);
+        return;
+    }
+
     if (!open.image.hasVolume()) return;
-    populate(root, open, open.image.rootBlock());
+    root->setData(0, RolePartition, ADE_WHOLE_IMAGE);
+    populate(root, open, ADE_WHOLE_IMAGE, open.image.rootBlock());
     root->setExpanded(true);
 }
 
@@ -295,16 +319,71 @@ void MainWindow::addImageRoot(Open &open) {
 QString MainWindow::describe(const Open &open) {
     QStringList parts;
     parts << open.image.container();
-    // A missing volume is not an error: a quarter of real images are not
-    // AmigaDOS disks, and the container is still worth showing.
-    parts << (open.image.hasVolume() ? QStringLiteral("\"%1\"").arg(open.image.volumeName())
-                                     : open.image.volumeAbsent());
+    // A device holds no volume of its own, and saying "no rootblock at block
+    // 4096" about a perfectly sound hard disk reads as damage. What it has is
+    // partitions, so that is what it says. The engine draws the same
+    // distinction — a report calling a device volumeless is calling a working
+    // disk broken.
+    const ade::Partitions partitions = open.image.partitions();
+    if (partitions) {
+        const size_t count = partitions.count();
+        size_t mounted = 0;
+        for (size_t i = 0; i < count; ++i) {
+            AdePartition partition{};
+            if (partitions.at(i, &partition) && partition.mounts) ++mounted;
+        }
+        parts << QStringLiteral("%1 partition%2, %3 mounting")
+                     .arg(count)
+                     .arg(count == 1 ? "" : "s")
+                     .arg(mounted);
+    } else {
+        // A missing volume is not an error here either: a quarter of real
+        // images are not AmigaDOS disks, and the container is still worth
+        // showing.
+        parts << (open.image.hasVolume() ? QStringLiteral("\"%1\"").arg(open.image.volumeName())
+                                         : open.image.volumeAbsent());
+    }
     parts << QStringLiteral("%1 bytes").arg(open.image.size());
     const size_t findings = open.image.findingCount();
     if (findings > 0) {
         parts << QStringLiteral("%1 finding%2").arg(findings).arg(findings == 1 ? "" : "s");
     }
     return parts.join(QStringLiteral("   "));
+}
+
+void MainWindow::addPartition(QTreeWidgetItem *root, const Open &open, quint32 index,
+                              const AdePartition &partition) {
+    auto *item = new QTreeWidgetItem(root);
+    const QString name = ade::latin1(partition.name);
+    item->setData(0, RoleImage, static_cast<qulonglong>(open.index));
+    item->setData(0, RolePartition, index);
+    item->setData(0, RoleIsDir, true);
+    item->setData(0, RolePopulated, true);
+    item->setFirstColumnSpanned(true);
+
+    QStringList parts{name};
+    if (partition.mounts) {
+        parts << QStringLiteral("\"%1\"").arg(ade::latin1(partition.volume_name));
+    } else {
+        // Saying so beats showing an empty drawer. A partition ADE cannot read
+        // is a real partition — `PFS\0` and `SFS\0` exist — and an empty
+        // listing would read as an empty disk.
+        parts << QStringLiteral("no AmigaDOS volume");
+    }
+    parts << QStringLiteral("%1 blocks of %2 bytes")
+                 .arg(partition.blocks)
+                 .arg(partition.block_size);
+    if (partition.bootable) parts << QStringLiteral("bootable");
+    item->setText(ColName, parts.join(QStringLiteral("   ")));
+
+    QFont bold = m_tree->font();
+    bold.setBold(true);
+    item->setFont(ColName, bold);
+
+    if (!partition.mounts) return;
+    item->setData(0, RoleBlock, partition.root_block);
+    populate(item, open, index, partition.root_block);
+    item->setExpanded(true);
 }
 
 void MainWindow::showSummary() {
@@ -322,6 +401,23 @@ void MainWindow::showSummary() {
     setWindowTitle(QStringLiteral("%1 — Amiga Disk Engine").arg(only.name));
 }
 
+std::vector<std::pair<quint32, QString>> MainWindow::volumesOf(const Open &open) {
+    std::vector<std::pair<quint32, QString>> out;
+    const ade::Partitions partitions = open.image.partitions();
+    if (partitions) {
+        for (size_t i = 0; i < partitions.count(); ++i) {
+            AdePartition partition{};
+            if (!partitions.at(i, &partition) || !partition.mounts) continue;
+            out.emplace_back(static_cast<quint32>(i),
+                             QStringLiteral("%1 — %2")
+                                 .arg(open.name, ade::latin1(partition.name)));
+        }
+        return out;
+    }
+    if (open.image.hasVolume()) out.emplace_back(ADE_WHOLE_IMAGE, open.name);
+    return out;
+}
+
 const MainWindow::Open *MainWindow::imageFor(const QTreeWidgetItem *item) const {
     if (!item) return nullptr;
     const qulonglong index = item->data(0, RoleImage).toULongLong();
@@ -329,8 +425,9 @@ const MainWindow::Open *MainWindow::imageFor(const QTreeWidgetItem *item) const 
     return m_images[index].get();
 }
 
-void MainWindow::populate(QTreeWidgetItem *parent, const Open &open, quint32 block) {
-    const ade::Listing listing = open.image.list(block);
+void MainWindow::populate(QTreeWidgetItem *parent, const Open &open, quint32 partition,
+                          quint32 block) {
+    const ade::Listing listing = open.image.list(partition, block);
     if (!listing) return;
 
     for (size_t i = 0; i < listing.count(); ++i) {
@@ -348,6 +445,7 @@ void MainWindow::populate(QTreeWidgetItem *parent, const Open &open, quint32 blo
         item->setData(0, RoleBlock, entry.block);
         item->setData(0, RoleIsDir, isDir);
         item->setData(0, RoleImage, static_cast<qulonglong>(open.index));
+        item->setData(0, RolePartition, partition);
 
         if (isDir) {
             // A placeholder child makes the expander appear; the real children
@@ -376,44 +474,56 @@ void MainWindow::search() {
     }
 
     int matches = 0;
+    int volumes = 0;
     for (const auto &open : m_images) {
-        // The engine walks the disk. Doing it here would mean reimplementing
-        // cycle detection in the GUI, and a crafted image would hang the
-        // window (AV-001).
-        const ade::Listing all = open->image.walk();
-        if (!all) continue;
+        // Every volume of every image: on a hard disk that is one search per
+        // partition, and searching only the first would quietly miss most of
+        // the disk.
+        for (const auto &[partition, where] : volumesOf(*open)) {
+            // The engine walks the disk. Doing it here would mean
+            // reimplementing cycle detection in the GUI, and a crafted image
+            // would hang the window (AV-001).
+            const ade::Listing all = open->image.walk(partition);
+            if (!all) continue;
+            ++volumes;
 
-        for (size_t i = 0; i < all.count(); ++i) {
-            AdeEntry entry{};
-            if (!all.entry(i, &entry)) continue;
-            const QString name = ade::latin1(entry.name);
-            if (!name.contains(query, Qt::CaseInsensitive)) continue;
+            for (size_t i = 0; i < all.count(); ++i) {
+                AdeEntry entry{};
+                if (!all.entry(i, &entry)) continue;
+                const QString name = ade::latin1(entry.name);
+                if (!name.contains(query, Qt::CaseInsensitive)) continue;
 
-            const bool isDir =
-                entry.kind == ADE_ENTRY_DIRECTORY || entry.kind == ADE_ENTRY_LINK_DIR;
-            auto *item = new QTreeWidgetItem(m_results);
-            item->setText(0, name);
-            item->setText(1, ade::latin1(entry.path));
-            item->setText(2, open->name);
-            item->setData(0, RoleBlock, entry.block);
-            item->setData(0, RoleIsDir, isDir);
-            item->setData(0, RoleImage, static_cast<qulonglong>(open->index));
-            // Both of these outrun their columns — a TOSEC filename is 80
-            // characters and a path can be deeper than it is wide.
-            item->setToolTip(1, item->text(1));
-            item->setToolTip(2, open->path);
-            ++matches;
+                const bool isDir =
+                    entry.kind == ADE_ENTRY_DIRECTORY || entry.kind == ADE_ENTRY_LINK_DIR;
+                auto *item = new QTreeWidgetItem(m_results);
+                item->setText(0, name);
+                item->setText(1, ade::latin1(entry.path));
+                item->setText(2, where);
+                item->setData(0, RoleBlock, entry.block);
+                item->setData(0, RoleIsDir, isDir);
+                item->setData(0, RoleImage, static_cast<qulonglong>(open->index));
+                item->setData(0, RolePartition, partition);
+                // Both of these outrun their columns — a TOSEC filename is 80
+                // characters and a path can be deeper than it is wide.
+                item->setToolTip(1, item->text(1));
+                item->setToolTip(2, open->path);
+                ++matches;
+            }
         }
     }
 
     m_views->setCurrentWidget(m_results);
-    statusBar()->showMessage(
-        QStringLiteral("%1 match%2 for \"%3\" across %4 image%5")
-            .arg(matches)
-            .arg(matches == 1 ? "" : "es")
-            .arg(query)
-            .arg(m_images.size())
-            .arg(m_images.size() == 1 ? "" : "s"));
+    // Volumes rather than images: on a hard disk the two differ, and "3
+    // images" would undercount what was actually searched.
+    statusBar()->showMessage(QStringLiteral("%1 match%2 for \"%3\" across %4 volume%5 in %6 "
+                                            "image%7")
+                                 .arg(matches)
+                                 .arg(matches == 1 ? "" : "es")
+                                 .arg(query)
+                                 .arg(volumes)
+                                 .arg(volumes == 1 ? "" : "s")
+                                 .arg(m_images.size())
+                                 .arg(m_images.size() == 1 ? "" : "s"));
 }
 
 QByteArray MainWindow::contentsOf(QTreeWidgetItem *item) const {
@@ -422,7 +532,8 @@ QByteArray MainWindow::contentsOf(QTreeWidgetItem *item) const {
     if (!open) return {};
     const QVariant block = item->data(0, RoleBlock);
     if (!block.isValid()) return {};
-    const ade::Buffer buffer = open->image.read(block.toUInt());
+    const ade::Buffer buffer =
+        open->image.read(item->data(0, RolePartition).toUInt(), block.toUInt());
     if (!buffer) return {};
     return buffer.data();
 }

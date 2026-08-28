@@ -59,6 +59,35 @@ private:
     AdeListing *m_raw = nullptr;
 };
 
+// A device's partition table. Move-only, like every other handle.
+class Partitions {
+public:
+    Partitions() = default;
+    explicit Partitions(AdePartitions *raw) : m_raw(raw) {}
+    ~Partitions() { ade_partitions_free(m_raw); }
+
+    Partitions(const Partitions &) = delete;
+    Partitions &operator=(const Partitions &) = delete;
+    Partitions(Partitions &&other) noexcept : m_raw(std::exchange(other.m_raw, nullptr)) {}
+    Partitions &operator=(Partitions &&other) noexcept {
+        if (this != &other) {
+            ade_partitions_free(m_raw);
+            m_raw = std::exchange(other.m_raw, nullptr);
+        }
+        return *this;
+    }
+
+    explicit operator bool() const { return m_raw != nullptr; }
+    size_t count() const { return ade_partitions_count(m_raw); }
+
+    bool at(size_t index, AdePartition *out) const {
+        return ade_partitions_entry(m_raw, index, out) == ADE_OK;
+    }
+
+private:
+    AdePartitions *m_raw = nullptr;
+};
+
 // A file's contents.
 class Buffer {
 public:
@@ -128,11 +157,23 @@ public:
     quint32 rootBlock() const { return ade_image_root_block(m_raw); }
     size_t findingCount() const { return ade_image_finding_count(m_raw); }
 
-    Listing list(quint32 block) const { return Listing{ade_dir_open(m_raw, block)}; }
+    // The device's partitions, or a closed handle for an image that has none —
+    // which is most images, and not a fault.
+    Partitions partitions() const { return Partitions{ade_partitions_open(m_raw)}; }
+
+    // Reading takes a partition index, or ADE_WHOLE_IMAGE for an image holding
+    // its own volume. A partition is not merely an offset: it carries its own
+    // block size and reserved count, and the rootblock is computed from both,
+    // so the engine resolves it rather than the GUI adding numbers together.
+    Listing list(quint32 partition, quint32 block) const {
+        return Listing{ade_dir_open(m_raw, partition, block)};
+    }
     // Every entry on the volume, flattened. The engine does the traversal
     // because doing it here would mean reimplementing cycle detection.
-    Listing walk() const { return Listing{ade_walk_open(m_raw)}; }
-    Buffer read(quint32 block) const { return Buffer{ade_file_read(m_raw, block)}; }
+    Listing walk(quint32 partition) const { return Listing{ade_walk_open(m_raw, partition)}; }
+    Buffer read(quint32 partition, quint32 block) const {
+        return Buffer{ade_file_read(m_raw, partition, block)};
+    }
 
 private:
     AdeImage *m_raw = nullptr;

@@ -11,6 +11,31 @@ Effort vocabulary: trivial | small | medium | large.
 
 ## Suggested
 
+### IMP-006 The C ABI rebuilds the whole image on every call that reads it
+**Status:** suggested
+**Effort:** small
+**Found:** 2026-08-28, extending the bridge with partition support and reading the code it would sit beside. **Measured the same day**, and the measurement changed the entry — see below.
+**Where:** [bridge/src/lib.rs](../bridge/src/lib.rs), `ade_dir_open`, `ade_walk_open`, `ade_file_read`, and `with_volume` beneath all three.
+
+**What works today.** Each call that reads a volume does `Image::from_bytes(image.bytes.clone())`, because `AdeImage` stores the bytes while `Volume` borrows from an `Image`. It is correct.
+
+**The clone is the smaller half.** `Image::from_bytes` also runs `assemble_container`, so what repeats per call is not a memcpy but the **whole container reconstruction**: an SCP has its 160 tracks of flux decoded again, an ADZ is decompressed again, an extended ADF is reassembled again. Every directory expansion, every file preview, every drag.
+
+**Measured in the GUI, offscreen, on this machine:**
+
+| set | per interaction |
+|---|---|
+| plain ADFs (880 KB) | ~16 ms to expand a drawer, ~20 ms to select a row |
+| with 30 MB SCP captures | **~103 ms to expand, ~131 ms to select** |
+
+That is the difference between a window that feels instant and one that does not, and it grows with the image. A 500 MB hardfile would copy 500 MB per click.
+
+**When I logged this I wrote that it was "invisible on a floppy: 880 KB copied per directory expansion".** That was true and it was the wrong measurement — it accounted for the copy and not for the decode, which is the part that scales with how interesting the image is. Flux and compressed containers are exactly the images someone opens a *browser* for.
+
+**Trade-offs.** The fix looks like storing an `Image` in `AdeImage` rather than a `Vec<u8>` — `Image::from_bytes` takes ownership, nothing else needs the raw bytes, so no self-reference is involved and no signature changes. What needs checking first is whether anything depends on the bytes outliving a mounted volume, and whether `Inspection` and `Image` can be held side by side without the borrow checker forcing one into an `Rc`. If it does force that, the cure is worse: a reference count in the one crate that writes `unsafe` is a lifetime question moved rather than answered.
+
+**Deliberately not fixed inline** (Maintenance Rule 8). It was noticed while adding code next to it, which is when a cleanup is most tempting and least reviewed.
+
 ### IMP-005 An open image is held whole in memory, so the GUI scales with images open
 **Status:** suggested
 **Effort:** medium

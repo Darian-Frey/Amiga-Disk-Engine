@@ -7,6 +7,7 @@
 #include <QMainWindow>
 
 #include <memory>
+#include <utility>
 #include <vector>
 
 class ImageTree;
@@ -63,7 +64,13 @@ private:
     };
 
     void addImageRoot(Open &open);
-    void populate(QTreeWidgetItem *parent, const Open &open, quint32 block);
+    // One row per partition of a device, each with its files beneath it.
+    void addPartition(QTreeWidgetItem *root, const Open &open, quint32 index,
+                      const AdePartition &partition);
+    void populate(QTreeWidgetItem *parent, const Open &open, quint32 partition, quint32 block);
+    // Every mountable volume of an image, as (partition selector, label). One
+    // entry for a floppy, one per mounting partition for a hard disk.
+    static std::vector<std::pair<quint32, QString>> volumesOf(const Open &open);
     // Show an entry in the hex and text views, from either tree.
     void showEntry(QTreeWidgetItem *item);
     const Open *imageFor(const QTreeWidgetItem *item) const;

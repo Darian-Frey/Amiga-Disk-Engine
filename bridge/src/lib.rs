@@ -37,6 +37,7 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::PathBuf;
 
 use ade_core::layers::filesystem::entry::EntryKind;
+use ade_core::layers::filesystem::volume::Volume;
 use ade_core::{Image, Inspection, examine, inspect_path};
 
 /// How a call turned out.
@@ -152,6 +153,54 @@ pub struct AdeEntry {
     pub ticks: u32,
 }
 
+/// Passed as `partition` to mean "the image's own volume, not a partition".
+///
+/// A floppy has one volume and no partition table; a hard disk has a partition
+/// table and no volume of its own. One selector covers both, which is why the
+/// reading calls take it rather than coming in two families — a device is not
+/// a special case of an image, it is what an image is when it has an RDB.
+pub const ADE_WHOLE_IMAGE: u32 = u32::MAX;
+
+/// One partition of a device.
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct AdePartition {
+    /// The drive name, `DH0`. Latin-1 bytes, like every other name.
+    pub name: AdeBytes,
+    /// The volume's own name, empty when the partition does not mount.
+    pub volume_name: AdeBytes,
+    /// The dostype longword, unmodified.
+    pub dostype: u32,
+    /// First block of the partition on the device.
+    pub first_block: u32,
+    /// Blocks the partition spans.
+    pub blocks: u32,
+    /// Bytes per block. Usually 512, and not always.
+    pub block_size: u32,
+    /// Blocks reserved at the front, which fixes where the rootblock sits.
+    pub reserved: u32,
+    /// The rootblock, relative to the partition. Zero when it does not mount.
+    pub root_block: u32,
+    /// Whether the partition is flagged bootable.
+    pub bootable: bool,
+    /// Whether an AmigaDOS volume actually mounts inside it.
+    ///
+    /// Separate from `bootable`, and the more useful of the two: a partition
+    /// can be flagged bootable and hold nothing, or hold a perfectly good
+    /// volume and not be bootable. It can also be a `PFS\0` or `SFS\0`
+    /// partition, which is a real partition ADE cannot read.
+    pub mounts: bool,
+}
+
+/// A device's partition table, owned by the caller until freed.
+pub struct AdePartitions {
+    /// Owns the name bytes the entries point into — same role as
+    /// [`AdeListing::names`], and the same reason it must not be removed.
+    #[allow(dead_code, reason = "keeps the name buffers alive for `entries`")]
+    names: Vec<Vec<u8>>,
+    entries: Vec<AdePartition>,
+}
+
 /// An open image. Opaque to C.
 pub struct AdeImage {
     bytes: Vec<u8>,
@@ -181,6 +230,34 @@ pub struct AdeListing {
 /// A file's contents, owned by the caller until freed.
 pub struct AdeBuffer {
     bytes: Vec<u8>,
+}
+
+/// Everything the reading calls need to reach a volume.
+///
+/// The three functions that read — a directory, a walk, a file — each need an
+/// `Image` that outlives the `Volume` borrowed from it, and each may be asked
+/// for a partition instead of the image's own volume. Written once here so the
+/// partition lookup cannot drift between them: a device whose third partition
+/// listed differently from the one it extracted would be a bad way to find out
+/// they were three copies of the same logic.
+///
+/// Returns null-equivalent (`None`) rather than an error, because every caller
+/// of it returns a null pointer on failure and C has no other channel here.
+fn with_volume<T>(
+    image: &AdeImage,
+    partition: u32,
+    body: impl FnOnce(&Volume<'_>) -> Option<T>,
+) -> Option<T> {
+    let handle = Image::from_bytes(image.bytes.clone()).ok()?;
+    if partition == ADE_WHOLE_IMAGE {
+        let volume = handle.volume().ok()?;
+        return body(&volume);
+    }
+    let (partitions, _faults) = handle.partitions().ok()?;
+    let chosen = partitions.get(partition as usize)?;
+    let window = handle.partition_window(chosen).ok()?;
+    let volume = Volume::mount(&window).ok()?;
+    body(&volume)
 }
 
 /// Run `body`, turning any panic into `fallback`.
@@ -369,51 +446,54 @@ pub unsafe extern "C" fn ade_image_finding_count(image: *const AdeImage) -> usiz
 
 /// List a directory.
 ///
-/// `block` is a root or directory block, from [`ade_image_root_block`] or an
-/// [`AdeEntry`]. Returns null if the image has no volume or the block is not a
-/// directory. Release with [`ade_listing_free`].
+/// `block` is a root or directory block, from [`ade_image_root_block`], an
+/// [`AdePartition`], or an [`AdeEntry`]. `partition` selects which volume the
+/// block belongs to: an index from [`ade_partitions_open`], or
+/// [`ADE_WHOLE_IMAGE`] for a floppy or hardfile that holds its own volume.
+///
+/// Returns null if there is no such volume or the block is not a directory.
+/// Release with [`ade_listing_free`].
 ///
 /// # Safety
 /// `image` must be a live handle or null.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn ade_dir_open(image: *const AdeImage, block: u32) -> *mut AdeListing {
+pub unsafe extern "C" fn ade_dir_open(
+    image: *const AdeImage,
+    partition: u32,
+    block: u32,
+) -> *mut AdeListing {
     with_image(image, std::ptr::null_mut(), |image| {
-        // The handle must outlive the volume, which borrows from it — hence
-        // two bindings rather than a chain.
-        let Ok(handle) = Image::from_bytes(image.bytes.clone()) else {
-            return std::ptr::null_mut();
-        };
-        let Ok(volume) = handle.volume() else {
-            return std::ptr::null_mut();
-        };
-        let Ok(listing) = volume.list(block) else {
-            return std::ptr::null_mut();
-        };
+        let found = with_volume(image, partition, |volume| {
+            let listing = volume.list(block).ok()?;
 
-        // Names are copied out so they outlive the volume, which borrows the
-        // image bytes and is dropped at the end of this call.
-        let names: Vec<Vec<u8>> = listing.entries.iter().map(|e| e.name.clone()).collect();
-        let entries = listing
-            .entries
-            .iter()
-            .zip(names.iter())
-            .map(|(entry, name)| AdeEntry {
-                name: AdeBytes::of(name),
-                path: AdeBytes::empty(),
-                block: entry.block,
-                size: entry.byte_size,
-                kind: entry.kind.into(),
-                protection: entry.protection.0,
-                days: entry.altered.days,
-                mins: entry.altered.mins,
-                ticks: entry.altered.ticks,
+            // Names are copied out so they outlive the volume, which borrows
+            // the image bytes and is dropped at the end of this call.
+            let names: Vec<Vec<u8>> = listing.entries.iter().map(|e| e.name.clone()).collect();
+            let entries = listing
+                .entries
+                .iter()
+                .zip(names.iter())
+                .map(|(entry, name)| AdeEntry {
+                    name: AdeBytes::of(name),
+                    path: AdeBytes::empty(),
+                    block: entry.block,
+                    size: entry.byte_size,
+                    kind: entry.kind.into(),
+                    protection: entry.protection.0,
+                    days: entry.altered.days,
+                    mins: entry.altered.mins,
+                    ticks: entry.altered.ticks,
+                })
+                .collect();
+            Some(AdeListing {
+                names,
+                paths: Vec::new(),
+                entries,
             })
-            .collect();
-        Box::into_raw(Box::new(AdeListing {
-            names,
-            paths: Vec::new(),
-            entries,
-        }))
+        });
+        found.map_or(std::ptr::null_mut(), |listing| {
+            Box::into_raw(Box::new(listing))
+        })
     })
 }
 
@@ -432,47 +512,165 @@ pub unsafe extern "C" fn ade_dir_open(image: *const AdeImage, block: u32) -> *mu
 /// # Safety
 /// `image` must be a live handle or null.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn ade_walk_open(image: *const AdeImage) -> *mut AdeListing {
+pub unsafe extern "C" fn ade_walk_open(image: *const AdeImage, partition: u32) -> *mut AdeListing {
+    with_image(image, std::ptr::null_mut(), |image| {
+        let found = with_volume(image, partition, |volume| {
+            let walk = volume.walk(volume.root()).ok()?;
+
+            let names: Vec<Vec<u8>> = walk.entries.iter().map(|(_, e)| e.name.clone()).collect();
+            let paths: Vec<Vec<u8>> = walk
+                .entries
+                .iter()
+                .map(|(path, _)| path.as_bytes().to_vec())
+                .collect();
+            let entries = walk
+                .entries
+                .iter()
+                .zip(names.iter())
+                .zip(paths.iter())
+                .map(|(((_, entry), name), path)| AdeEntry {
+                    name: AdeBytes::of(name),
+                    path: AdeBytes::of(path),
+                    block: entry.block,
+                    size: entry.byte_size,
+                    kind: entry.kind.into(),
+                    protection: entry.protection.0,
+                    days: entry.altered.days,
+                    mins: entry.altered.mins,
+                    ticks: entry.altered.ticks,
+                })
+                .collect();
+            Some(AdeListing {
+                paths,
+                names,
+                entries,
+            })
+        });
+        found.map_or(std::ptr::null_mut(), |listing| {
+            Box::into_raw(Box::new(listing))
+        })
+    })
+}
+
+/// The device's partition table.
+///
+/// Returns null when the image has no Rigid Disk Block, which is most images —
+/// a floppy has no partition table and that is not a fault. Release with
+/// [`ade_partitions_free`].
+///
+/// # Why a partition is not just an offset
+///
+/// It would be tempting for a front end to take `first_block` and read from
+/// there. It must not: a partition carries its own block size and its own
+/// reserved-block count, and the rootblock is computed from both (C-007). A
+/// partition with four reserved blocks instead of two puts its rootblock
+/// somewhere a caller assuming the usual layout will not find it. `root_block`
+/// here is the computed answer, and the reading calls take a partition index
+/// so they can do the same computation rather than trusting an offset.
+///
+/// # Safety
+/// `image` must be a live handle or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ade_partitions_open(image: *const AdeImage) -> *mut AdePartitions {
     with_image(image, std::ptr::null_mut(), |image| {
         let Ok(handle) = Image::from_bytes(image.bytes.clone()) else {
             return std::ptr::null_mut();
         };
-        let Ok(volume) = handle.volume() else {
+        // A broken chain yields the partitions found before it rather than
+        // nothing: half a partition table is still worth browsing.
+        let Ok((partitions, _faults)) = handle.partitions() else {
             return std::ptr::null_mut();
         };
-        let Ok(walk) = volume.walk(volume.root()) else {
+        if partitions.is_empty() {
             return std::ptr::null_mut();
-        };
+        }
 
-        let names: Vec<Vec<u8>> = walk.entries.iter().map(|(_, e)| e.name.clone()).collect();
-        let paths: Vec<Vec<u8>> = walk
-            .entries
-            .iter()
-            .map(|(path, _)| path.as_bytes().to_vec())
-            .collect();
-        let entries = walk
-            .entries
-            .iter()
-            .zip(names.iter())
-            .zip(paths.iter())
-            .map(|(((_, entry), name), path)| AdeEntry {
-                name: AdeBytes::of(name),
-                path: AdeBytes::of(path),
-                block: entry.block,
-                size: entry.byte_size,
-                kind: entry.kind.into(),
-                protection: entry.protection.0,
-                days: entry.altered.days,
-                mins: entry.altered.mins,
-                ticks: entry.altered.ticks,
-            })
-            .collect();
-        Box::into_raw(Box::new(AdeListing {
-            paths,
-            names,
-            entries,
-        }))
+        let mut names: Vec<Vec<u8>> = Vec::with_capacity(partitions.len().saturating_mul(2));
+        let mut entries = Vec::with_capacity(partitions.len());
+        for partition in &partitions {
+            // Whether it mounts is worth more than whether it is flagged
+            // bootable, and only mounting it answers that. A `PFS\0` partition
+            // is a real partition ADE cannot read, and saying so beats an
+            // empty listing.
+            let mounted = handle.partition_window(partition).ok().and_then(|window| {
+                Volume::mount(&window)
+                    .ok()
+                    .map(|v| (v.rootblock().name.clone(), v.root()))
+            });
+
+            names.push(partition.name.clone());
+            let name_index = names.len().saturating_sub(1);
+            names.push(mounted.as_ref().map(|(n, _)| n.clone()).unwrap_or_default());
+            let volume_index = names.len().saturating_sub(1);
+
+            entries.push(AdePartition {
+                name: AdeBytes::of(names.get(name_index).map_or(&[][..], Vec::as_slice)),
+                volume_name: AdeBytes::of(names.get(volume_index).map_or(&[][..], Vec::as_slice)),
+                dostype: partition.dostype,
+                first_block: u32::try_from(partition.first_block()).unwrap_or(0),
+                blocks: u32::try_from(partition.block_count()).unwrap_or(0),
+                block_size: partition.block_size,
+                reserved: partition.reserved,
+                root_block: mounted.as_ref().map_or(0, |(_, root)| *root),
+                bootable: partition.bootable,
+                mounts: mounted.is_some(),
+            });
+        }
+        Box::into_raw(Box::new(AdePartitions { names, entries }))
     })
+}
+
+/// How many partitions the table holds.
+///
+/// # Safety
+/// `partitions` must be a live handle or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ade_partitions_count(partitions: *const AdePartitions) -> usize {
+    guard(0, || {
+        // SAFETY: the caller's contract; null is checked.
+        unsafe { partitions.as_ref() }.map_or(0, |p| p.entries.len())
+    })
+}
+
+/// Copy one partition out of the table.
+///
+/// # Safety
+/// `partitions` must be a live handle or null, and `out` writable or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ade_partitions_entry(
+    partitions: *const AdePartitions,
+    index: usize,
+    out: *mut AdePartition,
+) -> AdeResult {
+    guard(AdeResult::Internal, || {
+        // SAFETY: the caller's contract; both are checked for null.
+        let Some(table) = (unsafe { partitions.as_ref() }) else {
+            return AdeResult::NullArgument;
+        };
+        let Some(slot) = (unsafe { out.as_mut() }) else {
+            return AdeResult::NullArgument;
+        };
+        let Some(entry) = table.entries.get(index) else {
+            return AdeResult::NotFound;
+        };
+        *slot = *entry;
+        AdeResult::Ok
+    })
+}
+
+/// Release a partition table.
+///
+/// # Safety
+/// `partitions` must come from [`ade_partitions_open`], or be null. Freeing
+/// twice is undefined.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ade_partitions_free(partitions: *mut AdePartitions) {
+    guard((), || {
+        if !partitions.is_null() {
+            // SAFETY: the caller's contract.
+            drop(unsafe { Box::from_raw(partitions) });
+        }
+    });
 }
 
 /// How many entries a listing holds.
@@ -540,23 +738,19 @@ pub unsafe extern "C" fn ade_listing_free(listing: *mut AdeListing) {
 /// # Safety
 /// `image` must be a live handle or null.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn ade_file_read(image: *const AdeImage, block: u32) -> *mut AdeBuffer {
+pub unsafe extern "C" fn ade_file_read(
+    image: *const AdeImage,
+    partition: u32,
+    block: u32,
+) -> *mut AdeBuffer {
     with_image(image, std::ptr::null_mut(), |image| {
-        let Ok(handle) = Image::from_bytes(image.bytes.clone()) else {
-            return std::ptr::null_mut();
-        };
-        let Ok(volume) = handle.volume() else {
-            return std::ptr::null_mut();
-        };
-        let Ok(entry) = volume.entry_at(block) else {
-            return std::ptr::null_mut();
-        };
-        let Ok(contents) = volume.read_file(&entry) else {
-            return std::ptr::null_mut();
-        };
-        Box::into_raw(Box::new(AdeBuffer {
-            bytes: contents.into_bytes(),
-        }))
+        let found = with_volume(image, partition, |volume| {
+            let entry = volume.entry_at(block).ok()?;
+            Some(volume.read_file(&entry).ok()?.into_bytes())
+        });
+        found.map_or(std::ptr::null_mut(), |bytes| {
+            Box::into_raw(Box::new(AdeBuffer { bytes }))
+        })
     })
 }
 

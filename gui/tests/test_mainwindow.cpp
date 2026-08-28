@@ -57,12 +57,16 @@ private slots:
     void draggingAFileOutCarriesItsBytes();
     void draggingADirectoryCarriesNothing();
     void closingForgetsEveryImage();
+    void aHardDiskShowsItsPartitionsAsALevelOfTheTree();
+    void aFileInsideAPartitionPreviewsAndExtracts();
+    void searchCoversEveryPartitionNotJustTheFirst();
     void anImageWithNoVolumeDoesNotCrash();
     void anUnreadableFileIsRejectedNotFatal();
 
 private:
     QTemporaryDir m_dir;
     QString m_image;
+    QString m_device;
 };
 
 // The fixture comes from the engine's own generator, built by CMake before
@@ -73,6 +77,8 @@ void TestMainWindow::initTestCase() {
     QVERIFY(m_dir.isValid());
     m_image = QStringLiteral(ADE_TEST_IMAGE);
     QVERIFY2(QFile::exists(m_image), qPrintable(m_image));
+    m_device = QStringLiteral(ADE_TEST_DEVICE);
+    QVERIFY2(QFile::exists(m_device), qPrintable(m_device));
 }
 
 void TestMainWindow::anImageIsARootWithItsEntriesBeneath() {
@@ -346,6 +352,104 @@ void TestMainWindow::anUnreadableFileIsRejectedNotFatal() {
     QCOMPARE(tree->topLevelItemCount(), 1);
     QCOMPARE(tree->topLevelItem(0)->childCount(), 3);
     QCOMPARE(errors.size(), 1);
+}
+
+void TestMainWindow::aHardDiskShowsItsPartitionsAsALevelOfTheTree() {
+    // A device holds no volume of its own — every volume is inside a
+    // partition. Showing the disk's files directly would mean choosing one
+    // partition silently, and showing nothing would call a sound disk empty.
+    MainWindow window;
+    window.openImage(m_device);
+    auto *tree = browser(window);
+    QVERIFY(tree);
+    QCOMPARE(tree->topLevelItemCount(), 1);
+
+    QTreeWidgetItem *root = tree->topLevelItem(0);
+    QCOMPARE(root->childCount(), 2);
+    QVERIFY(root->child(0)->text(0).startsWith(QStringLiteral("DH0")));
+    QVERIFY(root->child(1)->text(0).startsWith(QStringLiteral("DH1")));
+    // Each partition row says what it is, spanning the columns for the same
+    // reason an image row does: a partition has no size or protection bits.
+    QVERIFY(root->child(0)->isFirstColumnSpanned());
+    QVERIFY(root->child(0)->text(0).contains(QStringLiteral("bootable")));
+    QVERIFY(!root->child(1)->text(0).contains(QStringLiteral("bootable")));
+
+    // And the files are under the partition that holds them.
+    QVERIFY(childNamed(root->child(0), QStringLiteral("startup-sequence")));
+    QVERIFY(childNamed(root->child(0), QStringLiteral("Tools")));
+    QVERIFY(childNamed(root->child(1), QStringLiteral("data.bin")));
+    QVERIFY2(!childNamed(root->child(1), QStringLiteral("startup-sequence")),
+             "a partition must not show another partition's files");
+}
+
+void TestMainWindow::aFileInsideAPartitionPreviewsAndExtracts() {
+    // The block numbers inside two partitions overlap, so reading one with the
+    // other's volume would silently return the wrong file rather than fail.
+    MainWindow window;
+    window.openImage(m_device);
+    auto *tree = browser(window);
+    QVERIFY(tree);
+    QTreeWidgetItem *root = tree->topLevelItem(0);
+
+    QTreeWidgetItem *startup =
+        childNamed(root->child(0), QStringLiteral("startup-sequence"));
+    QVERIFY(startup);
+    tree->setCurrentItem(startup);
+
+    const auto views = window.findChildren<QPlainTextEdit *>();
+    QCOMPARE(views.size(), 2);
+    bool sawContents = false;
+    for (auto *view : views) {
+        if (view->toPlainText().contains(QStringLiteral("hello from DH0"))) sawContents = true;
+    }
+    QVERIFY2(sawContents, "a file inside a partition should preview");
+
+    // And drag out, which reads it a second way.
+    QScopedPointer<QMimeData> mime(tree->mimeData({startup}));
+    QVERIFY(mime);
+    QCOMPARE(mime->urls().size(), 1);
+    QFile out(mime->urls().first().toLocalFile());
+    QVERIFY(out.open(QIODevice::ReadOnly));
+    QVERIFY(out.readAll().contains("hello from DH0"));
+}
+
+void TestMainWindow::searchCoversEveryPartitionNotJustTheFirst() {
+    MainWindow window;
+    window.openImage(m_device);
+
+    auto *query = window.findChild<QLineEdit *>();
+    QVERIFY(query);
+    // `readme` exists in **both** partitions. Searching only the first volume
+    // — which is what a device did before partitions existed here — finds one
+    // of the two and looks perfectly successful.
+    query->setText(QStringLiteral("readme"));
+    QMetaObject::invokeMethod(query, "returnPressed");
+
+    auto *found = results(window);
+    QVERIFY(found);
+    QCOMPARE(found->topLevelItemCount(), 2);
+    QStringList where;
+    for (int i = 0; i < found->topLevelItemCount(); ++i) {
+        QCOMPARE(found->topLevelItem(i)->text(0), QStringLiteral("readme"));
+        where << found->topLevelItem(i)->text(2);
+    }
+    QVERIFY2(where.filter(QStringLiteral("DH0")).size() > 0, "DH0 should be searched");
+    QVERIFY2(where.filter(QStringLiteral("DH1")).size() > 0, "DH1 should be searched too");
+    // The result says which partition, not merely which file: the same name
+    // occurs in more than one volume of one disk.
+    QVERIFY(where.first().contains(QStringLiteral("—")));
+
+    // And selecting each gives the file from *that* partition. The two share a
+    // name and a path, so nothing but the partition tells them apart.
+    const auto views = window.findChildren<QPlainTextEdit *>();
+    QStringList shown;
+    for (int i = 0; i < 2; ++i) {
+        found->setCurrentItem(found->topLevelItem(i));
+        shown << views.at(1)->toPlainText();
+    }
+    QVERIFY2(shown[0] != shown[1], "two files of one name must read differently");
+    QVERIFY(shown.filter(QStringLiteral("this is DH0")).size() == 1);
+    QVERIFY(shown.filter(QStringLiteral("this is DH1")).size() == 1);
 }
 
 QTEST_MAIN(TestMainWindow)
