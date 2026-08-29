@@ -11,8 +11,26 @@ Effort vocabulary: trivial | small | medium | large.
 
 ## Suggested
 
-### IMP-008 A directory expansion costs 9 ms, and it is not the bytes
+### IMP-009 Previewing a file builds a 64 KB hex dump nobody can see
 **Status:** suggested
+**Effort:** small
+**Found:** 2026-08-29, separating the two halves of IMP-008's measurement.
+**Where:** [gui/src/MainWindow.cpp](../gui/src/MainWindow.cpp), `showEntry` and `hexDump`.
+
+**What works today.** Clicking a file fills the hex and text views. Correct, and at one click it is imperceptible.
+
+**Why it could be better.** Measured over 30 images, selecting a **directory** takes 0.01 ms and selecting a **file** takes **3.6 ms** — three hundred and fifty times more. The engine read is under 0.05 ms of that, so essentially all of it is building the preview: `hexDump` formats up to 64 KB into roughly four thousand lines and three hundred kilobytes of `QString`, and **both** views are filled whether or not their tab is showing.
+
+Two cheap halves suggest themselves before anything ambitious: fill only the visible tab, and format only what fits on screen rather than the whole 64 KB. The second is the real fix and needs the view to render on demand as it scrolls, which is a different widget rather than a smaller function.
+
+**Trade-offs.** Rendering on demand means the preview is no longer a plain `QPlainTextEdit` holding a finished string, which is the simplest thing that can work and has been right so far. Filling only the visible tab is nearly free but means switching tabs does work that used to be already done — imperceptible either way at these sizes, which is rather the point.
+
+**Not urgent, and the number is misleading on its own.** 3.6 ms is a click, not a corpus: it took selecting 1,478 files in a loop to make it visible at all. Unlike [[imp-008]], which compounded into 35 seconds because it was quadratic in the whole tree, this is linear and bounded by what one person can click. It is recorded because it was measured, not because it hurts.
+
+## Applied
+
+### IMP-008 A directory expansion costs 9 ms, and it is not the bytes
+**Status:** applied
 **Effort:** medium
 **Found:** 2026-08-29, measuring IMP-005 and needing a baseline to compare against.
 **Where:** [bridge/src/lib.rs](../bridge/src/lib.rs) `with_volume`, and `Volume::mount` beneath it.
@@ -23,11 +41,31 @@ Effort vocabulary: trivial | small | medium | large.
 
 What it is, most likely, is that every call through the ABI mounts a fresh `Volume`: `with_volume` re-reads the bootblock and rootblock, and the filesystem re-derives whatever it derives, once per directory listed and once per file previewed. IMP-006 removed the *container* rebuild from that path; the volume mount is what is left.
 
-**Trade-offs.** Caching a mounted `Volume` on the handle means it borrows the `Image` in the same struct — self-reference, which is the thing IMP-006 was pleased to avoid. The alternatives are a mount that is cheap enough not to matter, or a listing call that does the walk itself rather than being called per directory. Measuring which part of the 9 ms is the mount comes first: this entry names a symptom and guesses at a cause, which is not the same as knowing.
+**Trade-offs.** Caching a mounted `Volume` on the handle means it borrows the `Image` in the same struct — self-reference, which is the thing IMP-006 was pleased to avoid.
 
-**Not urgent.** A person expands one drawer at a time and will not notice 9 ms. The number matters because it is the whole cost of the GUI's tree at scale, and because it is now the largest thing left that a measurement has found.
+**Applied 2026-08-29, and the guess was wrong.** Measuring first is what the entry said to do, and doing it found the cause somewhere else entirely.
 
-## Applied
+| | |
+|---|---|
+| `Volume::mount` | **0.002 ms** |
+| mount + `list(root)` | **0.017 ms** |
+| one GUI expansion | **9.3 ms** |
+
+The engine is five hundred times faster than the symptom. Nor was it the measurement harness: expanding with and without `processEvents` between rows gave 9.35 ms and 9.31 ms.
+
+**It was one line of Qt.** The three fixed-width columns used `QHeaderView::ResizeToContents`, added on 2026-08-27 to stop the Modified column truncating to `1990-09-20 17:…`. That mode re-measures **every row in the tree on every insertion**, so the cost of expanding one drawer grows with the whole tree: quadratic, and invisible until there are thousands of rows.
+
+| expanding 3,827 rows over 60 images | |
+|---|---|
+| `ResizeToContents` | **35,648 ms** |
+| widths measured once from the content shape | **247 ms** |
+
+**144× faster, with the column widths unchanged** — a datestamp is always nineteen characters, protection always eight, and a size on an 880 KB disk never exceeds seven digits, so the shape can be measured once with `QFontMetrics` instead of re-measured forever. Verified by looking: full timestamps, all eight flags, nothing truncated.
+
+**The regression test is the widths, not the timing.** A timing assertion cannot catch this at fixture scale — 48 rows is far too few for a quadratic to show, and reintroducing the mode leaves it passing. The widths test fails, because `ResizeToContents` sizes to the content actually present and a fixture's short names are narrower than the widest value the column must fit. Both were checked by putting the bad mode back; the timing test was deleted rather than left to imply a guard it does not give.
+
+**What this says about the entry.** It named a symptom and guessed at a cause, and said so. The guess was wrong in the most useful direction: the suspected fix — caching a mounted volume, with the self-reference that implies — would have bought two microseconds and cost a design.
+
 
 ### IMP-005 An open image is held whole in memory, so the GUI scales with images open
 **Status:** applied

@@ -17,6 +17,7 @@
 #include <QLineEdit>
 #include <QMimeData>
 #include <QPlainTextEdit>
+#include <QFontMetrics>
 #include <QTemporaryDir>
 #include <QTest>
 #include <QTreeWidget>
@@ -62,6 +63,7 @@ private slots:
     void searchCoversEveryPartitionNotJustTheFirst();
     void anImageIsNamedFromTheDatasetAsItOpens();
     void withNoDatasetAnImageIsSimplyUnnamed();
+    void theFixedColumnsShowTheirWholeContents();
     void anImageWithNoVolumeDoesNotCrash();
     void anUnreadableFileIsRejectedNotFatal();
 
@@ -483,6 +485,35 @@ void TestMainWindow::withNoDatasetAnImageIsSimplyUnnamed() {
     auto *tree = browser(window);
     QVERIFY(tree);
     QVERIFY(!tree->topLevelItem(0)->toolTip(0).contains(QStringLiteral("A Named Disk.adf")));
+}
+
+void TestMainWindow::theFixedColumnsShowTheirWholeContents() {
+    // Two things at once, and the second is why this is the guard.
+    //
+    // Left to stretch, the Modified column truncated to "1990-09-20 17:..." —
+    // the one part of a timestamp nobody can infer. So the widths are set from
+    // the *widest value each column can hold*, measured once.
+    //
+    // The obvious way to do that is `QHeaderView::ResizeToContents`, which is
+    // quadratic: Qt re-measures every row in the tree on every insertion, and
+    // expanding 3,827 rows took 35.6 seconds against 0.25 (IMP-008). This test
+    // catches its return deterministically, where a timing test cannot: that
+    // mode sizes to the content actually present, and a fixture's short names
+    // and small sizes are narrower than the widest value the column must fit.
+    // Checked by reintroducing it — this fails, and a timing assertion at
+    // fixture scale does not.
+    MainWindow window;
+    window.openImage(m_image);
+    auto *tree = browser(window);
+    QVERIFY(tree);
+
+    const QFontMetrics metrics(tree->font());
+    QVERIFY2(tree->columnWidth(2) >= metrics.horizontalAdvance(QStringLiteral("1990-09-20 17:10:20")),
+             "a full datestamp must fit");
+    QVERIFY2(tree->columnWidth(3) >= metrics.horizontalAdvance(QStringLiteral("hsparwed")),
+             "all eight protection flags must fit");
+    QVERIFY2(tree->columnWidth(1) >= metrics.horizontalAdvance(QStringLiteral("999999999")),
+             "the largest size on a floppy must fit");
 }
 
 QTEST_MAIN(TestMainWindow)
