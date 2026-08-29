@@ -18,6 +18,7 @@ use std::{fs, io, path::Path};
 use ade_block::{BlockError, BlockSource as _};
 use ade_block::{Geometry, GeometryError, read_at};
 use ade_catalogue::Catalogue;
+use ade_container::file::FileSource;
 use ade_container::{Detection, Kind, RawImage, Window, extended, inflate, sniff};
 use ade_filesystem::{
     bootblock::{BootText, Bootblock},
@@ -687,10 +688,10 @@ impl From<io::Error> for InspectionError {
 /// reported in the [`Inspection`], because those are findings about the image
 /// rather than failures of the tool.
 pub fn inspect_path(path: &Path) -> Result<Inspection, InspectionError> {
-    // Floppies are under two megabytes, so reading whole is simplest and
-    // fastest. Whole-disk HDF images reach gigabytes and will want a
-    // positional-read source; `BlockSource` is shaped to allow that in Phase 2
-    // without disturbing anything above it.
+    // Reads whole, which is right for a command that opens one image and
+    // exits: simplest, fastest, and the file is irrelevant afterwards. A
+    // caller holding many images at once wants [`Image::open_lazy`] instead,
+    // which reads blocks from the file (IMP-005).
     Ok(inspect_bytes(fs::read(path)?))
 }
 
@@ -1246,7 +1247,32 @@ fn geometry_for(kind: Kind, size: u64) -> Option<Result<Geometry, GeometryError>
 /// Owns the bytes so a [`Volume`] can borrow from it; the two-step open keeps
 /// the borrow explicit rather than hiding it behind a self-referential type.
 pub struct Image {
-    raw: RawImage,
+    backing: Backing,
+}
+
+/// Where an open image's blocks come from.
+///
+/// Two answers, and the caller picks (IMP-005). Holding the bytes is right for
+/// a command that opens one disk and exits; reading from the file is right for
+/// a front end that keeps every opened image alive, where the bytes are the
+/// whole cost.
+enum Backing {
+    /// The image, in memory. The only possibility for a container whose blocks
+    /// are not its file: a gzip wrapper is decompressed first, and a flux
+    /// capture is reconstructed, so neither has a file to read blocks from.
+    Memory(RawImage),
+    /// The image's file, read a block at a time.
+    File(FileSource),
+}
+
+impl Backing {
+    /// The block source, whichever it is.
+    fn source(&self) -> &dyn ade_block::BlockSource {
+        match self {
+            Self::Memory(raw) => raw,
+            Self::File(file) => file,
+        }
+    }
 }
 
 impl Image {
@@ -1282,7 +1308,55 @@ impl Image {
             .map_err(InspectionError::Geometry)?;
         let raw = RawImage::new(bytes, geometry)
             .map_err(|_| InspectionError::Geometry(GeometryError::ReservedExceedsVolume))?;
-        Ok(Self { raw })
+        Ok(Self {
+            backing: Backing::Memory(raw),
+        })
+    }
+
+    /// Open an image whose blocks are read from its file, not from a copy.
+    ///
+    /// For a front end holding many images at once: what stays resident is a
+    /// file handle rather than the disk (IMP-005). Falls back to reading the
+    /// file whole when its blocks are not its bytes — a gzip wrapper has to be
+    /// decompressed and a flux capture reconstructed before either is blocks
+    /// at all, so neither has a file to read from.
+    ///
+    /// **The file becomes live.** Reads that could not fail before can now
+    /// fail: the image is a window onto a file that may be deleted or
+    /// truncated underneath it, where [`Self::open`] takes a snapshot. That is
+    /// the trade, and it is why this is a separate call rather than the
+    /// default.
+    ///
+    /// # Errors
+    /// As [`Self::open`].
+    pub fn open_lazy(path: &Path) -> Result<Self, InspectionError> {
+        // Only the head is read to decide the container — the point of this
+        // call is not to read the whole file.
+        let size = std::fs::metadata(path).map_err(InspectionError::Io)?.len();
+        let want = usize::try_from(size).unwrap_or(usize::MAX).min(HEAD_BYTES);
+        let mut head = vec![0u8; want];
+        {
+            use std::io::Read as _;
+            let mut file = std::fs::File::open(path).map_err(InspectionError::Io)?;
+            file.read_exact(&mut head).map_err(InspectionError::Io)?;
+        }
+        let kind = sniff(&head, size).kind;
+        // Only a container whose blocks sit at their own offsets in the file
+        // can be read this way; everything else is bytes ADE made, not bytes
+        // on disk.
+        if !matches!(
+            kind,
+            Kind::Adf { .. } | Kind::Hardfile | Kind::RigidDisk | Kind::Unknown
+        ) {
+            return Self::open(path);
+        }
+        let geometry = geometry_for(kind, size)
+            .ok_or(InspectionError::Geometry(GeometryError::ZeroDimension))?
+            .map_err(InspectionError::Geometry)?;
+        let file = FileSource::open(path, geometry).map_err(InspectionError::Io)?;
+        Ok(Self {
+            backing: Backing::File(file),
+        })
     }
 
     /// The device's partition table, if it has one.
@@ -1293,7 +1367,7 @@ impl Image {
     /// # Errors
     /// A read error on the reserved area.
     pub fn rdb(&self) -> Result<Option<RigidDiskBlock>, FsError> {
-        RigidDiskBlock::find(&self.raw, self.raw.geometry())
+        RigidDiskBlock::find(self.backing.source(), self.backing.source().geometry())
     }
 
     /// Every partition the device declares, with any faults found walking the
@@ -1308,7 +1382,11 @@ impl Image {
         let Some(rdb) = self.rdb()? else {
             return Ok((Vec::new(), Vec::new()));
         };
-        Ok(rdb::read_partitions(&self.raw, self.raw.geometry(), &rdb))
+        Ok(rdb::read_partitions(
+            self.backing.source(),
+            self.backing.source().geometry(),
+            &rdb,
+        ))
     }
 
     /// A window onto one partition, which can then be mounted like any volume.
@@ -1322,7 +1400,13 @@ impl Image {
     pub fn partition_window(&self, p: &Partition) -> Result<Window<'_>, BlockError> {
         let blocks = u32::try_from(p.block_count()).unwrap_or(u32::MAX);
         let block_size = if p.block_size == 0 { 512 } else { p.block_size };
-        Window::new(&self.raw, p.first_block(), blocks, block_size, p.reserved)
+        Window::new(
+            self.backing.source(),
+            p.first_block(),
+            blocks,
+            block_size,
+            p.reserved,
+        )
     }
 
     /// Mount the volume this image holds.
@@ -1331,7 +1415,7 @@ impl Image {
     /// Whatever [`Volume::mount`] reports — most often that there is no
     /// rootblock where one should be.
     pub fn volume(&self) -> Result<Volume<'_>, FsError> {
-        Volume::mount(&self.raw)
+        Volume::mount(self.backing.source())
     }
 }
 

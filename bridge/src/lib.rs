@@ -371,7 +371,13 @@ pub unsafe extern "C" fn ade_image_open(
         let findings = examine(bytes.clone()).findings.len();
         // A container ADE cannot mount still gets a handle: the caller wants
         // the container and the reason. The reading calls simply find nothing.
-        let handle = Image::from_bytes(bytes).ok();
+        //
+        // Opened **lazily** (IMP-005): a front end holds every image it opens,
+        // and holding the bytes is the whole cost — 400 floppies is 400 MB.
+        // Blocks come from the file instead, and a container whose blocks are
+        // not its file falls back to reading whole on its own.
+        drop(bytes);
+        let handle = Image::open_lazy(&path).ok();
         let container = CString::new(inspection.detection.kind.to_string()).unwrap_or_default();
         let absent = inspection
             .volume_absent

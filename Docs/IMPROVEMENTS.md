@@ -11,8 +11,26 @@ Effort vocabulary: trivial | small | medium | large.
 
 ## Suggested
 
-### IMP-005 An open image is held whole in memory, so the GUI scales with images open
+### IMP-008 A directory expansion costs 9 ms, and it is not the bytes
 **Status:** suggested
+**Effort:** medium
+**Found:** 2026-08-29, measuring IMP-005 and needing a baseline to compare against.
+**Where:** [bridge/src/lib.rs](../bridge/src/lib.rs) `with_volume`, and `Volume::mount` beneath it.
+
+**What works today.** Expanding a drawer in the GUI lists a directory correctly and fast enough that nobody has complained.
+
+**Why it could be better.** At scale it is not fast. Over 60 images and 3,827 rows, expanding every one takes **35 seconds** — about 9 ms each — and selecting every row takes 12 seconds. Neither figure moved when the image stopped being held in memory (IMP-005: 35.1 s against 35.5 s), so the cost is not the bytes and not the file.
+
+What it is, most likely, is that every call through the ABI mounts a fresh `Volume`: `with_volume` re-reads the bootblock and rootblock, and the filesystem re-derives whatever it derives, once per directory listed and once per file previewed. IMP-006 removed the *container* rebuild from that path; the volume mount is what is left.
+
+**Trade-offs.** Caching a mounted `Volume` on the handle means it borrows the `Image` in the same struct — self-reference, which is the thing IMP-006 was pleased to avoid. The alternatives are a mount that is cheap enough not to matter, or a listing call that does the walk itself rather than being called per directory. Measuring which part of the 9 ms is the mount comes first: this entry names a symptom and guesses at a cause, which is not the same as knowing.
+
+**Not urgent.** A person expands one drawer at a time and will not notice 9 ms. The number matters because it is the whole cost of the GUI's tree at scale, and because it is now the largest thing left that a measurement has found.
+
+## Applied
+
+### IMP-005 An open image is held whole in memory, so the GUI scales with images open
+**Status:** applied
 **Effort:** medium
 **Found:** 2026-08-27, measuring the GUI's cross-image search against 400 corpus images.
 **Where:** [bridge/src/lib.rs](../bridge/src/lib.rs) `ade_image_open`, and the `ade-core` open path beneath it.
@@ -27,7 +45,23 @@ Effort vocabulary: trivial | small | medium | large.
 
 **Not urgent.** 400 images is well beyond what the acceptance criteria ask for, and the failure mode is a slow machine rather than a wrong answer.
 
-## Applied
+**Applied 2026-08-29.** `ade-container::FileSource` is a `BlockSource` that reads each block from the file when it is asked for, and `Image::open_lazy` uses it. The bridge opens that way, because a front end holds every image it opens; the CLI still opens eagerly, because it holds one and exits.
+
+| 400 plain ADFs held open | before | after |
+|---|---|---|
+| resident | 364 MB | **12.9 MB** |
+| on disk | 344 MB | 344 MB |
+
+**28× less**, and now far below the images' own size rather than slightly above it: what remains is a file handle and an `Inspection` each, about 32 KB per image. What the operating system caches is its own affair, reclaimable and shared with every other reader of the file.
+
+**It cost 1–3% of time, measured rather than assumed.** Over 60 images and 3,827 rows: expanding 35.1 s → 35.5 s, selecting 11.6 s → 11.9 s, searching 19 ms → 23 ms. The first figure looked alarming until it was compared — 9 ms per directory expansion is **pre-existing** and has nothing to do with where the bytes live. It is now [[imp-008]].
+
+**No `unsafe` and no dependency.** Memory-mapping is the obvious answer and is unavailable twice over: D-006 forbids `unsafe` and the workspace has no dependencies, so every mmap crate is one or the other. Positional reads — `read_at` on Unix, `seek_read` on Windows — are safe, in `std`, and enough.
+
+**The trade this entry predicted is real and is now tested.** An eagerly opened image is a snapshot; a lazily opened one is a *window*, and the file underneath it can be truncated or replaced. `src/api/tests/lazy.rs` pins both halves: the same answers while the file is whole, an error or an empty listing rather than stale content when it is not, and `Image::open` still indifferent to the file vanishing. That is why lazy is a separate call rather than the default — a front end holding many images wants it, and a command holding one does not.
+
+**The entry's other prediction was wrong in a useful way.** It expected this to "break the current guarantee that a decompressed container and a plain one behave identically". It does not: `open_lazy` sniffs the container and falls back to reading whole for anything whose blocks are not its file — gzip wrappers, flux captures, reconstructions. The guarantee holds because the fallback is inside the call rather than left to the caller.
+
 
 ### IMP-007 Conversion logic lives in the CLI, where F-002 says it must not
 **Status:** applied

@@ -17,6 +17,8 @@
 //! never rejects an image for failing a test that real disks routinely fail.
 //! The caller reports both.
 
+pub mod file;
+
 pub mod extended;
 pub mod inflate;
 pub mod sniff;
@@ -27,10 +29,11 @@ pub use sniff::{Detection, Evidence, Kind, sniff};
 
 /// An image held in memory, presenting its bytes as blocks.
 ///
-/// Adequate for floppies, which are under two megabytes. Whole-disk HDF images
-/// reach gigabytes and will want a positional-read source instead; the
-/// [`BlockSource`] seam takes `&self` and fills a caller buffer specifically so
-/// that can be added in Phase 2 without disturbing anything above it.
+/// Right for a caller that opens one image and exits. A caller holding many at
+/// once wants [`file::FileSource`], which reads blocks from the file rather
+/// than a copy of it — the seam takes `&self` and fills a caller buffer
+/// specifically so that could be added without disturbing anything above it,
+/// and when it was, on 2026-08-29, nothing above it changed (IMP-005).
 pub struct RawImage {
     bytes: Vec<u8>,
     geometry: Geometry,
