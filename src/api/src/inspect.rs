@@ -1359,6 +1359,20 @@ impl Image {
         })
     }
 
+    /// The blocks behind this image, whichever way they are backed.
+    pub(crate) fn source(&self) -> &dyn ade_block::BlockSource {
+        self.backing.source()
+    }
+
+    /// The shape of the open image.
+    ///
+    /// Whatever the container was, this is what it mounts as: an ADZ reports
+    /// the ADF inside it and a flux capture reports what was reconstructed.
+    #[must_use]
+    pub fn geometry(&self) -> &ade_block::Geometry {
+        self.backing.source().geometry()
+    }
+
     /// The device's partition table, if it has one.
     ///
     /// `Ok(None)` for an image with no Rigid Disk Block, which is most of them

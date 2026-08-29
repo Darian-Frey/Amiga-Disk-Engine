@@ -248,6 +248,20 @@ The parser reads `RDSK`, the `PART` chain and a minimal `FSHD`/`LSEG`, and every
 **It found damage the catalogue had missed.** `DMS!!ERR` and `DMS!1.52` are what xDMS writes over a track it could not decompress, so an ADF carrying either came from a DMS that failed partway. **Nine corpus images carry it.** One is already TOSEC-tagged `[b errdms]` — independent confirmation from the people who catalogued the collection — and the other eight are not.
 **Notes:** the Atari engine scans for 62 signatures across 8 categories; ADE's table is 25 and Amiga-flavoured. Breadth is not the goal — every entry here has a documented source and a corpus count.
 
+### F-021 Content search
+**Priority:** Should
+**Effort:** S · **Phase:** 5
+**Acceptance:**
+- Search a whole image for a byte sequence given as text or hex, reporting every occurrence with its offset, its block, and what part of the disk it landed in.
+**Status:** Delivered 2026-08-29 — `ade find`
+**Why it exists:** the companion to F-020. `scan` answers "what is on this disk that I did not know about"; `find` answers "is *this* on this disk" — a string, a filename, an opcode, a copyright notice — and neither question is answerable from a directory listing, because the interesting bytes are usually not in a file.
+**The hex-or-text guess is made, and made visible.** A pattern that is entirely hex digits and separators, with the digits pairing into bytes, is read as bytes; anything else is text. The rule catches a few English words — `dead`, `face`, `added` — and reads them as hex. That is the deliberate direction, because the opposite mistake is silent: someone searching for `60 1A`, getting the ASCII of "60 1A" and finding nothing concludes the disk is clean. This mistake announces itself (`hex: true` in the output) and `--text` reverses it.
+**Every hit says which region it is in, and that came from a measurement.** `Copylock` appears on **103 of the 4,652 corpus images**, and the region turns one string into four different findings: on 86 it is in the **bootblock**, where protection and the trackloader it starts live — the part no directory entry points at; on 10 it is in the **rootblock**, because those disks are *named* `Copylock(tm) Amiga`; on 11 it is in space nothing reaches; on 5 it is inside a file. The first implementation reported every one of those as "unallocated", which is wrong about the most deliberately written block on the disk and wrong about a volume name. **The bootblock is named even when the volume does not mount** — C-008 again, and a protected disk is frequently the one that fails to mount.
+**The first version of this claim was wrong, and the corpus said so.** Measured over the alphabetically first 500 images it read "every hit is in block 0", which was true of that sample and false of the collection: the whole corpus has 51 hits outside the bootblock. A sample that agrees with the design is the easiest kind of measurement to stop early.
+**Occurrences are not disks.** Across all 4,652 corpus images `DOS` matches **7,833,991** times, of which 207,159 are one image filled end to end with `DOS\0` — a count of occurrences describes that image and little else. Counted by image it appears on **4,450**: in the bootblock on 4,359, inside a file on 1,317, in space nothing points at on 840, in a directory header on 55, in a rootblock on 37, in a bitmap block on 14. Same trap as the batch histogram, in a new place.
+**Overlapping occurrences are all reported**, because a caller counting a repeating sequence — the xDMS failure filler is one — would otherwise be given a number that is quietly low. The text output shows the first twenty and says how many it kept back; `--format=json` carries every one.
+**Notes:** nothing found exits 1, as `grep` does — the search worked, and a script wants to branch on the result rather than on an error. A malformed pattern exits 2, because "searched, found nothing" and "never searched" must not look alike.
+
 ## Candidate features (uncommitted)
 
 - Read support for modern journalling filesystems (SFS, PFS).

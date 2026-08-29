@@ -6,4 +6,5 @@
 //! Content signatures (F-020) live here: recognising what bytes *are*, as
 //! distinct from what a directory entry calls them.
 
+pub mod find;
 pub mod signature;

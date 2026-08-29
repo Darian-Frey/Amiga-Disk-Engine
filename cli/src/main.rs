@@ -129,6 +129,11 @@ enum Format {
 }
 
 /// The command line, after parsing.
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "a command line's flags are bools; grouping them into sub-structs \
+              would put a shape on the parser that the arguments do not have"
+)]
 struct Args {
     command: String,
     positional: Vec<String>,
@@ -139,6 +144,10 @@ struct Args {
     output: Option<PathBuf>,
     /// A directory of TOSEC datfiles, for identification (F-013).
     datfiles: Option<PathBuf>,
+    /// `find` reads its pattern as text even if it looks like hex.
+    text: bool,
+    /// `find` matches ASCII letters in either case.
+    ignore_case: bool,
     /// The volume name `create` gives a new disk.
     volume_name: Option<String>,
     /// The filesystem `create` formats with: `ofs` or `ffs`.
@@ -170,6 +179,8 @@ fn parse_args(raw: Vec<String>) -> Result<Args, String> {
     let mut volume_name: Option<String> = None;
     let mut volume_type: Option<String> = None;
     let mut hd = false;
+    let mut text = false;
+    let mut ignore_case = false;
     let mut partition: Option<String> = None;
     let mut raw_output = false;
     let mut output: Option<PathBuf> = None;
@@ -179,6 +190,8 @@ fn parse_args(raw: Vec<String>) -> Result<Args, String> {
             "--raw" => raw_output = true,
             "--hash" => hash = true,
             "--hd" => hd = true,
+            "--text" => text = true,
+            "--ignore-case" | "-i" => ignore_case = true,
             _ if arg.starts_with("--name=") => {
                 volume_name = Some(arg.trim_start_matches("--name=").to_owned());
             }
@@ -224,6 +237,8 @@ fn parse_args(raw: Vec<String>) -> Result<Args, String> {
         volume_name,
         volume_type,
         hd,
+        text,
+        ignore_case,
         partition,
         raw: raw_output,
         output,
@@ -279,6 +294,13 @@ fn main() -> ExitCode {
             args.hd,
         ),
         ("scan", 1) => scan(Path::new(p(0)), args.format),
+        ("find", 2) => find(
+            Path::new(p(0)),
+            p(1),
+            args.format,
+            args.text,
+            args.ignore_case,
+        ),
         ("formats", 0) => formats(args.format),
         ("batch", n) if n >= 1 => batch(
             &args.positional,
@@ -324,6 +346,8 @@ fn usage() {
         "    ade convert <in> <out>             convert between containers (F-016)".to_owned(),
         "    ade create <out.adf>               make a blank formatted disk (F-019)".to_owned(),
         "    ade scan <image>                   find known content by its magic (F-020)".to_owned(),
+        "    ade find <image> <pattern>         search the image for text or hex (F-021)"
+            .to_owned(),
         "    ade formats                        what converts to what, and what it costs"
             .to_owned(),
         "    ade batch <dir|image>...           verify a whole corpus (F-014)".to_owned(),
@@ -342,6 +366,8 @@ fn usage() {
         "    --name=NAME     create: the volume name (default \"Empty\")".to_owned(),
         "    --type=ofs|ffs  create: the filesystem (default ffs)".to_owned(),
         "    --hd            create: a 1.76 MB high-density disk instead of 880 KB".to_owned(),
+        "    --text          find: read the pattern as text even if it looks like hex".to_owned(),
+        "    --ignore-case   find: match ASCII letters in either case".to_owned(),
         "    --convert=CODE  batch: convert every image to CODE (adf, hdf, extended-adf)"
             .to_owned(),
         "                    into --output=DIR; refusals are reported, never fatal".to_owned(),
@@ -1440,6 +1466,83 @@ fn scan(path: &Path, format: Format) -> ExitCode {
     }
     emit_lines(&mut out, &lines);
     ExitCode::from(EXIT_CLEAN)
+}
+
+/// How many matches the text output shows before summarising the rest.
+const SHOWN: usize = 20;
+
+/// Search an image for text or hex, and say what owns each hit (F-021).
+fn find(path: &Path, pattern: &str, format: Format, text: bool, ignore_case: bool) -> ExitCode {
+    use ade_core::layers::object::find::Pattern;
+
+    let pattern = match Pattern::parse(pattern, text, ignore_case) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("ade: {e}");
+            return ExitCode::from(EXIT_USAGE);
+        }
+    };
+    let bytes = match std::fs::read(path) {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("ade: {}: {e}", path.display());
+            return ExitCode::from(EXIT_UNREADABLE);
+        }
+    };
+    let found = ade_core::find::Search::run(&bytes, &pattern);
+
+    let mut out = std::io::stdout().lock();
+    if format == Format::Json {
+        emit_json(&mut out, found.to_json());
+        return ExitCode::from(if found.matches.is_empty() {
+            EXIT_FAULTS
+        } else {
+            EXIT_CLEAN
+        });
+    }
+
+    let mut lines = vec![format!(
+        "{}  {} {}",
+        path.display(),
+        found.matches.len(),
+        if found.matches.len() == 1 {
+            "match"
+        } else {
+            "matches"
+        }
+    )];
+    // A repeating pattern can match hundreds of times — 704 for the xDMS
+    // filler on one damaged disk — and a screen of near-identical lines
+    // obscures the answer rather than giving it. The text view shows the first
+    // few and says how many more; `--format=json` still carries every one.
+    for m in found.matches.iter().take(SHOWN) {
+        // Naming where a hit landed is the whole point: "offset 322205" sends
+        // someone to a hex view, "in s/startup-sequence" ends the question,
+        // and "in the bootblock" is the answer for most protection searches —
+        // 103 corpus images carry `Copylock`, 86 of them in block 0.
+        let owner = m
+            .owner
+            .as_deref()
+            .map_or_else(|| format!("({})", m.region.name()), str::to_owned);
+        lines.push(format!(
+            "  block {:>5}  offset {:>9}  {owner}",
+            m.at.block, m.at.offset
+        ));
+    }
+    if found.matches.len() > SHOWN {
+        lines.push(format!(
+            "  ... and {} more (--format=json for all of them)",
+            found.matches.len().saturating_sub(SHOWN)
+        ));
+    }
+    emit_lines(&mut out, &lines);
+    // Nothing found is not an error, but a script wants to branch on it — the
+    // same convention `grep` uses.
+    ExitCode::from(if found.matches.is_empty() {
+        EXIT_FAULTS
+    } else {
+        EXIT_CLEAN
+    })
 }
 
 fn formats(format: Format) -> ExitCode {

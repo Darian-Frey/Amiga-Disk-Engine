@@ -455,6 +455,34 @@ fn a_scan_emits_exactly_these_fields() {
 }
 
 #[test]
+fn a_search_emits_exactly_these_fields() {
+    // Over a mounted volume with a planted hit, so `matches[].file` is a
+    // string rather than the null an unowned block gives — a null leaf and a
+    // string leaf inventory the same, but only a real volume proves the owner
+    // map is wired in at all.
+    let mut v = ade_fixtures::Volume::dd(1).named("Schema");
+    v.add_file("readme", b"FINDME");
+    let pattern = ade_core::layers::object::find::Pattern::parse("FINDME", true, false).unwrap();
+    let found = ade_core::find::Search::run(&v.build(), &pattern);
+    assert!(!found.matches.is_empty(), "the fixture should be found");
+    compare(
+        "find",
+        &paths(&found.to_json().versioned()),
+        &[
+            "schema",
+            "scanned",
+            "hex",
+            "found",
+            "matches",
+            "matches[].offset",
+            "matches[].block",
+            "matches[].file",
+            "matches[].region",
+        ],
+    );
+}
+
+#[test]
 fn the_batch_summary_emits_exactly_these_fields() {
     // Over a real image, and a damaged one: the arrays are the point here, and
     // an empty array shows none of its element fields. A summary of nothing

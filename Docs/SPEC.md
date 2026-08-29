@@ -846,6 +846,47 @@ Nine images carry it: three Cannon Fodder 2 disks, `Crystal Dragon_Disk1`, `Heim
 
 **The last one is already TOSEC-tagged `[b errdms]`** — bad, errdms — which is an independent confirmation of the detection from the people who catalogued the collection. The other eight carry no such tag, so the scan found damage the naming had missed. That is the case for scanning content rather than trusting names, made by the corpus itself.
 
+## Where a match lands
+
+*Measured across all 4,652 corpus images on 2026-08-29 (F-021).*
+
+A byte offset is not an answer. `ade find` attributes every hit to a region of the disk, because the same offset means something different depending on what occupies it:
+
+| region | what it is | why it is separate |
+|---|---|---|
+| `bootblock` | the reserved blocks a disk boots from | where protection lives; **not** unallocated space |
+| `rootblock` | the volume's root | its name and datestamps |
+| `bitmap` | an allocation-bitmap block | a match here is almost always coincidence |
+| `directory` | a directory's header block | where a directory's name is stored |
+| `file` | a file's header or data | the owning path is reported with it |
+| `unclaimed` | inside the volume, and nothing reaches it | deleted, hidden, or damage |
+
+**The distinction was forced by a measurement.** `Copylock` appears on **103 of the 4,652 corpus images**, and the region separates four different facts about the same six bytes:
+
+| region | images | what the hit actually is |
+|---|---|---|
+| `bootblock` | 86 | the protection itself, and the trackloader it starts |
+| `rootblock` | 10 | the volume's **name** — these disks are called `Copylock(tm) Amiga` |
+| `unclaimed` | 11 | in the volume, reached by nothing |
+| `file` | 5 | inside a file, with its path reported |
+
+Protection is bootblock and trackloader, exactly the region no directory entry points at, so an implementation reporting "no owning file" as *unallocated* is wrong on the search this tool is best at — and would also call ten volume names unallocated space.
+
+**A note on how this was measured.** The first pass used the alphabetically first 500 images and concluded that *every* hit is in block 0. That is true of those 500 and false of the corpus, which has 51 hits elsewhere. The rootblock cluster — the most interesting result here — is entirely outside the short sample. A partial measurement that agrees with the design is the easiest one to stop early.
+
+**The bootblock is named even when the volume does not mount.** C-008 keeps the bootblock and the filesystem as independent facts, and this is where that matters most: a protected disk is both the one that fails to mount and the one whose hits are all in block 0. A **device** is the exception — its block 0 is an `RDSK`, not a bootblock, and calling it one is a mistake this project has already made twice.
+
+**Region frequency is counted by image, not by occurrence.** `DOS` matches 7,833,991 times across the corpus, of which 207,159 are one image — `A-Term (19xx)(MegaSoft)[v Byte Bandit]`, filled end to end with `DOS\0`. Counted by image it appears on **4,450 of 4,652**:
+
+| region | images |
+|---|---|
+| `bootblock` | 4359 |
+| `file` | 1317 |
+| `unclaimed` | 840 |
+| `directory` | 55 |
+| `rootblock` | 37 |
+| `bitmap` | 14 |
+
 ## Flux formats
 
 - **Extended-ADF** — see above.
