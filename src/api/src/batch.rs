@@ -23,6 +23,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use ade_catalogue::Catalogue;
+use ade_container::Kind;
 
 use crate::{Severity, examine, json::Value};
 
@@ -40,6 +41,8 @@ pub struct Record {
     /// A cataloguer keys on this; `container` above is prose and may be
     /// reworded (F-015).
     pub container_code: &'static str,
+    /// What converting this image produced, when a conversion was asked for.
+    pub conversion: Option<ConversionOutcome>,
     /// SHA-1 of the image as it sits on disk, when hashing was asked for.
     ///
     /// **Opt-in, because it is not free**: 349 MB/s measured, which is about
@@ -102,6 +105,12 @@ pub struct Summary {
     pub bytes_recovered: u64,
     /// How many images the dataset could name, when one was supplied.
     pub identified: usize,
+    /// Conversion outcomes by code, when a conversion was asked for.
+    ///
+    /// Keyed rather than counted flat, because "3601 converted" alone hides
+    /// the answer a person actually wants from a bulk run: **which** images
+    /// were refused, and why. The codes are the same ones on each record.
+    pub conversions: BTreeMap<&'static str, usize>,
 }
 
 impl Summary {
@@ -166,6 +175,23 @@ impl Summary {
                         .collect(),
                 ),
             ),
+            (
+                // Same array-of-pairs shape as `containers` and `findings`,
+                // and for the same reason: keys that come from data cannot be
+                // inventoried (D-015).
+                "conversions",
+                Value::Arr(
+                    self.conversions
+                        .iter()
+                        .map(|(code, images)| {
+                            Value::Obj(vec![
+                                ("code", Value::str(*code)),
+                                ("images", Value::Num(*images as u64)),
+                            ])
+                        })
+                        .collect(),
+                ),
+            ),
         ])
     }
 }
@@ -180,6 +206,10 @@ impl Record {
             ("container", Value::str(self.container.clone())),
             ("container_code", Value::str(self.container_code)),
             ("sha1", Value::opt(self.sha1.as_ref(), Value::str)),
+            (
+                "conversion",
+                Value::opt(self.conversion.as_ref(), ConversionOutcome::to_json),
+            ),
             ("volume", Value::opt(self.volume.as_ref(), Value::str)),
             ("files", Value::Num(self.files as u64)),
             ("directories", Value::Num(self.directories as u64)),
@@ -254,6 +284,47 @@ pub fn identification_json(
     ])
 }
 
+/// What happened when one image in a batch was converted (F-014, F-016).
+///
+/// A per-image outcome rather than a run-wide one, because a corpus is
+/// heterogeneous by nature: over 4,652 real images a single target format is
+/// lossless for most, refused for the flux captures and unimplemented for the
+/// compressed ones, and a run that stopped at the first refusal would convert
+/// nothing. Nothing aborts a batch — the same rule the health pass follows.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConversionOutcome {
+    /// A stable code: `converted`, `exists`, `lossy`, `refused`,
+    /// `not-implemented`, `failed`.
+    pub code: &'static str,
+    /// Where the output went, when one was written.
+    pub written: Option<PathBuf>,
+    /// Why, when nothing was written.
+    pub reason: Option<String>,
+}
+
+impl ConversionOutcome {
+    /// Whether an output file was actually produced.
+    #[must_use]
+    pub fn wrote(&self) -> bool {
+        self.code == "converted"
+    }
+
+    /// The outcome as JSON (F-015).
+    #[must_use]
+    pub fn to_json(&self) -> Value {
+        Value::Obj(vec![
+            ("code", Value::str(self.code)),
+            (
+                "written",
+                Value::opt(self.written.as_ref(), |p| {
+                    Value::str(p.display().to_string())
+                }),
+            ),
+            ("reason", Value::opt(self.reason.as_ref(), Value::str)),
+        ])
+    }
+}
+
 /// The stable code for a match kind (F-015: codes are a commitment).
 const fn match_label(kind: ade_catalogue::Match) -> &'static str {
     match kind {
@@ -265,16 +336,108 @@ const fn match_label(kind: ade_catalogue::Match) -> &'static str {
     }
 }
 
+/// A bulk conversion: what to produce and where to put it (F-014, F-016).
+#[derive(Debug, Clone)]
+pub struct ConvertRequest {
+    /// The container to write.
+    pub to: Kind,
+    /// The directory outputs go into. Created if it does not exist.
+    pub into: PathBuf,
+}
+
+impl ConvertRequest {
+    /// Where one input's output belongs.
+    ///
+    /// The input's stem plus the target's extension, in the output directory.
+    /// Flat rather than mirroring the input tree, because `batch` walks one
+    /// level (a corpus is a flat directory in every case this has met) and a
+    /// deeper output shape would imply a deeper input one.
+    #[must_use]
+    pub fn destination(&self, input: &Path) -> PathBuf {
+        let stem = input.file_stem().unwrap_or_default();
+        let mut name = std::ffi::OsString::from(stem);
+        name.push(".");
+        name.push(extension_for(self.to));
+        self.into.join(name)
+    }
+}
+
+/// The file extension a container is conventionally written with.
+///
+/// An extended ADF is `.adf` like a plain one — the extension cannot
+/// distinguish them, which is exactly why `ade convert` needs `--raw` and why
+/// a bulk conversion writes into a directory of its own.
+const fn extension_for(kind: Kind) -> &'static str {
+    match kind {
+        Kind::Adf { .. } | Kind::ExtendedAdf { .. } => "adf",
+        Kind::Hardfile | Kind::RigidDisk => "hdf",
+        Kind::Gzip => "adz",
+        Kind::Dms => "dms",
+        Kind::Scp => "scp",
+        Kind::Ipf => "ipf",
+        Kind::Unknown => "bin",
+    }
+}
+
+/// Convert one image, turning every refusal into a reported outcome.
+///
+/// **Nothing here aborts a run.** A corpus is heterogeneous: one target format
+/// is lossless for most images, refused for the flux captures and
+/// unimplemented for the compressed ones, and a bulk conversion that stopped
+/// at the first refusal would convert nothing.
+fn convert_one(path: &Path, bytes: Vec<u8>, request: &ConvertRequest) -> ConversionOutcome {
+    let destination = request.destination(path);
+    // Never overwrite. A conversion that silently replaces an image is the
+    // irreversible damage D-004 is about, and in bulk it is that damage
+    // repeated four thousand times before anyone notices.
+    if destination.exists() {
+        return ConversionOutcome {
+            code: "exists",
+            written: None,
+            reason: Some(format!("{} already exists", destination.display())),
+        };
+    }
+
+    match crate::convert::convert_bytes(bytes, request.to) {
+        Ok(out) => {
+            if let Err(e) = std::fs::create_dir_all(&request.into) {
+                return ConversionOutcome {
+                    code: "failed",
+                    written: None,
+                    reason: Some(e.to_string()),
+                };
+            }
+            match std::fs::write(&destination, &out) {
+                Ok(()) => ConversionOutcome {
+                    code: "converted",
+                    written: Some(destination),
+                    reason: None,
+                },
+                Err(e) => ConversionOutcome {
+                    code: "failed",
+                    written: None,
+                    reason: Some(e.to_string()),
+                },
+            }
+        }
+        Err(e) => ConversionOutcome {
+            code: e.code(),
+            written: None,
+            reason: Some(e.to_string()),
+        },
+    }
+}
+
 /// Examine one image, turning any failure into a record rather than an error.
 #[must_use]
 pub fn examine_one(path: &Path) -> Record {
-    examine_inner(path, None, false)
+    examine_inner(path, None, false, None)
 }
 
 /// Examine one image and name it from a dataset (F-013 and F-014 together).
 #[must_use]
 pub fn examine_and_identify(path: &Path, catalogue: &Catalogue) -> Record {
-    examine_inner(path, Some(catalogue), false)
+    examine_inner(path, Some(catalogue), false, None)
 }
 
 /// As [`examine_and_identify`], and hash the image as well.
@@ -285,13 +448,18 @@ pub fn examine_and_identify(path: &Path, catalogue: &Catalogue) -> Record {
 /// not pay for a field it will not read.
 #[must_use]
 pub fn examine_hashed(path: &Path, catalogue: Option<&Catalogue>) -> Record {
-    examine_inner(path, catalogue, true)
+    examine_inner(path, catalogue, true, None)
 }
 
 /// The shared body: the file is read **once** and both the health examination
 /// and the content hash work from those bytes. Reading twice doubled the cost
 /// of a corpus run for no benefit.
-fn examine_inner(path: &Path, catalogue: Option<&Catalogue>, hash: bool) -> Record {
+fn examine_inner(
+    path: &Path,
+    catalogue: Option<&Catalogue>,
+    hash: bool,
+    convert: Option<&ConvertRequest>,
+) -> Record {
     let bytes = match std::fs::read(path) {
         Ok(b) => b,
         Err(e) => {
@@ -300,6 +468,7 @@ fn examine_inner(path: &Path, catalogue: Option<&Catalogue>, hash: bool) -> Reco
                 size: 0,
                 container: "unreadable".to_owned(),
                 container_code: "unreadable",
+                conversion: None,
                 sha1: None,
                 volume: None,
                 files: 0,
@@ -322,6 +491,10 @@ fn examine_inner(path: &Path, catalogue: Option<&Catalogue>, hash: bool) -> Reco
             .collect()
     });
     let sha1 = hash.then(|| ade_catalogue::sha1::hex(&ade_catalogue::sha1::sha1(&bytes)));
+    // Converting needs the original bytes too, and clones them: the health
+    // examination consumes what it is given, and reading the file twice to
+    // avoid one copy would cost more than the copy.
+    let conversion = convert.map(|request| convert_one(path, bytes.clone(), request));
     let health = examine(bytes);
 
     Record {
@@ -329,6 +502,7 @@ fn examine_inner(path: &Path, catalogue: Option<&Catalogue>, hash: bool) -> Reco
         size,
         container: health.inspection.detection.kind.to_string(),
         container_code: health.inspection.detection.kind.code(),
+        conversion,
         sha1,
         volume: health.examined.as_ref().map(|e| e.volume.clone()),
         files: health.files,
@@ -374,6 +548,22 @@ pub fn run_full(
     paths: &[PathBuf],
     catalogue: Option<&Catalogue>,
     hash: bool,
+    progress: impl FnMut(usize, usize),
+) -> Summary {
+    run_converting(paths, catalogue, hash, None, progress)
+}
+
+/// As [`run_full`], converting each image as it goes (F-014's bulk clause).
+///
+/// The conversion happens inside the same pass as the health check, from the
+/// bytes already read. Converting a corpus separately would read all 4.2 GB a
+/// second time to produce a report ADE has just produced.
+#[must_use]
+pub fn run_converting(
+    paths: &[PathBuf],
+    catalogue: Option<&Catalogue>,
+    hash: bool,
+    convert: Option<&ConvertRequest>,
     mut progress: impl FnMut(usize, usize),
 ) -> Summary {
     let mut files = collect(paths);
@@ -386,6 +576,7 @@ pub fn run_full(
 
     for (index, path) in files.iter().enumerate() {
         let record = match catalogue {
+            _ if convert.is_some() => examine_inner(path, catalogue, hash, convert),
             Some(c) if hash => examine_hashed(path, Some(c)),
             Some(c) => examine_and_identify(path, c),
             None if hash => examine_hashed(path, None),
@@ -424,6 +615,10 @@ pub fn run_full(
         }
         if !record.identified.is_empty() {
             summary.identified = summary.identified.saturating_add(1);
+        }
+        if let Some(outcome) = &record.conversion {
+            let count = summary.conversions.entry(outcome.code).or_insert(0usize);
+            *count = count.saturating_add(1);
         }
         summary.records.push(record);
 

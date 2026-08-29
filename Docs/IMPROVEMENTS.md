@@ -29,6 +29,23 @@ Effort vocabulary: trivial | small | medium | large.
 
 ## Applied
 
+### IMP-007 Conversion logic lives in the CLI, where F-002 says it must not
+**Status:** applied
+**Effort:** small
+**Found:** 2026-08-29, starting F-014's bulk-convert clause and discovering there was nothing for `batch` to call.
+**Where:** [cli/src/main.rs](../cli/src/main.rs), `convert` and `encode_raw_mfm`.
+
+**What works today.** `ade convert` reads the image, decides the target, checks the verdict, decompresses a gzip wrapper, encodes raw MFM where `--raw` is given, and writes the result — all inside the CLI. It is correct and it has worked since F-016 landed on 2026-08-25.
+
+**Why it could be better.** `encode_raw_mfm` is sixty lines that derive a geometry, split an image into tracks, call `encode_track` per track and assemble an extended ADF. That is engine work, and **F-002's acceptance says in terms that no engine logic may live in UI code.** The layering check cannot see it: `ade-cli` is allowed to depend on `ade-core`, and this is a function *inside the CLI* using `ade-core`'s layers directly, which is a different thing from a cross-crate edge.
+
+It became visible the moment a second caller wanted it. `ade batch` cannot convert a corpus without either calling into the CLI — impossible — or duplicating sixty lines of track encoding, which is how two implementations of one algorithm start.
+
+**Trade-offs.** None worth the name: the move is mechanical, and `ade-core::convert` already owns the *decision* half of conversion (the matrix). Splitting the decision from the doing is the odd arrangement, not joining them.
+
+**Applied 2026-08-29** as part of F-014's bulk-convert clause rather than separately, because the clause cannot be built without it. Recorded here rather than fixed silently (Maintenance Rule 8) — the point of the rule is that the change is visible, not that it must wait.
+
+
 ### IMP-006 The C ABI rebuilds the whole image on every call that reads it
 **Status:** applied
 **Effort:** small

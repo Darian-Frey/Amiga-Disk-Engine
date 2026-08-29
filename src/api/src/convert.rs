@@ -239,3 +239,165 @@ pub fn known_formats() -> Vec<Kind> {
         Kind::Ipf,
     ]
 }
+
+/// Doing a conversion, as distinct from deciding whether to (F-016, IMP-007).
+///
+/// The decision half — [`conversion`] and the matrix — has always lived here.
+/// The doing half lived in the CLI until 2026-08-29, which was fine while
+/// there was one caller and became an F-002 violation the moment `ade batch`
+/// wanted to convert a corpus: sixty lines of track encoding in a front end is
+/// engine logic in UI code, and the layering check cannot see it because the
+/// edge is inside a crate that is allowed to depend on the engine.
+///
+/// # What this will not do
+///
+/// Refuse and lossy are both errors here, not warnings. F-016's whole position
+/// is that a conversion which quietly discards something is the behaviour ADE
+/// exists to replace, so the caller gets a reason and no bytes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConvertError {
+    /// The pair is possible but would discard something.
+    Lossy {
+        /// What would not survive.
+        lost: &'static str,
+    },
+    /// ADE cannot do this pair yet.
+    NotImplemented {
+        /// Why, naming the register entry that tracks it.
+        why: &'static str,
+    },
+    /// ADE will not do this pair, ever.
+    Refused {
+        /// Why.
+        why: &'static str,
+    },
+    /// The input could not be read or re-encoded.
+    Failed {
+        /// What went wrong.
+        reason: String,
+    },
+}
+
+impl core::fmt::Display for ConvertError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Lossy { lost } => write!(f, "this would discard {lost}"),
+            Self::NotImplemented { why } => write!(f, "not implemented — {why}"),
+            Self::Refused { why } => write!(f, "refused — {why}"),
+            Self::Failed { reason } => f.write_str(reason),
+        }
+    }
+}
+
+impl core::error::Error for ConvertError {}
+
+impl ConvertError {
+    /// A stable code for the machine surface (F-015).
+    #[must_use]
+    pub const fn code(&self) -> &'static str {
+        match self {
+            Self::Lossy { .. } => "lossy",
+            Self::NotImplemented { .. } => "not-implemented",
+            Self::Refused { .. } => "refused",
+            Self::Failed { .. } => "failed",
+        }
+    }
+}
+
+/// Convert an image's bytes into another container.
+///
+/// `to` is the target kind; for an extended ADF the caller asks for
+/// [`Kind::ExtendedAdf`] rather than passing a flag, since the extension alone
+/// cannot say which of the two `.adf` formats was meant.
+///
+/// # Errors
+/// [`ConvertError`] carrying the matrix's own reason where the pair is refused,
+/// lossy or unimplemented, and the failure where the bytes would not encode.
+pub fn convert_bytes(bytes: Vec<u8>, to: Kind) -> Result<Vec<u8>, ConvertError> {
+    let head = bytes.get(..bytes.len().min(512 * 16)).unwrap_or(&[]);
+    let from = ade_container::sniff(head, bytes.len() as u64).kind;
+
+    match conversion(from, to) {
+        Conversion::Lossless => {}
+        Conversion::Lossy { lost } => return Err(ConvertError::Lossy { lost }),
+        Conversion::NotImplemented { why } => return Err(ConvertError::NotImplemented { why }),
+        Conversion::Refused { why } => return Err(ConvertError::Refused { why }),
+    }
+
+    // Decompression first, so a raw-MFM target works from an ADZ as readily as
+    // from an ADF.
+    let sectors = if matches!(from, Kind::Gzip) {
+        ade_container::inflate::gunzip(&bytes, crate::MAX_DECOMPRESSED).map_err(|e| {
+            ConvertError::Failed {
+                reason: e.to_string(),
+            }
+        })?
+    } else {
+        bytes
+    };
+
+    if matches!(to, Kind::ExtendedAdf { .. }) {
+        return encode_raw_mfm(&sectors).map_err(|reason| ConvertError::Failed { reason });
+    }
+    Ok(sectors)
+}
+
+/// Encode a sector image as an extended ADF of raw MFM tracks.
+///
+/// # Errors
+/// A description of why the image could not be encoded — no usable geometry,
+/// or a length that is not a whole number of tracks.
+///
+/// Lossless, and provably so: reading the result back reassembles the input
+/// byte for byte. What it cannot do is invent protection the source never had
+/// — the output is an extended ADF holding an ordinary disk, which is a
+/// container change rather than a preservation upgrade.
+pub fn encode_raw_mfm(sectors: &[u8]) -> Result<Vec<u8>, String> {
+    use ade_container::extended::{self, TrackSource};
+    use ade_track::{SECTOR_BYTES, encode_track};
+
+    // The sectors-per-track comes from the image's own geometry rather than
+    // being assumed: an HD image has 22 where a DD one has 11.
+    let inspection = crate::inspect_bytes(sectors.to_vec());
+    let geometry = inspection
+        .geometry
+        .ok_or("cannot establish a geometry for this image")?;
+    let per_track = usize::try_from(geometry.sectors()).unwrap_or(11).max(1);
+    let track_bytes = per_track.saturating_mul(SECTOR_BYTES);
+    let remainder = sectors
+        .len()
+        .checked_rem(track_bytes)
+        .ok_or("a track cannot be zero bytes")?;
+    if remainder != 0 {
+        return Err(format!(
+            "not a whole number of {per_track}-sector tracks — {} bytes",
+            sectors.len()
+        ));
+    }
+    let track_count = sectors
+        .len()
+        .checked_div(track_bytes)
+        .ok_or("a track cannot be zero bytes")?;
+
+    let mut encoded: Vec<Vec<u8>> = Vec::with_capacity(track_count);
+    for index in 0..track_count {
+        let base = index.saturating_mul(track_bytes);
+        let mut slices: Vec<&[u8]> = Vec::with_capacity(per_track);
+        for s in 0usize..per_track {
+            let at = base.saturating_add(s.saturating_mul(SECTOR_BYTES));
+            let end = at.saturating_add(SECTOR_BYTES);
+            slices.push(sectors.get(at..end).ok_or("image ends mid-track")?);
+        }
+        let number = u8::try_from(index).unwrap_or(u8::MAX);
+        encoded.push(encode_track(number, &slices).ok_or("a sector was the wrong size")?);
+    }
+
+    let sources: Vec<TrackSource<'_>> = encoded
+        .iter()
+        .map(|data| TrackSource::RawMfm {
+            data,
+            length_bits: u32::try_from(data.len().saturating_mul(8)).unwrap_or(u32::MAX),
+        })
+        .collect();
+    extended::write(&sources).map_err(|e| e.to_string())
+}

@@ -35,6 +35,7 @@
 //! fault would be wrong — 1054 of 4288 real images have no rootblock where one
 //! should be, and many are simply not AmigaDOS disks.
 
+use std::collections::BTreeSet;
 use std::{
     io::{ErrorKind, Write},
     path::{Path, PathBuf},
@@ -42,7 +43,7 @@ use std::{
 };
 
 use ade_core::{
-    Conversion, Health, Image, Inspection, Severity, conversion, examine_partition, inspect_path,
+    Health, Image, Inspection, Severity, conversion, examine_partition, inspect_path,
     layers::{
         container::Window,
         filesystem::{rdb::Partition, volume::Volume},
@@ -138,6 +139,8 @@ struct Args {
     output: Option<PathBuf>,
     /// A directory of TOSEC datfiles, for identification (F-013).
     datfiles: Option<PathBuf>,
+    /// Bulk-convert every image in a batch to this container code.
+    convert_to: Option<String>,
     /// Compute SHA-1 content hashes and include them in the output.
     ///
     /// Off by default and deliberately so: hashing runs at 349 MB/s, about
@@ -157,6 +160,7 @@ fn parse_args(raw: Vec<String>) -> Result<Args, String> {
     let mut positional: Vec<String> = Vec::new();
     let mut format = Format::Text;
     let mut hash = false;
+    let mut convert_to: Option<String> = None;
     let mut partition: Option<String> = None;
     let mut raw_output = false;
     let mut output: Option<PathBuf> = None;
@@ -165,6 +169,9 @@ fn parse_args(raw: Vec<String>) -> Result<Args, String> {
         match arg.as_str() {
             "--raw" => raw_output = true,
             "--hash" => hash = true,
+            _ if arg.starts_with("--convert=") => {
+                convert_to = Some(arg.trim_start_matches("--convert=").to_owned());
+            }
             "--format=json" | "--json" => format = Format::Json,
             "--format=text" => format = Format::Text,
             other if other.starts_with("--format=") => {
@@ -197,6 +204,7 @@ fn parse_args(raw: Vec<String>) -> Result<Args, String> {
         positional,
         format,
         hash,
+        convert_to,
         partition,
         raw: raw_output,
         output,
@@ -246,6 +254,8 @@ fn main() -> ExitCode {
             args.format,
             args.datfiles.as_deref(),
             args.hash,
+            args.convert_to.as_deref(),
+            args.output.as_deref(),
         ),
         ("identify", n) if n >= 1 => {
             identify(&args.positional, args.datfiles.as_deref(), args.format)
@@ -296,6 +306,9 @@ fn usage() {
         "    --partition=P   which partition of a hard disk, by name (DH0) or index (0)".to_owned(),
         "    --raw           convert writes raw MFM tracks (an extended ADF)".to_owned(),
         "    --hash          include SHA-1 content hashes (not free; see VOCABULARY.md)".to_owned(),
+        "    --convert=CODE  batch: convert every image to CODE (adf, hdf, extended-adf)"
+            .to_owned(),
+        "                    into --output=DIR; refusals are reported, never fatal".to_owned(),
         "    --output=P      consolidate writes the merged image to P".to_owned(),
         "    --datfiles=D    directory of TOSEC .dat files, for identify".to_owned(),
         String::new(),
@@ -1072,6 +1085,24 @@ fn select_partition<'a>(
 /// Only used for the **output**, which does not exist yet and so cannot be
 /// sniffed. Inputs are always identified by their content — an extension is a
 /// claim, and C-008's habit of trusting evidence over labels applies here too.
+/// The container a `--convert=` code names.
+///
+/// Codes rather than extensions, because `.adf` is ambiguous — a plain ADF and
+/// an extended one share it — and a bulk conversion has no output filename to
+/// take a hint from. These are `Kind::code()`'s own strings (F-015).
+fn kind_from_code(code: &str) -> Option<ade_core::layers::container::Kind> {
+    use ade_core::layers::container::Kind;
+    match code {
+        "adf" => Some(Kind::Adf {
+            cylinders: 80,
+            sectors: 11,
+        }),
+        "extended-adf" => Some(Kind::ExtendedAdf { tracks: 0 }),
+        "hardfile" | "hdf" => Some(Kind::Hardfile),
+        _ => None,
+    }
+}
+
 fn kind_from_extension(path: &Path) -> Option<ade_core::layers::container::Kind> {
     use ade_core::layers::container::Kind;
     let ext = path.extension()?.to_str()?.to_ascii_lowercase();
@@ -1133,41 +1164,23 @@ fn convert(input: &Path, output: &Path, raw: bool) -> ExitCode {
         &[format!("{from}  ->  {target}"), format!("  {verdict}")],
     );
 
-    if !verdict.is_possible() {
-        return ExitCode::from(EXIT_USAGE);
-    }
-    if let Conversion::Lossy { lost } = &verdict {
-        // Refused rather than warned. A lossy conversion that runs anyway is
-        // exactly the silence F-016 exists to break, and the loss is not
-        // recoverable afterwards.
-        eprintln!("ade: refusing to convert: this would discard {lost}");
-        eprintln!("ade: lossy conversion is not available yet — no flag enables it");
-        return ExitCode::from(EXIT_USAGE);
-    }
-
-    // Decompression first, so `--raw` works on an ADZ as well as an ADF.
-    let sectors = if matches!(from, ade_core::layers::container::Kind::Gzip) {
-        match ade_core::layers::container::inflate::gunzip(&bytes, ade_core::MAX_DECOMPRESSED) {
-            Ok(b) => b,
-            Err(e) => {
-                eprintln!("ade: {}: {e}", input.display());
+    // The verdict above is printed for a person; the engine decides again
+    // below and is the one that governs. Two computations of one cheap answer,
+    // and the alternative — trusting a front end's reading of the matrix — is
+    // how a UI comes to permit something the engine refuses.
+    let out_bytes = match ade_core::convert::convert_bytes(bytes, to) {
+        Ok(b) => b,
+        Err(e) => {
+            // Refused rather than warned. A lossy conversion that runs anyway
+            // is exactly the silence F-016 exists to break, and the loss is
+            // not recoverable afterwards.
+            eprintln!("ade: {}: {e}", input.display());
+            if matches!(e, ade_core::convert::ConvertError::Failed { .. }) {
                 return ExitCode::from(EXIT_UNREADABLE);
             }
+            eprintln!("ade: no flag enables a conversion ADE has refused");
+            return ExitCode::from(EXIT_USAGE);
         }
-    } else {
-        bytes
-    };
-
-    let out_bytes = if raw {
-        match encode_raw_mfm(&sectors) {
-            Ok(b) => b,
-            Err(e) => {
-                eprintln!("ade: {}: {e}", input.display());
-                return ExitCode::from(EXIT_UNREADABLE);
-            }
-        }
-    } else {
-        sectors
     };
 
     // Never overwrite. A conversion that silently replaces a source image is
@@ -1223,62 +1236,6 @@ fn formats(format: Format) -> ExitCode {
     lines.push("is not recoverable, and a warning nobody reads is how it happens.".to_owned());
     emit_lines(&mut std::io::stdout().lock(), &lines);
     ExitCode::from(EXIT_CLEAN)
-}
-
-/// Encode a sector image as an extended ADF of raw MFM tracks.
-///
-/// Lossless, and provably so: reading the result back reassembles the input
-/// byte for byte. What it cannot do is invent protection the source never had
-/// — the output is an extended ADF holding an ordinary disk, which is a
-/// container change rather than a preservation upgrade.
-fn encode_raw_mfm(sectors: &[u8]) -> Result<Vec<u8>, String> {
-    use ade_core::layers::container::extended::{self, TrackSource};
-    use ade_core::layers::track::{SECTOR_BYTES, encode_track};
-
-    // The sectors-per-track comes from the image's own geometry rather than
-    // being assumed: an HD image has 22 where a DD one has 11.
-    let inspection = ade_core::inspect_bytes(sectors.to_vec());
-    let geometry = inspection
-        .geometry
-        .ok_or("cannot establish a geometry for this image")?;
-    let per_track = usize::try_from(geometry.sectors()).unwrap_or(11).max(1);
-    let track_bytes = per_track.saturating_mul(SECTOR_BYTES);
-    let remainder = sectors
-        .len()
-        .checked_rem(track_bytes)
-        .ok_or("a track cannot be zero bytes")?;
-    if remainder != 0 {
-        return Err(format!(
-            "not a whole number of {per_track}-sector tracks — {} bytes",
-            sectors.len()
-        ));
-    }
-    let track_count = sectors
-        .len()
-        .checked_div(track_bytes)
-        .ok_or("a track cannot be zero bytes")?;
-
-    let mut encoded: Vec<Vec<u8>> = Vec::with_capacity(track_count);
-    for index in 0..track_count {
-        let base = index.saturating_mul(track_bytes);
-        let mut slices: Vec<&[u8]> = Vec::with_capacity(per_track);
-        for s in 0usize..per_track {
-            let at = base.saturating_add(s.saturating_mul(SECTOR_BYTES));
-            let end = at.saturating_add(SECTOR_BYTES);
-            slices.push(sectors.get(at..end).ok_or("image ends mid-track")?);
-        }
-        let number = u8::try_from(index).unwrap_or(u8::MAX);
-        encoded.push(encode_track(number, &slices).ok_or("a sector was the wrong size")?);
-    }
-
-    let sources: Vec<TrackSource<'_>> = encoded
-        .iter()
-        .map(|data| TrackSource::RawMfm {
-            data,
-            length_bits: u32::try_from(data.len().saturating_mul(8)).unwrap_or(u32::MAX),
-        })
-        .collect();
-    extended::write(&sources).map_err(|e| e.to_string())
 }
 
 /// Read several images, reporting any that cannot be read.
@@ -1489,7 +1446,36 @@ fn summarise(tracks: &[usize]) -> String {
 /// Progress goes to stderr and the summary to stdout, so the machine-readable
 /// output stays clean when a run is piped — a progress bar interleaved with
 /// JSON is worse than no progress bar.
-fn batch(paths: &[String], format: Format, datfiles: Option<&Path>, hash: bool) -> ExitCode {
+fn batch(
+    paths: &[String],
+    format: Format,
+    datfiles: Option<&Path>,
+    hash: bool,
+    convert_to: Option<&str>,
+    into: Option<&Path>,
+) -> ExitCode {
+    // Both halves are needed or neither: a target with nowhere to write is a
+    // request ADE cannot honour, and a destination with no target is one it
+    // cannot interpret.
+    let convert = match (convert_to, into) {
+        (None, _) => None,
+        (Some(code), None) => {
+            eprintln!("ade: --convert={code} also needs --output=<directory>");
+            return ExitCode::from(EXIT_USAGE);
+        }
+        (Some(code), Some(dir)) => {
+            let Some(to) = kind_from_code(code) else {
+                eprintln!("ade: --convert={code}: not a container ADE can write");
+                eprintln!("ade: try adf, extended-adf, or hdf");
+                return ExitCode::from(EXIT_USAGE);
+            };
+            Some(ade_core::batch::ConvertRequest {
+                to,
+                into: dir.to_path_buf(),
+            })
+        }
+    };
+
     let inputs: Vec<PathBuf> = paths.iter().map(PathBuf::from).collect();
     let show_progress = std::io::IsTerminal::is_terminal(&std::io::stderr());
 
@@ -1509,12 +1495,18 @@ fn batch(paths: &[String], format: Format, datfiles: Option<&Path>, hash: bool) 
         None => None,
     };
 
-    let summary = ade_core::batch::run_full(&inputs, catalogue.as_ref(), hash, |done, total| {
-        if show_progress && (done % 25 == 0 || done == total) {
-            eprint!("\r  {done} of {total} examined");
-            let _ = std::io::stderr().flush();
-        }
-    });
+    let summary = ade_core::batch::run_converting(
+        &inputs,
+        catalogue.as_ref(),
+        hash,
+        convert.as_ref(),
+        |done, total| {
+            if show_progress && (done % 25 == 0 || done == total) {
+                eprint!("\r  {done} of {total} examined");
+                let _ = std::io::stderr().flush();
+            }
+        },
+    );
     if show_progress {
         eprintln!();
     }
@@ -1589,6 +1581,32 @@ fn report_batch(out: &mut impl Write, summary: &ade_core::Summary) {
         findings.sort_by(|a, b| b.1.cmp(a.1));
         for (code, count) in findings {
             lines.push(format!("    {count:>6}  {code}"));
+        }
+    }
+
+    if !summary.conversions.is_empty() {
+        // Converted first, then everything that did not: a bulk conversion's
+        // useful output is the list of what it declined and why, since the
+        // successes are already sitting in the output directory.
+        lines.push("  converted".to_owned());
+        let mut outcomes: Vec<(&&str, &usize)> = summary.conversions.iter().collect();
+        outcomes.sort_by(|a, b| b.1.cmp(a.1));
+        for (code, count) in outcomes {
+            lines.push(format!("    {count:>6}  {code}"));
+        }
+        // One example of each refusal, because "412 refused" without a reason
+        // sends a person back to run the command again per image.
+        let mut shown: BTreeSet<&str> = BTreeSet::new();
+        for record in &summary.records {
+            let Some(outcome) = &record.conversion else {
+                continue;
+            };
+            if outcome.wrote() || !shown.insert(outcome.code) {
+                continue;
+            }
+            if let Some(reason) = &outcome.reason {
+                lines.push(format!("      {}: {reason}", outcome.code));
+            }
         }
     }
 

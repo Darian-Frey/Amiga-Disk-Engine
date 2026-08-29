@@ -167,9 +167,10 @@ Status vocabulary: **Not started** | **In progress** | **Partially delivered** (
 **Effort:** M · **Phase:** 5
 **Acceptance:**
 - Bulk verify / convert / catalogue / report across thousands of images in one run, with a machine-readable summary.
-**Status:** Delivered 2026-08-26 except bulk convert — `ade batch`
+**Status:** Delivered 2026-08-29 — `ade batch`
 **What exists:** verify, catalogue and report across a whole corpus in one run, text or JSON (records as JSON Lines, then a summary object). **The 4652-image corpus runs in 5.5 seconds at 9 MB peak**, because one image is read, examined and dropped — memory does not scale with the corpus. Nothing aborts a run: an unreadable image becomes a record, since a pass over four thousand disks that stops at the first bad one has reported on one disk.
-**Missing clause:** bulk *convert*. `ade convert` is per-image; `ade batch` does not drive it.
+**Bulk convert landed 2026-08-29.** `ade batch --convert=<code> --output=<dir>` converts a whole corpus in the same pass as the health check, from the bytes already read — converting separately would read all 4.2 GB a second time to produce a report ADE has just produced. 400 real images convert to extended ADF in **1.36 s at 9.7 MB peak**, and 30 spot-checked outputs list identically to their sources.
+**Nothing aborts a run, F-016's rules intact.** A corpus is heterogeneous: one target is lossless for most images, `lossy` for the flux captures, `not-implemented` for DMS. Each outcome is reported per image with its reason and counted in the summary; a run that stopped at the first refusal would convert nothing. Existing outputs are never overwritten — reported as `exists` and left alone, which in bulk is the difference between one mistake and four thousand.
 **A histogram counts images, not occurrences** — one damaged disk raising a code fifty times is one affected disk. Getting that wrong made 186 images read as 1050.
 **Notes:** No friendly tool scales to the 4,500-image-corpus workflow hit on the ST. Depends on F-002, F-013.
 

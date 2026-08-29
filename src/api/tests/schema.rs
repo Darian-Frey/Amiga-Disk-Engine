@@ -414,6 +414,7 @@ fn batch_emits_exactly_these_fields() {
             "container",
             "container_code",
             "sha1",
+            "conversion",
             "volume",
             "files",
             "directories",
@@ -440,8 +441,15 @@ fn the_batch_summary_emits_exactly_these_fields() {
     std::fs::write(&bad, damaged()).unwrap();
 
     // Through the real entry point, so the summary is the one a corpus run
-    // produces rather than one assembled by the test.
-    let summary = ade_core::batch::run(&[good, bad], |_, _| {});
+    // produces rather than one assembled by the test — and **converting**, so
+    // `conversions[]` is non-empty. An empty array shows none of its element
+    // fields, which is how an inventory quietly stops covering them.
+    let request = ade_core::batch::ConvertRequest {
+        to: ade_core::layers::container::Kind::Hardfile,
+        into: dir.join("converted"),
+    };
+    let summary =
+        ade_core::batch::run_converting(&[good, bad], None, false, Some(&request), |_, _| {});
     let _ = std::fs::remove_dir_all(&dir);
     compare(
         "batch summary",
@@ -460,6 +468,9 @@ fn the_batch_summary_emits_exactly_these_fields() {
             "findings",
             "findings[].code",
             "findings[].images",
+            "conversions",
+            "conversions[].code",
+            "conversions[].images",
         ],
     );
 }
