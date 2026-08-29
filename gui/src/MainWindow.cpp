@@ -1,5 +1,6 @@
 #include "MainWindow.h"
 
+#include "HexView.h"
 #include "ImageTree.h"
 
 #include <QAction>
@@ -71,27 +72,6 @@ QString formatProtection(quint32 bits) {
     return out;
 }
 
-QString hexDump(const QByteArray &data) {
-    QString out;
-    out.reserve(data.size() * 4);
-    for (int offset = 0; offset < data.size(); offset += 16) {
-        out += QStringLiteral("%1  ").arg(offset, 8, 16, QChar('0'));
-        QString ascii;
-        for (int i = 0; i < 16; ++i) {
-            if (offset + i < data.size()) {
-                const unsigned char c = static_cast<unsigned char>(data[offset + i]);
-                out += QStringLiteral("%1 ").arg(c, 2, 16, QChar('0'));
-                ascii += (c >= 0x20 && c < 0x7F) ? QChar(c) : QChar('.');
-            } else {
-                out += QStringLiteral("   ");
-            }
-            if (i == 7) out += QChar(' ');
-        }
-        out += QStringLiteral(" |") + ascii + QStringLiteral("|\n");
-    }
-    return out;
-}
-
 }  // namespace
 
 MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
@@ -133,10 +113,15 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
                            metrics.horizontalAdvance(QStringLiteral("hsparwed")) + padding);
     m_tree->setUniformRowHeights(true);
 
-    m_hex = new QPlainTextEdit(this);
+    m_hex = new HexPane(this);
+    m_hex->setObjectName(QStringLiteral("hex"));
     m_hex->setReadOnly(true);
     m_hex->setLineWrapMode(QPlainTextEdit::NoWrap);
     m_hex->setFont(QFontDatabase::systemFont(QFontDatabase::FixedFont));
+    // Null bytes dimmed, so real data stands out from the padding and empty
+    // space that fills most of a disk. Owned by the document, which outlives
+    // every dump put into it.
+    new HexNullDimmer(m_hex->document(), m_hex);
 
     m_text = new QPlainTextEdit(this);
     m_text->setReadOnly(true);
@@ -600,7 +585,7 @@ void MainWindow::showEntry(QTreeWidgetItem *item) {
     }
     const QByteArray head = data.left(PreviewBytes);
 
-    m_hex->setPlainText(hexDump(head));
+    m_hex->setPlainText(hexview::dump(head));
     // Latin-1, like every other name and string off an Amiga disk.
     m_text->setPlainText(QString::fromLatin1(head));
     if (data.size() > head.size()) {

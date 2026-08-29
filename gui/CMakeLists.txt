@@ -40,8 +40,10 @@ qt_add_executable(ade-gui
     src/main.cpp
     src/MainWindow.cpp
     src/ImageTree.cpp
+    src/HexView.cpp
     src/MainWindow.h
     src/ImageTree.h
+    src/HexView.h
     src/Image.h
 )
 add_dependencies(ade-gui ade_bridge)
@@ -62,8 +64,10 @@ if(Qt6Test_FOUND)
         tests/test_mainwindow.cpp
         src/MainWindow.cpp
         src/ImageTree.cpp
+        src/HexView.cpp
         src/MainWindow.h
         src/ImageTree.h
+        src/HexView.h
         src/Image.h
     )
     add_dependencies(ade-gui-tests ade_bridge)

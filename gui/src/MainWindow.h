@@ -14,6 +14,7 @@ class ImageTree;
 class QAction;
 class QLabel;
 class QLineEdit;
+class HexPane;
 class QPlainTextEdit;
 class QTabWidget;
 class QTreeWidgetItem;
@@ -94,7 +95,7 @@ private:
 
     ImageTree *m_tree = nullptr;
     ImageTree *m_results = nullptr;
-    QPlainTextEdit *m_hex = nullptr;
+    HexPane *m_hex = nullptr;
     QPlainTextEdit *m_text = nullptr;
     QLineEdit *m_query = nullptr;
     QTabWidget *m_views = nullptr;

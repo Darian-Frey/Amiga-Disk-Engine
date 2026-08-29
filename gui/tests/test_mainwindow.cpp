@@ -10,6 +10,7 @@
 //
 // Run under QT_QPA_PLATFORM=offscreen, which needs no X server.
 
+#include "../src/HexView.h"
 #include "../src/ImageTree.h"
 #include "../src/MainWindow.h"
 
@@ -20,6 +21,9 @@
 #include <QFontMetrics>
 #include <QTemporaryDir>
 #include <QTest>
+#include <QClipboard>
+#include <QTextBlock>
+#include <QTextLayout>
 #include <QTreeWidget>
 
 namespace {
@@ -66,6 +70,16 @@ private slots:
     void theFixedColumnsShowTheirWholeContents();
     void anImageWithNoVolumeDoesNotCrash();
     void anUnreadableFileIsRejectedNotFatal();
+    void nullBytesAreDimmedInTheHexFieldAndNowhereElse();
+    void theDimColourFollowsTheTheme();
+    void aDragAcrossLinesSelectsOnlyTheFieldItStartedIn();
+    void aDragInTheAsciiFieldStaysInTheAsciiField();
+    void aDragThatStraysIntoAnotherFieldKeepsGoingInItsOwn();
+    void copyingGivesBackExactlyWhatWasHighlighted();
+    void wholeLinesCanStillBeCopiedWhenThatIsWhatIsWanted();
+    void selectingHexMarksTheCharactersThoseBytesSpell();
+    void selectingCharactersMarksTheirHex();
+    void theMarkIsWeakerThanTheSelectionSoTheCopiedFieldIsObvious();
 
 private:
     QTemporaryDir m_dir;
@@ -514,6 +528,289 @@ void TestMainWindow::theFixedColumnsShowTheirWholeContents() {
              "all eight protection flags must fit");
     QVERIFY2(tree->columnWidth(1) >= metrics.horizontalAdvance(QStringLiteral("999999999")),
              "the largest size on a floppy must fit");
+}
+
+// The hex field's zero bytes are dimmed so real data stands out from padding
+// (the Atari Disk Engine does the same). Two things can go wrong and neither
+// is visible in a screenshot: dimming the wrong columns, and dimming nothing.
+void TestMainWindow::nullBytesAreDimmedInTheHexFieldAndNowhereElse() {
+    QPlainTextEdit pane;
+    HexNullDimmer dimmer(pane.document(), &pane);
+
+    // A line whose offset is all zeros, whose first byte is zero, whose ASCII
+    // column contains the literal characters `00`, and which also holds a
+    // non-zero byte. Every trap in one line.
+    QByteArray data(16, '\x41');
+    data[0] = '\x00';
+    data[1] = '0';
+    data[2] = '0';
+    pane.setPlainText(hexview::dump(data));
+
+    const QTextBlock line = pane.document()->findBlockByNumber(0);
+    QVERIFY(line.isValid());
+    QList<int> dimmed;
+    for (const auto &range : line.layout()->formats()) {
+        dimmed.append(range.start);
+    }
+
+    // The one null byte is dimmed, and it is the only thing that is.
+    QCOMPARE(dimmed, QList<int>{hexview::columnOf(0)});
+
+    // Which means, specifically:
+    const QString text = line.text();
+    QVERIFY2(text.startsWith(QStringLiteral("00000000  00 30 30 41")), qPrintable(text));
+    QVERIFY2(!dimmed.contains(0), "the offset column is mostly zeros; dimming it "
+                                  "would dim every line rather than the data");
+    QVERIFY2(!dimmed.contains(text.indexOf(QStringLiteral("|"))),
+             "the ASCII column can hold the characters 00 from the file itself");
+    QVERIFY2(!dimmed.contains(hexview::columnOf(1)),
+             "byte 1 is the character '0', which is 0x30 and not a null");
+}
+
+void TestMainWindow::theDimColourFollowsTheTheme() {
+    // Dim means "between the text and the background", not a fixed grey: a
+    // hardcoded light-theme grey is invisible on a dark one. Checked at both
+    // ends rather than by naming a colour, so the blend can be retuned without
+    // rewriting the test.
+    QPalette light;
+    light.setColor(QPalette::Text, Qt::black);
+    light.setColor(QPalette::Base, Qt::white);
+    const QColor dimLight = HexNullDimmer::dimColour(light);
+    QVERIFY(dimLight.lightness() > QColor(Qt::black).lightness());
+    QVERIFY(dimLight.lightness() < QColor(Qt::white).lightness());
+
+    QPalette dark;
+    dark.setColor(QPalette::Text, Qt::white);
+    dark.setColor(QPalette::Base, QColor(30, 30, 30));
+    const QColor dimDark = HexNullDimmer::dimColour(dark);
+    QVERIFY2(dimDark.lightness() < dimLight.lightness(),
+             "a dark theme's dim must be darker than a light theme's, not the same grey");
+    QVERIFY(dimDark.lightness() > QColor(30, 30, 30).lightness());
+}
+
+// A hex dump is three columns pretending to be one line of text, and ordinary
+// text selection does not know that: dragging down two lines in the hex field
+// takes the end of that line's hex, the ASCII column, the next line's offset,
+// and only then more hex. These pin the clamping that fixes it.
+namespace {
+
+// A pane holding `lines` dump lines of recognisable bytes: line n is n+1
+// repeated, so a selection's extent is legible in the copied text.
+HexPane *dumpPane(int lines) {
+    QByteArray data;
+    for (int line = 0; line < lines; ++line) {
+        data.append(QByteArray(16, static_cast<char>(line + 1)));
+    }
+    auto *pane = new HexPane;
+    pane->setFont(QFont(QStringLiteral("monospace"), 10));
+    pane->setLineWrapMode(QPlainTextEdit::NoWrap);
+    pane->setPlainText(hexview::dump(data));
+    pane->resize(700, 300);
+    // Shown, or the document has no layout and every point maps to the same
+    // cursor — the drag would then select nothing and the test would pass or
+    // fail for reasons unrelated to the clamping.
+    pane->show();
+    return pane;
+}
+
+// The viewport point at (line, column) of the dump.
+QPoint at(HexPane *pane, int line, int column) {
+    const QTextBlock block = pane->document()->findBlockByNumber(line);
+    QTextCursor cursor(block);
+    cursor.setPosition(block.position() + column);
+    const QRect r = pane->cursorRect(cursor);
+    return QPoint(r.left() + 1, r.center().y());
+}
+
+// Press at one point, drag to another, release.
+void drag(HexPane *pane, QPoint from, QPoint to) {
+    // To the viewport, not the frame: a scroll area's mouse events arrive
+    // there, and `cursorRect` gives viewport coordinates to match.
+    QMouseEvent press(QEvent::MouseButtonPress, from, pane->mapToGlobal(from), Qt::LeftButton,
+                      Qt::LeftButton, Qt::NoModifier);
+    QApplication::sendEvent(pane->viewport(), &press);
+    QMouseEvent move(QEvent::MouseMove, to, pane->mapToGlobal(to), Qt::NoButton, Qt::LeftButton,
+                     Qt::NoModifier);
+    QApplication::sendEvent(pane->viewport(), &move);
+    QMouseEvent release(QEvent::MouseButtonRelease, to, pane->mapToGlobal(to), Qt::LeftButton,
+                        Qt::NoButton, Qt::NoModifier);
+    QApplication::sendEvent(pane->viewport(), &release);
+}
+
+}  // namespace
+
+void TestMainWindow::aDragAcrossLinesSelectsOnlyTheFieldItStartedIn() {
+    QScopedPointer<HexPane> pane(dumpPane(4));
+    // From byte 2 of line 0 to byte 5 of line 2, in the hex field.
+    drag(pane.data(), at(pane.data(), 0, hexview::columnOf(2)),
+         at(pane.data(), 2, hexview::columnOf(5)));
+
+    const QStringList got = pane->selectedFieldText().split(QChar('\n'));
+    QCOMPARE(got.size(), 3);
+    // Line 0 runs from the byte grabbed to the end of the field; the middle
+    // line is whole; the last stops where the pointer did.
+    // Bytes 2 through 15: six before the gap that splits the two groups of
+    // eight, then the last eight.
+    QCOMPARE(got[0], QStringLiteral("01 01 01 01 01 01  01 01 01 01 01 01 01 01"));
+    QCOMPARE(got[1], QStringLiteral("02 02 02 02 02 02 02 02  02 02 02 02 02 02 02 02"));
+    QCOMPARE(got[2], QStringLiteral("03 03 03 03 03 03"));
+
+    // Nothing from the other two fields came with it.
+    const QString all = pane->selectedFieldText();
+    QVERIFY2(!all.contains(QChar('|')), "the ASCII column must not be dragged in");
+    QVERIFY2(!all.contains(QStringLiteral("00000010")), "nor the next line's offset");
+}
+
+void TestMainWindow::aDragInTheAsciiFieldStaysInTheAsciiField() {
+    QScopedPointer<HexPane> pane(dumpPane(3));
+    drag(pane.data(), at(pane.data(), 0, hexview::AsciiColumn),
+         at(pane.data(), 1, hexview::AsciiColumn + 3));
+
+    const QStringList got = pane->selectedFieldText().split(QChar('\n'));
+    QCOMPARE(got.size(), 2);
+    // 0x01 and 0x02 are unprintable, so the dump shows dots — sixteen of them
+    // on the first line, four on the second.
+    QCOMPARE(got[0], QString(16, QChar('.')));
+    QCOMPARE(got[1], QString(4, QChar('.')));
+}
+
+void TestMainWindow::aDragThatStraysIntoAnotherFieldKeepsGoingInItsOwn() {
+    // The pointer wandering into the ASCII column must not silently change
+    // what is being selected — that is the behaviour being fixed, not a
+    // feature to preserve.
+    QScopedPointer<HexPane> pane(dumpPane(3));
+    drag(pane.data(), at(pane.data(), 0, hexview::columnOf(0)),
+         at(pane.data(), 1, hexview::AsciiColumn + 8));
+
+    const QString got = pane->selectedFieldText();
+    QVERIFY2(got.startsWith(QStringLiteral("01 01")), qPrintable(got));
+    QVERIFY2(!got.contains(QChar('.')), "still hex, not the characters it strayed over");
+}
+
+void TestMainWindow::copyingGivesBackExactlyWhatWasHighlighted() {
+    QScopedPointer<HexPane> pane(dumpPane(3));
+    drag(pane.data(), at(pane.data(), 1, hexview::columnOf(0)),
+         at(pane.data(), 1, hexview::columnOf(3)));
+
+    QApplication::clipboard()->clear();
+    QKeyEvent copy(QEvent::KeyPress, Qt::Key_C, Qt::ControlModifier);
+    QApplication::sendEvent(pane.data(), &copy);
+    QCOMPARE(QApplication::clipboard()->text(), QStringLiteral("02 02 02 02"));
+
+    // And a plain click clears it, rather than leaving a one-byte remnant.
+    const QPoint spot = at(pane.data(), 0, hexview::columnOf(0));
+    drag(pane.data(), spot, spot);
+    QVERIFY(pane->selectedFieldText().isEmpty());
+}
+
+void TestMainWindow::wholeLinesCanStillBeCopiedWhenThatIsWhatIsWanted() {
+    // Clamping the drag removes the only way there was to copy a line as it
+    // appears — which is what somebody pasting into a bug report wants — so
+    // the context menu keeps it.
+    QScopedPointer<HexPane> pane(dumpPane(3));
+    drag(pane.data(), at(pane.data(), 0, hexview::columnOf(4)),
+         at(pane.data(), 1, hexview::columnOf(4)));
+
+    const QStringList got = pane->selectedLines().split(QChar('\n'));
+    QCOMPARE(got.size(), 2);
+    QVERIFY2(got[0].startsWith(QStringLiteral("00000000  01 01")), qPrintable(got[0]));
+    QVERIFY2(got[0].endsWith(QStringLiteral("|................|")), qPrintable(got[0]));
+    QVERIFY2(got[1].startsWith(QStringLiteral("00000010  02 02")), qPrintable(got[1]));
+}
+
+// Hex and characters are two readings of the same bytes, and which bytes is
+// the question a hex view exists to answer — so a selection in one field marks
+// the same bytes in the other.
+namespace {
+
+// Every highlighted range as (line, first column, last column), in order.
+QList<std::tuple<int, int, int>> marks(HexPane *pane) {
+    QList<std::tuple<int, int, int>> out;
+    for (const auto &selection : pane->extraSelections()) {
+        const QTextBlock block = selection.cursor.block();
+        const int start = selection.cursor.selectionStart() - block.position();
+        const int end = selection.cursor.selectionEnd() - block.position();
+        out.append({block.blockNumber(), start, end - 1});
+    }
+    return out;
+}
+
+// Whether any highlight covers exactly that span, and with which background.
+bool markedFrom(HexPane *pane, int line, int first, int last, QColor &colour) {
+    for (const auto &selection : pane->extraSelections()) {
+        const QTextBlock block = selection.cursor.block();
+        if (block.blockNumber() != line) continue;
+        const int start = selection.cursor.selectionStart() - block.position();
+        const int end = selection.cursor.selectionEnd() - block.position() - 1;
+        if (start == first && end == last) {
+            colour = selection.format.background().color();
+            return true;
+        }
+    }
+    return false;
+}
+
+}  // namespace
+
+void TestMainWindow::selectingHexMarksTheCharactersThoseBytesSpell() {
+    QScopedPointer<HexPane> pane(dumpPane(3));
+    // Bytes 4 through 9 of line 1, in the hex field.
+    drag(pane.data(), at(pane.data(), 1, hexview::columnOf(4)),
+         at(pane.data(), 1, hexview::columnOf(9)));
+
+    QColor colour;
+    QVERIFY2(markedFrom(pane.data(), 1, hexview::AsciiColumn + 4, hexview::AsciiColumn + 9, colour),
+             "the same six bytes must be marked in the characters");
+    QCOMPARE(colour, HexPane::mirrorColour(pane->palette()));
+
+    // And only there: two ranges on one line, no other line touched.
+    QCOMPARE(marks(pane.data()).size(), 2);
+}
+
+void TestMainWindow::selectingCharactersMarksTheirHex() {
+    QScopedPointer<HexPane> pane(dumpPane(3));
+    drag(pane.data(), at(pane.data(), 0, hexview::AsciiColumn + 2),
+         at(pane.data(), 1, hexview::AsciiColumn + 5));
+
+    QColor colour;
+    // The first line runs from byte 2 to the end of the field; the hex mark
+    // has to follow the gap that splits the two groups of eight, which is why
+    // this is not simply "start plus three times the count".
+    QVERIFY2(markedFrom(pane.data(), 0, hexview::columnOf(2), hexview::columnOf(15) + 1, colour),
+             "the first line's hex, from the byte grabbed to the end");
+    QVERIFY2(markedFrom(pane.data(), 1, hexview::columnOf(0), hexview::columnOf(5) + 1, colour),
+             "the last line's hex, stopping where the pointer did");
+
+    // What is copied is still only the characters.
+    QVERIFY2(!pane->selectedFieldText().contains(QChar('0')),
+             "marking hex must not put hex on the clipboard");
+}
+
+void TestMainWindow::theMarkIsWeakerThanTheSelectionSoTheCopiedFieldIsObvious() {
+    // Painted alike, both fields would look equally selected and nothing on
+    // screen would say which one Ctrl+C copies — a worse ambiguity than the
+    // one being fixed.
+    QScopedPointer<HexPane> pane(dumpPane(2));
+    QPalette p = pane->palette();
+    p.setColor(QPalette::Base, Qt::white);
+    p.setColor(QPalette::Highlight, QColor(53, 132, 228));
+    pane->setPalette(p);
+
+    const QColor selected = p.color(QPalette::Highlight);
+    const QColor marked = HexPane::mirrorColour(p);
+    QVERIFY2(marked != selected, "the two must be distinguishable");
+    QVERIFY2(marked.lightness() > selected.lightness(),
+             "against a light background the mark is the paler of the two");
+    QVERIFY2(marked != p.color(QPalette::Base), "but still visible against the page");
+
+    // The selection keeps the highlighted-text colour; the mark leaves the
+    // text alone, so a dimmed null stays dimmed under it.
+    drag(pane.data(), at(pane.data(), 0, hexview::columnOf(0)),
+         at(pane.data(), 0, hexview::columnOf(3)));
+    for (const auto &selection : pane->extraSelections()) {
+        const bool isMark = selection.format.background().color() == marked;
+        QCOMPARE(selection.format.hasProperty(QTextFormat::ForegroundBrush), !isMark);
+    }
 }
 
 QTEST_MAIN(TestMainWindow)
