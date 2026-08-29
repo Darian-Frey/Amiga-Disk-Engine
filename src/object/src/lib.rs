@@ -3,4 +3,7 @@
 //! The neutral representation the UI and catalogue consume. Undelete and salvage
 //! operate here (F-012).
 //!
-//! Not yet implemented — Phase 2.
+//! Content signatures (F-020) live here: recognising what bytes *are*, as
+//! distinct from what a directory entry calls them.
+
+pub mod signature;

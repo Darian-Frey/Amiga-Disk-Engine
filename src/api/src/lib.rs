@@ -14,6 +14,7 @@ pub mod convert;
 pub mod health;
 pub mod inspect;
 pub mod json;
+pub mod scan;
 
 pub use assemble::{Assembly, assemble};
 pub use batch::{Record, Summary};

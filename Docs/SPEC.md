@@ -804,6 +804,48 @@ Mixed track types within one image are normal and are the signature of copy prot
 
 This is what confirms the layout rather than merely fitting it: the arithmetic could be satisfied by a wrong reading, but a wrong reading does not produce a rootblock with a legible name at block 880. It also shows what the type mix means in practice — `Champ` is a disk protected by making exactly the track that matters unreadable to a plain reader.
 
+## Content signatures
+
+*Measured across all 4,652 corpus images on 2026-08-29, in 24 seconds (F-020).*
+
+What a directory entry calls a file and what the file *is* often disagree on a thirty-year-old disk, and the interesting bytes are frequently in space nothing points at any more. ADE scans the whole image for magic bytes and reports the block each hit falls in.
+
+| signature | hits | images | notes |
+|---|---|---|---|
+| Amiga hunk executable (`00 00 03 F3`) | 7445 | 677 | the loadable-file header |
+| IFF (`FORM`) | 3889 | 231 | type follows at offset 8 |
+| Amiga icon (`E3 10 00 01`) | 3844 | 194 | `DiskObject.do_Magic` |
+| RNC ProPack (`RNC\x01`) | 2972 | 127 | followed by packed/unpacked lengths |
+| ProTracker `M.K.` | 1686 | 679 | **1,080 bytes into a module**, never block-aligned |
+| PowerPacker `PP20` | 1385 | 61 | efficiency table follows; 91 on one disk is normal |
+| Imploder (`IMP!`) | 429 | 32 | |
+| AmigaGuide (`@database`) | 143 | 16 | |
+| Startrekker (`FLT4`) | 119 | 58 | |
+| gzip | 32 | 30 | |
+| LZX / ZIP / OctaMED / XPK / JPEG | 25 / 41 / 23 / 21 / 9 | ≤11 each | present but lightly tested |
+| Amiga hunk object (`00 00 03 E7`) | 11 | 11 | |
+| DMS archive (`DMS!`) | 3 | 2 | see below |
+| **xDMS failure filler** | 8 | 8 | see below |
+| **xDMS version filler** | 1 | 1 | see below |
+
+Untested: `PP11`, `M!K!` (16 hits, 4 images), `THX`/`AHX`, `RNC\x02`, PNG, GIF, SCP and `UAE-1ADF` inside an ADF. Present in the table because they are documented; absent from the corpus because it is 4,652 game and application floppies, not a format sampler.
+
+### Three rules the corpus taught, each correcting a wrong answer
+
+**Anchoring.** Most magics sit at the head of a file, and an Amiga file's data begins on a block boundary — so requiring block alignment removes almost every coincidental match a four-byte substring search would produce. The exceptions are markers *inside* a file: a ProTracker module's `M.K.` is 1,080 bytes in, past a title and 31 sample headers. Those are searched for anywhere and their rate measured rather than assumed. At 1,686 hits over 4.2 GB they are real: chance alone would give about one.
+
+**The most specific match wins.** `DMS!!ERR` and `DMS!` match the same bytes at the same offset.
+
+**A pattern repeating across consecutive blocks is filler, not files.** Before this rule the scan reported 91 "DMS archives" and 88 of them were one damaged disk; after it, 3 archives in 2 images and the damage reported as what it is. `Powerstyx.adf` carries `DMS!1.52` across 88 consecutive blocks. No file header repeats like that.
+
+### xDMS filler: nine corpus images were never fully unpacked
+
+`DMS!!ERR` and `DMS!1.52` are not archives. They are what **xDMS writes over a track it could not decompress** — so an ADF carrying either was produced from a DMS that failed partway, and the affected blocks hold filler where data should be.
+
+Nine images carry it: three Cannon Fodder 2 disks, `Crystal Dragon_Disk1`, `Heimdall 2 (AGA)_Disk1`, `Lemmings_Disk2`, `Super Tennis Champs`, `Powerstyx`, and `Workbench v1.1 rev 31.334 (1986)(Commodore)(Disk 1 of 2)`.
+
+**The last one is already TOSEC-tagged `[b errdms]`** — bad, errdms — which is an independent confirmation of the detection from the people who catalogued the collection. The other eight carry no such tag, so the scan found damage the naming had missed. That is the case for scanning content rather than trusting names, made by the corpus itself.
+
 ## Flux formats
 
 - **Extended-ADF** — see above.

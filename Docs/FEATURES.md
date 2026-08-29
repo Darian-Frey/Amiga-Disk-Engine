@@ -223,6 +223,31 @@ Status vocabulary: **Not started** | **In progress** | **Partially delivered** (
 
 The parser reads `RDSK`, the `PART` chain and a minimal `FSHD`/`LSEG`, and every partition mounts through a bounds-checked window. `ade info` prints the table, and `ls`/`extract`/`check` take `--partition=` by drive name or index. What remains is the browse/edit surface in the GUI, which belongs to Phase 5, and editing itself, which D-004 defers to Phase 4.
 
+### F-019 Create a blank formatted disk
+**Priority:** Should
+**Effort:** S · **Phase:** 5
+**Acceptance:**
+- Produce a new, empty, mountable AmigaDOS volume — OFS or FFS, DD or HD — that ADE, an independent generator, and ADFlib all agree is well-formed.
+- Never overwrite an existing file.
+**Status:** Delivered 2026-08-29 — `ade create`
+**Why it exists:** asked for while testing drag-out in the GUI, and the gap was real: ADE read six container formats and could create none of them. There was no way to obtain a disk to *put* anything on.
+**It does not breach D-004, and the distinction matters.** D-004's rule is that "every write path ships only after its read path is proven on fixtures", with write arriving "from Phase 4/5". The OFS/FFS read path is proven — 4,652 corpus images, 99.36% agreement with ADFlib over 3,900 extracted files — and this is Phase 5. It is also the safest write there is: it produces a **new** file and touches nothing that exists, which is the irreversible damage D-004 is actually about. Adding a file to a disk somebody already owns is a different feature with a different risk, and is not this.
+**Written from SPEC, deliberately not from the fixture generator.** `ade-fixtures` already builds volumes and reusing it would have been quicker — and would have destroyed what makes it useful, since D-010 keeps it dependent on nothing so a misreading in a layer crate cannot cancel out against it. Instead there are now **three independent statements** of what a blank disk is, and the tests require all three to agree: ADE reads back what it wrote, the fixture generator's equivalent matches structurally, and ADFlib mounts it.
+**One defect the health check caught immediately:** the first disk produced reported three `datestamp-day-zero` findings *against itself*, because the stamp defaulted to zero and SPEC records day zero as what Amiga software treats as unset. The library still takes an explicit stamp so tests stay deterministic; the command uses the clock, because "created" means when the disk was made.
+**Not bootable, deliberately.** AmigaDOS's own `format` leaves the boot code zeroed unless `install` is run, and ADE will not write boot code it would then refuse to interpret (AV-002).
+
+### F-020 Content signature scanner
+**Priority:** Should
+**Effort:** S · **Phase:** 5
+**Acceptance:**
+- Find known file formats anywhere in an image by their magic bytes, reporting the offset and block of each, whether or not a directory entry points at them.
+**Status:** Delivered 2026-08-29 — `ade scan`
+**Why it exists:** mapped across from the Atari Disk Engine, which has a 62-signature scanner ADE had no equivalent of. What a directory entry calls a file and what the bytes are often disagree on a thirty-year-old disk, and the interesting content is frequently in space nothing points at any more.
+**The table is measured, not recalled.** Every signature was scanned across all 4,652 corpus images — 24 seconds — and the counts are in SPEC §Content signatures. A magic that never appears in 4.2 GB of real Amiga disks is recorded as untested rather than quietly trusted.
+**Three rules the corpus taught**, each correcting an answer that was confidently wrong: magics are **anchored to block starts** unless the format puts them inside a file (a ProTracker `M.K.` is 1,080 bytes in); the **most specific match at an offset wins**; and a pattern **repeating across consecutive blocks is filler, not files** — that last one turned 91 reported "DMS archives" into 3 real ones plus a damaged disk.
+**It found damage the catalogue had missed.** `DMS!!ERR` and `DMS!1.52` are what xDMS writes over a track it could not decompress, so an ADF carrying either came from a DMS that failed partway. **Nine corpus images carry it.** One is already TOSEC-tagged `[b errdms]` — independent confirmation from the people who catalogued the collection — and the other eight are not.
+**Notes:** the Atari engine scans for 62 signatures across 8 categories; ADE's table is 25 and Amiga-flavoured. Breadth is not the goal — every entry here has a documented source and a corpus count.
+
 ## Candidate features (uncommitted)
 
 - Read support for modern journalling filesystems (SFS, PFS).

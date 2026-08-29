@@ -139,6 +139,12 @@ struct Args {
     output: Option<PathBuf>,
     /// A directory of TOSEC datfiles, for identification (F-013).
     datfiles: Option<PathBuf>,
+    /// The volume name `create` gives a new disk.
+    volume_name: Option<String>,
+    /// The filesystem `create` formats with: `ofs` or `ffs`.
+    volume_type: Option<String>,
+    /// `create` makes a high-density disk rather than double-density.
+    hd: bool,
     /// Bulk-convert every image in a batch to this container code.
     convert_to: Option<String>,
     /// Compute SHA-1 content hashes and include them in the output.
@@ -161,6 +167,9 @@ fn parse_args(raw: Vec<String>) -> Result<Args, String> {
     let mut format = Format::Text;
     let mut hash = false;
     let mut convert_to: Option<String> = None;
+    let mut volume_name: Option<String> = None;
+    let mut volume_type: Option<String> = None;
+    let mut hd = false;
     let mut partition: Option<String> = None;
     let mut raw_output = false;
     let mut output: Option<PathBuf> = None;
@@ -169,6 +178,13 @@ fn parse_args(raw: Vec<String>) -> Result<Args, String> {
         match arg.as_str() {
             "--raw" => raw_output = true,
             "--hash" => hash = true,
+            "--hd" => hd = true,
+            _ if arg.starts_with("--name=") => {
+                volume_name = Some(arg.trim_start_matches("--name=").to_owned());
+            }
+            _ if arg.starts_with("--type=") => {
+                volume_type = Some(arg.trim_start_matches("--type=").to_owned());
+            }
             _ if arg.starts_with("--convert=") => {
                 convert_to = Some(arg.trim_start_matches("--convert=").to_owned());
             }
@@ -205,6 +221,9 @@ fn parse_args(raw: Vec<String>) -> Result<Args, String> {
         format,
         hash,
         convert_to,
+        volume_name,
+        volume_type,
+        hd,
         partition,
         raw: raw_output,
         output,
@@ -253,6 +272,13 @@ fn main() -> ExitCode {
             args.partition.as_deref(),
         ),
         ("convert", 2) => convert(Path::new(p(0)), Path::new(p(1)), args.raw),
+        ("create", 1) => create(
+            Path::new(p(0)),
+            args.volume_name.as_deref(),
+            args.volume_type.as_deref(),
+            args.hd,
+        ),
+        ("scan", 1) => scan(Path::new(p(0)), args.format),
         ("formats", 0) => formats(args.format),
         ("batch", n) if n >= 1 => batch(
             &args.positional,
@@ -296,6 +322,8 @@ fn usage() {
         "    ade ls <image> [path]              list a directory".to_owned(),
         "    ade extract <image> <path> [dest]  extract a file".to_owned(),
         "    ade convert <in> <out>             convert between containers (F-016)".to_owned(),
+        "    ade create <out.adf>               make a blank formatted disk (F-019)".to_owned(),
+        "    ade scan <image>                   find known content by its magic (F-020)".to_owned(),
         "    ade formats                        what converts to what, and what it costs"
             .to_owned(),
         "    ade batch <dir|image>...           verify a whole corpus (F-014)".to_owned(),
@@ -311,6 +339,9 @@ fn usage() {
         "    --partition=P   which partition of a hard disk, by name (DH0) or index (0)".to_owned(),
         "    --raw           convert writes raw MFM tracks (an extended ADF)".to_owned(),
         "    --hash          include SHA-1 content hashes (not free; see VOCABULARY.md)".to_owned(),
+        "    --name=NAME     create: the volume name (default \"Empty\")".to_owned(),
+        "    --type=ofs|ffs  create: the filesystem (default ffs)".to_owned(),
+        "    --hd            create: a 1.76 MB high-density disk instead of 880 KB".to_owned(),
         "    --convert=CODE  batch: convert every image to CODE (adf, hdf, extended-adf)"
             .to_owned(),
         "                    into --output=DIR; refusals are reported, never fatal".to_owned(),
@@ -1265,6 +1296,152 @@ fn convert(input: &Path, output: &Path, raw: bool) -> ExitCode {
 }
 
 /// Print the conversion matrix (F-016).
+/// Make a blank formatted disk (F-019).
+///
+/// The first write path ADE ships, and the safest one there is: it produces a
+/// new file and touches nothing that exists, which is the irreversible damage
+/// D-004 is about. Refuses to overwrite, like `convert`.
+fn create(output: &Path, name: Option<&str>, kind: Option<&str>, hd: bool) -> ExitCode {
+    use ade_core::layers::filesystem::{dostype::Dostype, format};
+
+    // The international variants, because everything since Workbench 2.0
+    // writes them and a name with an accent sorts wrongly without (C-006).
+    let flags = match kind.unwrap_or("ffs").to_ascii_lowercase().as_str() {
+        "ffs" => 3u8,
+        "ofs" => 2u8,
+        other => {
+            eprintln!("ade: --type={other}: expected ofs or ffs");
+            return ExitCode::from(EXIT_USAGE);
+        }
+    };
+    let Ok(dostype) = Dostype::from_raw(0x444F_5300 | u32::from(flags)) else {
+        eprintln!("ade: internal: could not build a dostype");
+        return ExitCode::from(EXIT_USAGE);
+    };
+
+    let geometry = if hd {
+        ade_core::layers::block::Geometry::HD_FLOPPY
+    } else {
+        ade_core::layers::block::Geometry::DD_FLOPPY
+    };
+    let name = name.unwrap_or(format::DEFAULT_NAME);
+
+    // The clock, because "created" means when the disk was made and a tool
+    // that lies about that is worse than one that omits it. The default of
+    // zero is *illegal*: SPEC records that Amiga software treats day 0 as
+    // unset, and ADE's own health check says so — the first disk this command
+    // produced reported three `datestamp-day-zero` findings against itself.
+    // The library still takes an explicit stamp, so tests stay deterministic.
+    let bytes = match format::blank(geometry, dostype, name, now()) {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("ade: {e}");
+            return ExitCode::from(EXIT_USAGE);
+        }
+    };
+
+    if output.exists() {
+        eprintln!(
+            "ade: {}: already exists, refusing to overwrite",
+            output.display()
+        );
+        return ExitCode::from(EXIT_USAGE);
+    }
+    if let Err(e) = std::fs::write(output, &bytes) {
+        eprintln!("ade: {}: {e}", output.display());
+        return ExitCode::from(EXIT_UNREADABLE);
+    }
+    emit_lines(
+        &mut std::io::stdout().lock(),
+        &[
+            format!("{dostype}  ->  {}", output.display()),
+            format!("  {} bytes, volume \"{name}\"", bytes.len()),
+        ],
+    );
+    ExitCode::from(EXIT_CLEAN)
+}
+
+/// The current time, as AmigaDOS counts it.
+///
+/// Days since 1978-01-01, which is 2,922 days after the Unix epoch — eight
+/// years including the leap days of 1972 and 1976. A clock before 1978 gives
+/// day 1 rather than a negative: the field is unsigned, and a disk stamped
+/// "the day after the Amiga's epoch" is odd where an underflowed one is
+/// corrupt.
+fn now() -> ade_core::layers::filesystem::format::Stamp {
+    use ade_core::layers::filesystem::format::Stamp;
+    const AMIGA_EPOCH_IN_UNIX_DAYS: u64 = 2922;
+    let Ok(since) = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) else {
+        return Stamp {
+            days: 1,
+            mins: 0,
+            ticks: 0,
+        };
+    };
+    let secs = since.as_secs();
+    let days = secs
+        .checked_div(86_400)
+        .unwrap_or(0)
+        .saturating_sub(AMIGA_EPOCH_IN_UNIX_DAYS)
+        .max(1);
+    let in_day = secs.checked_rem(86_400).unwrap_or(0);
+    Stamp {
+        days: u32::try_from(days).unwrap_or(1),
+        mins: u32::try_from(in_day.checked_div(60).unwrap_or(0)).unwrap_or(0),
+        ticks: u32::try_from(in_day.checked_rem(60).unwrap_or(0).saturating_mul(50)).unwrap_or(0),
+    }
+}
+
+/// Find recognisable content anywhere in an image (F-020).
+///
+/// The whole image, not just its files: what a directory entry calls a thing
+/// and what the bytes are do not always agree, and on a damaged disk the
+/// interesting content is frequently in space nothing points at any more.
+fn scan(path: &Path, format: Format) -> ExitCode {
+    let bytes = match std::fs::read(path) {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("ade: {}: {e}", path.display());
+            return ExitCode::from(EXIT_UNREADABLE);
+        }
+    };
+    // The volume's own block size where there is one, so an offset can be
+    // named as the block everything else in ADE speaks in.
+    let block_size = ade_core::inspect_bytes(bytes.clone())
+        .geometry
+        .map_or(512, |g| g.block_size());
+    let found = ade_core::scan::Scan::of(&bytes, block_size);
+
+    let mut out = std::io::stdout().lock();
+    if format == Format::Json {
+        emit_json(&mut out, found.to_json());
+        return ExitCode::from(EXIT_CLEAN);
+    }
+
+    let mut lines = vec![path.display().to_string()];
+    if found.is_empty() {
+        lines.push("  nothing recognised".to_owned());
+    }
+    for hit in &found.hits {
+        // A run of blocks is filler, not a file, and saying which is the whole
+        // value of the distinction.
+        let extent = if hit.run > 1 {
+            format!("  ({} blocks)", hit.run)
+        } else {
+            String::new()
+        };
+        lines.push(format!(
+            "  block {:>5}  offset {:>9}  {:<12} {}{extent}",
+            hit.block,
+            hit.offset,
+            hit.category.code(),
+            hit.name
+        ));
+    }
+    emit_lines(&mut out, &lines);
+    ExitCode::from(EXIT_CLEAN)
+}
+
 fn formats(format: Format) -> ExitCode {
     if format == Format::Json {
         let mut out = std::io::stdout().lock();

@@ -429,6 +429,32 @@ fn batch_emits_exactly_these_fields() {
 }
 
 #[test]
+fn a_scan_emits_exactly_these_fields() {
+    // A hit is planted rather than hoped for: an empty `hits` array would show
+    // none of its element fields, which is how an inventory quietly stops
+    // covering something.
+    let mut bytes = vec![0u8; 4096];
+    bytes[512..516].copy_from_slice(b"PP20");
+    let found = ade_core::scan::Scan::of(&bytes, 512);
+    assert!(!found.is_empty(), "the fixture should be recognised");
+    compare(
+        "scan",
+        &paths(&found.to_json().versioned()),
+        &[
+            "schema",
+            "scanned",
+            "found",
+            "hits",
+            "hits[].name",
+            "hits[].category",
+            "hits[].offset",
+            "hits[].block",
+            "hits[].blocks",
+        ],
+    );
+}
+
+#[test]
 fn the_batch_summary_emits_exactly_these_fields() {
     // Over a real image, and a damaged one: the arrays are the point here, and
     // an empty array shows none of its element fields. A summary of nothing

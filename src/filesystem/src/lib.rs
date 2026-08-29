@@ -8,6 +8,8 @@
 //! read-only [`bootblock`] and [`rootblock`] inspection. Mounting, traversal and
 //! extraction are still to come.
 
+pub mod format;
+
 pub mod bitmap;
 pub mod bootblock;
 pub mod datestamp;
