@@ -39,5 +39,5 @@ Append-only identifier registers (`F-`, `D-`, `C-`, `AV-`, `BUG-`, `IMP-`); entr
 ## Deliberate omissions
 
 - **`CLAIMS.md`** — omitted. ADE is a systems and forensic tool making no empirical or theoretical research assertions (legitimate Tier-3 non-applicability; no exemption entry required).
-- **`VOCABULARY.md`** — deferred until the ManifeST catalogue-integration contract (F-013) is defined.
+- **[`VOCABULARY.md`](VOCABULARY.md)** — ADE's terms, and how they map onto a ManifeST-style catalogue. Deferred from the start because the contract was undefined; written 2026-08-29 against ManifeST's own `DiskRecord.hpp`.
 - **`LICENSE`** — **no longer omitted.** Deferred under **D-008** pending D-002; resolved on 2026-08-21 as Apache-2.0 (**D-011**) and added before the first public commit, with an accompanying `NOTICE`. D-008 stays in the register as the audit trail for the period in which no licence existed.

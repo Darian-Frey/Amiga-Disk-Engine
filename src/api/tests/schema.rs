@@ -205,6 +205,7 @@ fn a_directory_entry_emits_exactly_these_fields() {
             "comment",
             "altered",
             "checksum_valid",
+            "sha1",
         ],
     );
 }
@@ -411,6 +412,8 @@ fn batch_emits_exactly_these_fields() {
             "path",
             "size",
             "container",
+            "container_code",
+            "sha1",
             "volume",
             "files",
             "directories",

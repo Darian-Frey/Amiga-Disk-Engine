@@ -42,8 +42,7 @@ use std::{
 };
 
 use ade_core::{
-    Conversion, Health, Image, Inspection, Severity, conversion, entry_to_json, examine_partition,
-    inspect_path,
+    Conversion, Health, Image, Inspection, Severity, conversion, examine_partition, inspect_path,
     layers::{
         container::Window,
         filesystem::{rdb::Partition, volume::Volume},
@@ -139,6 +138,13 @@ struct Args {
     output: Option<PathBuf>,
     /// A directory of TOSEC datfiles, for identification (F-013).
     datfiles: Option<PathBuf>,
+    /// Compute SHA-1 content hashes and include them in the output.
+    ///
+    /// Off by default and deliberately so: hashing runs at 349 MB/s, about
+    /// twelve seconds over a 4.2 GB corpus, and a health pass has no use for
+    /// the field. A cataloguer does — it is the key a catalogue finds
+    /// duplicates with (see VOCABULARY.md).
+    hash: bool,
     /// Write tracks as raw MFM rather than as sectors.
     ///
     /// A flag rather than an output extension because an extended ADF is also
@@ -150,6 +156,7 @@ struct Args {
 fn parse_args(raw: Vec<String>) -> Result<Args, String> {
     let mut positional: Vec<String> = Vec::new();
     let mut format = Format::Text;
+    let mut hash = false;
     let mut partition: Option<String> = None;
     let mut raw_output = false;
     let mut output: Option<PathBuf> = None;
@@ -157,6 +164,7 @@ fn parse_args(raw: Vec<String>) -> Result<Args, String> {
     for arg in raw {
         match arg.as_str() {
             "--raw" => raw_output = true,
+            "--hash" => hash = true,
             "--format=json" | "--json" => format = Format::Json,
             "--format=text" => format = Format::Text,
             other if other.starts_with("--format=") => {
@@ -188,6 +196,7 @@ fn parse_args(raw: Vec<String>) -> Result<Args, String> {
         command,
         positional,
         format,
+        hash,
         partition,
         raw: raw_output,
         output,
@@ -214,12 +223,14 @@ fn main() -> ExitCode {
             None,
             args.format,
             args.partition.as_deref(),
+            args.hash,
         ),
         ("ls", 2) => list(
             Path::new(p(0)),
             Some(p(1)),
             args.format,
             args.partition.as_deref(),
+            args.hash,
         ),
         ("extract", 2) => extract(Path::new(p(0)), p(1), None, args.partition.as_deref()),
         ("extract", 3) => extract(
@@ -230,7 +241,12 @@ fn main() -> ExitCode {
         ),
         ("convert", 2) => convert(Path::new(p(0)), Path::new(p(1)), args.raw),
         ("formats", 0) => formats(args.format),
-        ("batch", n) if n >= 1 => batch(&args.positional, args.format, args.datfiles.as_deref()),
+        ("batch", n) if n >= 1 => batch(
+            &args.positional,
+            args.format,
+            args.datfiles.as_deref(),
+            args.hash,
+        ),
         ("identify", n) if n >= 1 => {
             identify(&args.positional, args.datfiles.as_deref(), args.format)
         }
@@ -279,6 +295,7 @@ fn usage() {
         "    --format=json   machine-readable; field names and fault codes are stable".to_owned(),
         "    --partition=P   which partition of a hard disk, by name (DH0) or index (0)".to_owned(),
         "    --raw           convert writes raw MFM tracks (an extended ADF)".to_owned(),
+        "    --hash          include SHA-1 content hashes (not free; see VOCABULARY.md)".to_owned(),
         "    --output=P      consolidate writes the merged image to P".to_owned(),
         "    --datfiles=D    directory of TOSEC .dat files, for identify".to_owned(),
         String::new(),
@@ -654,7 +671,49 @@ fn report_text(out: &mut impl Write, path: &Path, i: &Inspection) {
 /// Faults found while walking are reported but do not stop the listing — a
 /// directory with one broken hash chain still has usable entries in its other
 /// slots.
-fn list(path: &Path, dir: Option<&str>, format: Format, partition: Option<&str>) -> ExitCode {
+/// SHA-1 of one entry's contents, when hashing was asked for.
+///
+/// Hashing a listing means reading every file in it, which is a full
+/// extraction wearing a listing's clothes — so only when asked, and only for
+/// files: a directory has no contents to hash, and a hash of nothing would be
+/// a real-looking value for a question nobody put (VOCABULARY.md).
+fn file_digest(
+    volume: &ade_core::layers::filesystem::volume::Volume<'_>,
+    entry: &ade_core::layers::filesystem::entry::Entry,
+    hash: bool,
+) -> Option<String> {
+    if !hash || !entry.kind.is_file() {
+        return None;
+    }
+    let contents = volume.read_file(entry).ok()?;
+    Some(ade_core::layers::catalogue::sha1::hex(
+        &ade_core::layers::catalogue::sha1::sha1(&contents.into_bytes()),
+    ))
+}
+
+/// The listing as JSON Lines, one document per entry.
+fn list_json(
+    out: &mut impl Write,
+    volume: &ade_core::layers::filesystem::volume::Volume<'_>,
+    entries: &[ade_core::layers::filesystem::entry::Entry],
+    hash: bool,
+) {
+    for e in entries {
+        let digest = file_digest(volume, e, hash);
+        let json = ade_core::entry_to_json_hashed(e, &volume.path_components(e), digest.as_deref());
+        if !emit_json(out, json) {
+            break;
+        }
+    }
+}
+
+fn list(
+    path: &Path,
+    dir: Option<&str>,
+    format: Format,
+    partition: Option<&str>,
+    hash: bool,
+) -> ExitCode {
     let image = match Image::open(path) {
         Ok(i) => i,
         Err(e) => {
@@ -709,13 +768,7 @@ fn list(path: &Path, dir: Option<&str>, format: Format, partition: Option<&str>)
 
     let mut out = std::io::stdout().lock();
     match format {
-        Format::Json => {
-            for e in &entries {
-                if !emit_json(&mut out, entry_to_json(e, &volume.path_components(e))) {
-                    break;
-                }
-            }
-        }
+        Format::Json => list_json(&mut out, &volume, &entries, hash),
         Format::Text => {
             for e in &entries {
                 let size = if e.kind.is_file() {
@@ -1436,7 +1489,7 @@ fn summarise(tracks: &[usize]) -> String {
 /// Progress goes to stderr and the summary to stdout, so the machine-readable
 /// output stays clean when a run is piped — a progress bar interleaved with
 /// JSON is worse than no progress bar.
-fn batch(paths: &[String], format: Format, datfiles: Option<&Path>) -> ExitCode {
+fn batch(paths: &[String], format: Format, datfiles: Option<&Path>, hash: bool) -> ExitCode {
     let inputs: Vec<PathBuf> = paths.iter().map(PathBuf::from).collect();
     let show_progress = std::io::IsTerminal::is_terminal(&std::io::stderr());
 
@@ -1456,7 +1509,7 @@ fn batch(paths: &[String], format: Format, datfiles: Option<&Path>) -> ExitCode 
         None => None,
     };
 
-    let summary = ade_core::batch::run_with(&inputs, catalogue.as_ref(), |done, total| {
+    let summary = ade_core::batch::run_full(&inputs, catalogue.as_ref(), hash, |done, total| {
         if show_progress && (done % 25 == 0 || done == total) {
             eprint!("\r  {done} of {total} examined");
             let _ = std::io::stderr().flush();

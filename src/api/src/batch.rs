@@ -33,8 +33,20 @@ pub struct Record {
     pub path: PathBuf,
     /// Bytes on disk.
     pub size: u64,
-    /// The container, as identified.
+    /// The container, as identified — a sentence for a person.
     pub container: String,
+    /// The container as a stable code: `adf`, `extended-adf`, `scp`.
+    ///
+    /// A cataloguer keys on this; `container` above is prose and may be
+    /// reworded (F-015).
+    pub container_code: &'static str,
+    /// SHA-1 of the image as it sits on disk, when hashing was asked for.
+    ///
+    /// **Opt-in, because it is not free**: 349 MB/s measured, which is about
+    /// twelve seconds over a 4.2 GB corpus against five for the health pass.
+    /// A catalogue wants it as the primary key for duplicates; a health run
+    /// does not want it at all, and ADE does not hash unless asked.
+    pub sha1: Option<String>,
     /// The volume's name, where one mounted.
     pub volume: Option<String>,
     /// Files reached.
@@ -166,6 +178,8 @@ impl Record {
             ("path", Value::str(self.path.display().to_string())),
             ("size", Value::Num(self.size)),
             ("container", Value::str(self.container.clone())),
+            ("container_code", Value::str(self.container_code)),
+            ("sha1", Value::opt(self.sha1.as_ref(), Value::str)),
             ("volume", Value::opt(self.volume.as_ref(), Value::str)),
             ("files", Value::Num(self.files as u64)),
             ("directories", Value::Num(self.directories as u64)),
@@ -254,19 +268,30 @@ const fn match_label(kind: ade_catalogue::Match) -> &'static str {
 /// Examine one image, turning any failure into a record rather than an error.
 #[must_use]
 pub fn examine_one(path: &Path) -> Record {
-    examine_inner(path, None)
+    examine_inner(path, None, false)
 }
 
 /// Examine one image and name it from a dataset (F-013 and F-014 together).
 #[must_use]
 pub fn examine_and_identify(path: &Path, catalogue: &Catalogue) -> Record {
-    examine_inner(path, Some(catalogue))
+    examine_inner(path, Some(catalogue), false)
+}
+
+/// As [`examine_and_identify`], and hash the image as well.
+///
+/// The hash is what a catalogue keys on — ManifeST's `image_hash`, and the
+/// column it finds duplicates with. Separate from the other two because it
+/// costs about twelve seconds over a 4.2 GB corpus, which a health pass should
+/// not pay for a field it will not read.
+#[must_use]
+pub fn examine_hashed(path: &Path, catalogue: Option<&Catalogue>) -> Record {
+    examine_inner(path, catalogue, true)
 }
 
 /// The shared body: the file is read **once** and both the health examination
 /// and the content hash work from those bytes. Reading twice doubled the cost
 /// of a corpus run for no benefit.
-fn examine_inner(path: &Path, catalogue: Option<&Catalogue>) -> Record {
+fn examine_inner(path: &Path, catalogue: Option<&Catalogue>, hash: bool) -> Record {
     let bytes = match std::fs::read(path) {
         Ok(b) => b,
         Err(e) => {
@@ -274,6 +299,8 @@ fn examine_inner(path: &Path, catalogue: Option<&Catalogue>) -> Record {
                 path: path.to_path_buf(),
                 size: 0,
                 container: "unreadable".to_owned(),
+                container_code: "unreadable",
+                sha1: None,
                 volume: None,
                 files: 0,
                 directories: 0,
@@ -286,19 +313,23 @@ fn examine_inner(path: &Path, catalogue: Option<&Catalogue>) -> Record {
         }
     };
     let size = bytes.len() as u64;
-    // Hash before `examine` consumes the bytes.
+    // Both of these read the original bytes, so they happen before `examine`
+    // consumes them.
     let identified = catalogue.map_or_else(Vec::new, |c| {
         c.identify(&bytes)
             .into_iter()
             .map(|e| e.name.clone())
             .collect()
     });
+    let sha1 = hash.then(|| ade_catalogue::sha1::hex(&ade_catalogue::sha1::sha1(&bytes)));
     let health = examine(bytes);
 
     Record {
         path: path.to_path_buf(),
         size,
         container: health.inspection.detection.kind.to_string(),
+        container_code: health.inspection.detection.kind.code(),
+        sha1,
         volume: health.examined.as_ref().map(|e| e.volume.clone()),
         files: health.files,
         directories: health.directories,
@@ -328,6 +359,21 @@ pub fn run(paths: &[PathBuf], progress: impl FnMut(usize, usize)) -> Summary {
 pub fn run_with(
     paths: &[PathBuf],
     catalogue: Option<&Catalogue>,
+    progress: impl FnMut(usize, usize),
+) -> Summary {
+    run_full(paths, catalogue, false, progress)
+}
+
+/// As [`run_with`], with control over whether each image is hashed.
+///
+/// Hashing is what turns a health pass into a catalogue pass (F-013): the
+/// SHA-1 is a cataloguer's primary key. It is a parameter rather than always
+/// on because it costs about twelve seconds over a 4.2 GB corpus.
+#[must_use]
+pub fn run_full(
+    paths: &[PathBuf],
+    catalogue: Option<&Catalogue>,
+    hash: bool,
     mut progress: impl FnMut(usize, usize),
 ) -> Summary {
     let mut files = collect(paths);
@@ -340,7 +386,9 @@ pub fn run_with(
 
     for (index, path) in files.iter().enumerate() {
         let record = match catalogue {
+            Some(c) if hash => examine_hashed(path, Some(c)),
             Some(c) => examine_and_identify(path, c),
+            None if hash => examine_hashed(path, None),
             None => examine_one(path),
         };
 

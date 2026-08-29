@@ -1112,7 +1112,18 @@ impl Inspection {
 /// A directory entry as a JSON value (F-015).
 #[must_use]
 pub fn entry_to_json(entry: &Entry, path: &[Vec<u8>]) -> Value {
-    Value::Obj(vec![
+    entry_to_json_hashed(entry, path, None)
+}
+
+/// A directory entry as JSON, with its content hash where one was computed.
+///
+/// The hash is `None` unless the caller asked for it: a listing of a whole
+/// volume would otherwise read every file to hash it, turning a directory
+/// listing into a full extraction. A cataloguer wants exactly that and says
+/// so; `ade ls` does not, by default (VOCABULARY.md, F-013).
+#[must_use]
+pub fn entry_to_json_hashed(entry: &Entry, path: &[Vec<u8>], sha1: Option<&str>) -> Value {
+    let mut fields = vec![
         ("name", Value::latin1(&entry.name)),
         ("path", Value::latin1(&path.join(&b'/'))),
         ("kind", Value::str(entry.kind.to_string())),
@@ -1141,7 +1152,9 @@ pub fn entry_to_json(entry: &Entry, path: &[Vec<u8>]) -> Value {
             },
         ),
         ("checksum_valid", Value::Bool(entry.checksum_valid)),
-    ])
+    ];
+    fields.push(("sha1", Value::opt(sha1, Value::str)));
+    Value::Obj(fields)
 }
 
 /// The geometry to mount a detected container with, if ADE can mount it.
