@@ -55,8 +55,8 @@ Neither run is the F-001 bar, which requires a fuzz corpus rather than well-form
 
 ## Phase 2 — Filesystem breadth
 **Goal:** Cover the full non-flux filesystem surface, including hard-disk images, plus forensic recovery.
-**Status:** In progress
-**Features in scope:** F-009 (initial), F-010 *(largely delivered early, 2026-08-24)*, F-012, F-017, F-018 *(reading half delivered 2026-08-24; the GUI half waits on Phase 5)*
+**Status:** In progress — but nothing unblocked remains. What is left is LNFS (D-013), undelete (no material), 5.25" DD (no source), configurable block sizes (nothing to test against) and F-017 (cut). The phase closes when material arrives, not when work does.
+**Features in scope:** F-009 (initial), F-010 *(largely delivered early, 2026-08-24)*, F-012, F-017 *(cut 2026-08-29, D-017)*, F-018 *(browsing delivered 2026-08-28; editing deferred by D-004)*
 **Deliverables:**
 - [x] HD (1.76 MB) geometry — mounts, round-trips OFS and FFS, rootblock computed at 1760 rather than read (C-007). Extra-cylinder (81–83) geometries too. Cross-checked against ADFlib.
 - [x] Dostype identification and hashing across all eight, including the international variants, cross-checked against ADFlib on accented filenames (C-006).

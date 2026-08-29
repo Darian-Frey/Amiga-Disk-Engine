@@ -490,3 +490,39 @@ Roughly 20% of corpus disks yield reportable text after filtering, and 91% of th
 **Consequences.** F-013's acceptance clause is not met as written and will not be by effort alone. The `VOCABULARY.md` ManifeST contract remains outstanding and is unblocked; it is ADE's own work rather than someone else's data.
 
 **Reversal conditions.** OpenRetro publishing a bulk export, or the author deciding an account-authenticated sync is acceptable for a local tool, reverses the second half immediately: SHA-1 is implemented, tested against `sha1sum`, and already wired into identification, so the work is a fetcher and a parser. WHDLoad reverses only if ADE grows the ability to read LHA archives — a different feature, not a dataset — or if a WHDLoad database keyed on disk-image hashes appears, which none does today.
+
+### D-017 F-017 (FUSE mount) is cut; what would be worth building is a different feature
+**Decided:** 2026-08-29
+**Recorded:** 2026-08-29
+**Status:** Accepted
+**Authors:** Darian-Frey (decision); Claude (analysis)
+**Related:** F-017, F-003, F-007, F-018, D-004
+
+**Context.** F-017 asks for "mount an ADF/HDF as a host filesystem (read at minimum) on Linux/macOS", priority **Could**, and its own note has flagged it as "lowest-priority; candidate for cutting" since 2026-08-21. It is the last undecided entry in the register. The justification recorded with it was that it "supersedes the separate, limited fuseadf" and is "partially covered by the Linux AFFS driver".
+
+**That justification is wrong, and measuring it is what settled this.** The Linux kernel ships an AFFS driver — `affs.ko` is present on this machine's 6.17 kernel — and SPEC's own dostype table, sourced from the driver's documentation, records what it handles: `DOS\0`–`DOS\3` read **and write**, `DOS\4`/`DOS\5` read-only, `DOS\6`/`DOS\7` unsupported. Over a 400-image random sample of the corpus:
+
+| dostype | share | Linux AFFS |
+|---|---|---|
+| `DOS\0` (OFS) | 87% | read/write |
+| `DOS\1` (FFS) | 6% | read/write |
+| no `DOS` bootblock | 4% | — |
+| `DOS\3` (FFS-INTL) | 1% | read/write |
+| `DOS\5` (FFS-DC) | <1% | read-only |
+
+**94% of the sample is read/write in the kernel already**, and essentially all of the 77% that mount at all. "Partially covered" understates it to the point of being misleading: for plain ADFs, a FUSE filesystem would reimplement a driver that has been in the kernel since 1993, worse and slower, with no root required as its only advantage.
+
+**What is *not* covered is real, and it is not F-017.** The kernel driver mounts a block device. It cannot read an ADZ, an extended ADF, an SCP capture, or a partition of an RDB device, and it cannot present a volume ADE reconstructed from raw tracks. Those are exactly the containers ADE exists for, and a FUSE layer over *them* would let `grep`, a file manager and any other tool reach content nothing else can.
+
+**Options.**
+- **A. Build F-017 as written.** Rejected: for the images it names — ADF and HDF — it duplicates the kernel.
+- **B. Keep F-017 open indefinitely.** Rejected. An entry nobody will build is noise in a register whose value is that its statuses are true, and this one has carried "candidate for cutting" for a week without either happening.
+- **C. Cut F-017, and record the part that would be worth building as a candidate.** Chosen.
+
+**Decision.** Option C. F-017 is **cut**. A FUSE mount of the containers the kernel cannot read — ADZ, extended ADF, SCP, RDB partitions, and reconstructions — is added to the candidate list, with this measurement as its justification rather than the one F-017 carried.
+
+**A second reason the cut is right, independent of coverage.** A filesystem interface cannot express what ADE is for. `read()` returns bytes; it has no way to say that this file came from a volume reassembled out of flux with 3% of its sectors missing, or that the disk's bitmap disagrees with its directory tree, or that two dataset entries name this content. ADE's value is the reporting, and mounting is the one interface that must discard it.
+
+**Consequences.** The register has no undecided entries. F-017's number stays allocated and its section records the cut, per the append-only convention — a reader who finds it referenced elsewhere lands on the reason rather than on nothing.
+
+**Reversal conditions.** A concrete need to reach ADE-only containers with ordinary tools — not a preference for mounting, a case where extraction genuinely will not serve. If that arrives, it is the candidate above and not this entry: the new feature's acceptance would name the containers the kernel cannot read, and would say what happens when a reconstruction's missing sectors are read.

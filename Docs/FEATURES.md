@@ -204,8 +204,10 @@ Status vocabulary: **Not started** | **In progress** | **Partially delivered** (
 **Effort:** M · **Phase:** 2+
 **Acceptance:**
 - Mount an ADF/HDF as a host filesystem (read at minimum) on Linux/macOS.
-**Status:** Not started
-**Notes:** Supersedes the separate, limited fuseadf. Lowest-priority; partially covered by the Linux AFFS driver. Candidate for cutting.
+**Status:** **Cut 2026-08-29 (D-017)**
+**Why:** its own justification did not survive being measured. The Linux kernel's AFFS driver handles `DOS\0`–`DOS\3` read **and write** and `DOS\4`/`DOS\5` read-only, which over a 400-image sample is **94% of the corpus read/write** and essentially all of the 77% that mount. For the ADF and HDF this clause names, a FUSE filesystem would reimplement a driver that has been in the kernel since 1993, worse and slower, with "no root required" as its only advantage.
+**A filesystem interface also cannot say what ADE is for.** `read()` returns bytes; it cannot report that a file came from a volume reassembled out of flux with 3% of its sectors missing, or that the bitmap disagrees with the directory tree. Mounting is the one interface that must discard the reporting that is the point of the tool.
+**What would be worth building is a different feature** and is on the candidate list: a mount of the containers the kernel *cannot* read — ADZ, extended ADF, SCP, RDB partitions, reconstructions. See D-017 for the measurement and the reversal condition.
 
 ### F-018 HD / RDB multi-partition browsing & editing
 **Priority:** Should
@@ -227,3 +229,4 @@ The parser reads `RDSK`, the `PART` chain and a minimal `FSHD`/`LSEG`, and every
 - FloppyBridge-compatible output for direct WinUAE/Amiberry use.
 - Cataloguing enrichment via Demozoo / ScreenScraper (mirroring ManifeST).
 - Track-level visualisation (MFM sync-word map, weak-bit heatmap).
+- **FUSE mount of the containers the kernel cannot read** — ADZ, extended ADF, SCP, RDB partitions and reconstructions, letting ordinary tools reach content nothing else can. Replaces the cut F-017, whose ADF/HDF scope the Linux AFFS driver already covers (D-017). Would need an answer for what reading a reconstruction's missing sectors returns.
