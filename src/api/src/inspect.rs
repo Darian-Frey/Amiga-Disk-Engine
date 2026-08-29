@@ -17,6 +17,7 @@ use std::{fs, io, path::Path};
 
 use ade_block::{BlockError, BlockSource as _};
 use ade_block::{Geometry, GeometryError, read_at};
+use ade_catalogue::Catalogue;
 use ade_container::{Detection, Kind, RawImage, Window, extended, inflate, sniff};
 use ade_filesystem::{
     bootblock::{BootText, Bootblock},
@@ -150,6 +151,13 @@ pub struct Inspection {
     pub partitions: Vec<PartitionInfo>,
     /// Faults found walking the partition chain.
     pub partition_faults: Vec<String>,
+    /// What a dataset called this image, when one was consulted (F-013).
+    ///
+    /// Empty when no dataset was configured, which is the default — see
+    /// [`crate::datfiles_location`] for why identification is not automatic.
+    /// Several names means the dataset lists one file under several, and
+    /// every one of them is correct.
+    pub identified: Vec<String>,
 }
 
 /// A device's Rigid Disk Block, as `ade info` reports it.
@@ -271,6 +279,7 @@ fn unreadable_container(
         rdb: None,
         partitions: Vec::new(),
         partition_faults: Vec::new(),
+        identified: Vec::new(),
     }
 }
 
@@ -685,6 +694,56 @@ pub fn inspect_path(path: &Path) -> Result<Inspection, InspectionError> {
     Ok(inspect_bytes(fs::read(path)?))
 }
 
+/// An image whose bytes do not reach the geometry its size implied.
+///
+/// Split out only for length; the shape is unchanged.
+fn too_short(
+    detection: Detection,
+    size: u64,
+    geometry: Geometry,
+    bootblock: Option<Bootblock>,
+    compression: Option<Compression>,
+) -> Inspection {
+    Inspection {
+        detection,
+        size,
+        geometry: Some(geometry),
+        bootblock,
+        volume: None,
+        volume_absent: Some("image is shorter than its geometry".to_owned()),
+        tracks: None,
+        flux: None,
+        assembly: None,
+        description: None,
+        boot_text: Vec::new(),
+        compression,
+        rdb: None,
+        partitions: Vec::new(),
+        partition_faults: Vec::new(),
+        identified: Vec::new(),
+    }
+}
+
+/// Inspect an image and name it from a dataset, in one read (F-013).
+///
+/// This is identification **on open**: the same bytes serve the inspection and
+/// the content hash, so naming a disk costs a CRC32 over bytes already in
+/// memory rather than a second pass. What it does not do is load the dataset —
+/// that is the caller's, once, because loading it per image is the thirteen
+/// minutes [`crate::datfiles_location`] warns about.
+#[must_use]
+pub fn inspect_bytes_named(bytes: Vec<u8>, catalogue: Option<&Catalogue>) -> Inspection {
+    let identified = catalogue.map_or_else(Vec::new, |c| {
+        c.identify(&bytes)
+            .into_iter()
+            .map(|e| e.name.clone())
+            .collect()
+    });
+    let mut inspection = inspect_bytes(bytes);
+    inspection.identified = identified;
+    inspection
+}
+
 /// Inspect an image already in memory.
 #[must_use]
 pub fn inspect_bytes(bytes: Vec<u8>) -> Inspection {
@@ -758,28 +817,13 @@ pub fn inspect_bytes(bytes: Vec<u8>) -> Inspection {
                 rdb: None,
                 partitions: Vec::new(),
                 partition_faults: Vec::new(),
+                identified: Vec::new(),
             };
         }
     };
 
     let Ok(image) = RawImage::new(bytes, geometry) else {
-        return Inspection {
-            detection,
-            size,
-            geometry: Some(geometry),
-            bootblock,
-            volume: None,
-            volume_absent: Some("image is shorter than its geometry".to_owned()),
-            tracks: None,
-            flux: None,
-            assembly: None,
-            description: None,
-            boot_text: Vec::new(),
-            compression: compression.clone(),
-            rdb: None,
-            partitions: Vec::new(),
-            partition_faults: Vec::new(),
-        };
+        return too_short(detection, size, geometry, bootblock, compression);
     };
     let (volume, volume_absent) = read_volume(&image, geometry);
     // Needs a real mount rather than the rootblock parse above, because it is
@@ -808,6 +852,7 @@ pub fn inspect_bytes(bytes: Vec<u8>) -> Inspection {
         rdb,
         partitions,
         partition_faults,
+        identified: Vec::new(),
     }
 }
 
@@ -1101,6 +1146,15 @@ impl Inspection {
                     self.partition_faults
                         .iter()
                         .map(|f| Value::str(f.clone()))
+                        .collect(),
+                ),
+            ),
+            (
+                "identified",
+                Value::Arr(
+                    self.identified
+                        .iter()
+                        .map(|n| Value::str(n.clone()))
                         .collect(),
                 ),
             ),

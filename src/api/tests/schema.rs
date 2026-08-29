@@ -171,6 +171,7 @@ fn info_emits_exactly_these_fields() {
             "rdb",
             "partitions",
             "partition_faults",
+            "identified",
             "faults",
         ],
     );

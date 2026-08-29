@@ -60,6 +60,8 @@ private slots:
     void aHardDiskShowsItsPartitionsAsALevelOfTheTree();
     void aFileInsideAPartitionPreviewsAndExtracts();
     void searchCoversEveryPartitionNotJustTheFirst();
+    void anImageIsNamedFromTheDatasetAsItOpens();
+    void withNoDatasetAnImageIsSimplyUnnamed();
     void anImageWithNoVolumeDoesNotCrash();
     void anUnreadableFileIsRejectedNotFatal();
 
@@ -450,6 +452,37 @@ void TestMainWindow::searchCoversEveryPartitionNotJustTheFirst() {
     QVERIFY2(shown[0] != shown[1], "two files of one name must read differently");
     QVERIFY(shown.filter(QStringLiteral("this is DH0")).size() == 1);
     QVERIFY(shown.filter(QStringLiteral("this is DH1")).size() == 1);
+}
+
+void TestMainWindow::anImageIsNamedFromTheDatasetAsItOpens() {
+    // F-013's clause where it pays: the dataset loads once for the session and
+    // every image opened afterwards arrives already named. The window reads
+    // $ADE_DATFILES, and CMake generates a dataset matching the fixture —
+    // computing the CRC32 here would reimplement the thing under test.
+    const QString datfiles = QStringLiteral(ADE_TEST_DATFILES);
+    QVERIFY2(QFile::exists(datfiles + QStringLiteral("/fixture.dat")), qPrintable(datfiles));
+
+    qputenv("ADE_DATFILES", datfiles.toUtf8());
+    MainWindow window;
+    window.openImage(m_image);
+    qunsetenv("ADE_DATFILES");
+
+    auto *tree = browser(window);
+    QVERIFY(tree);
+    QCOMPARE(tree->topLevelItemCount(), 1);
+    QVERIFY2(tree->topLevelItem(0)->toolTip(0).contains(QStringLiteral("A Named Disk.adf")),
+             qPrintable(tree->topLevelItem(0)->toolTip(0)));
+}
+
+void TestMainWindow::withNoDatasetAnImageIsSimplyUnnamed() {
+    // The ordinary case, and it must cost nothing: no dataset configured, no
+    // identification, no complaint.
+    qunsetenv("ADE_DATFILES");
+    MainWindow window;
+    window.openImage(m_image);
+    auto *tree = browser(window);
+    QVERIFY(tree);
+    QVERIFY(!tree->topLevelItem(0)->toolTip(0).contains(QStringLiteral("A Named Disk.adf")));
 }
 
 QTEST_MAIN(TestMainWindow)

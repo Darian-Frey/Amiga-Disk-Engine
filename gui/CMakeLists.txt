@@ -75,6 +75,10 @@ if(Qt6Test_FOUND)
     # A partitioned hard disk too, since a device is a different shape rather
     # than a bigger floppy: it holds no volume of its own (F-018).
     set(ADE_TEST_DEVICE "${CMAKE_CURRENT_BINARY_DIR}/gui-fixture.hdf")
+    # A dataset naming the floppy fixture, so identification-on-open has
+    # something to identify against (F-013). Generated with the image, because
+    # the datfile matches it by CRC32 and the two must be made together.
+    set(ADE_TEST_DATFILES "${CMAKE_CURRENT_BINARY_DIR}/datfiles")
 
     # Always re-run, like the bridge above, rather than treating the images as
     # build outputs that exist or do not. As outputs they went stale the moment
@@ -84,8 +88,10 @@ if(Qt6Test_FOUND)
     # knows whether anything changed; CMake, given only the image path, does
     # not.
     add_custom_target(ade_gui_fixture ALL
+        COMMAND ${CMAKE_COMMAND} -E make_directory "${ADE_TEST_DATFILES}"
         COMMAND cargo run --quiet ${CARGO_FLAG} -p ade-fixtures --bin mkfixture
                 --manifest-path "${ADE_ROOT}/Cargo.toml" -- "${ADE_TEST_IMAGE}"
+                --datfile "${ADE_TEST_DATFILES}/fixture.dat"
         COMMAND cargo run --quiet ${CARGO_FLAG} -p ade-fixtures --bin mkfixture
                 --manifest-path "${ADE_ROOT}/Cargo.toml" -- "${ADE_TEST_DEVICE}" --device
         BYPRODUCTS "${ADE_TEST_IMAGE}" "${ADE_TEST_DEVICE}"
@@ -94,7 +100,8 @@ if(Qt6Test_FOUND)
     )
     add_dependencies(ade-gui-tests ade_gui_fixture)
     target_compile_definitions(ade-gui-tests PRIVATE ADE_TEST_IMAGE="${ADE_TEST_IMAGE}"
-                                                     ADE_TEST_DEVICE="${ADE_TEST_DEVICE}")
+                                                     ADE_TEST_DEVICE="${ADE_TEST_DEVICE}"
+                                                     ADE_TEST_DATFILES="${ADE_TEST_DATFILES}")
     target_link_libraries(ade-gui-tests PRIVATE Qt6::Widgets Qt6::Test "${ADE_LIB}" pthread dl m)
     target_compile_options(ade-gui-tests PRIVATE -Wall -Wextra)
     add_test(NAME gui COMMAND ade-gui-tests)

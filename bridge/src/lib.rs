@@ -192,6 +192,15 @@ pub struct AdePartition {
     pub mounts: bool,
 }
 
+/// A loaded dataset, owned by the caller until freed.
+///
+/// Held rather than reloaded per image, because loading 88,921 entries takes
+/// 140 ms and a front end opens many images in one session: paid once at
+/// startup, spent on every disk after (F-013).
+pub struct AdeCatalogue {
+    inner: ade_core::layers::catalogue::Catalogue,
+}
+
 /// A device's partition table, owned by the caller until freed.
 pub struct AdePartitions {
     /// Owns the name bytes the entries point into — same role as
@@ -224,6 +233,8 @@ pub struct AdeImage {
     /// exactly the disks a person is puzzled by.
     image: Option<Image>,
     inspection: Inspection,
+    /// What a dataset called this image, when one was supplied at open.
+    identified: Option<String>,
     /// Findings from a full health check, counted at open.
     ///
     /// `examine` walks the whole volume and cross-checks the bitmap, so
@@ -319,6 +330,7 @@ pub extern "C" fn ade_version() -> *const c_char {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ade_image_open(
     path: *const c_char,
+    catalogue: *const AdeCatalogue,
     out_err: *mut AdeResult,
 ) -> *mut AdeImage {
     let set = |code: AdeResult| {
@@ -345,6 +357,16 @@ pub unsafe extern "C" fn ade_image_open(
             set(AdeResult::Io);
             return std::ptr::null_mut();
         };
+        // Identification on open (F-013), from the bytes already read. Null
+        // is the ordinary case: most callers have no dataset, and it costs
+        // them nothing.
+        // SAFETY: the caller's contract; null is checked by `as_ref`.
+        let identified = unsafe { catalogue.as_ref() }.and_then(|c| {
+            c.inner
+                .identify(&bytes)
+                .first()
+                .map(|entry| entry.name.clone())
+        });
         let inspection = inspect_bytes(bytes.clone());
         let findings = examine(bytes.clone()).findings.len();
         // A container ADE cannot mount still gets a handle: the caller wants
@@ -358,6 +380,7 @@ pub unsafe extern "C" fn ade_image_open(
         set(AdeResult::Ok);
         Box::into_raw(Box::new(AdeImage {
             image: handle,
+            identified,
             inspection,
             findings,
             container,
@@ -580,6 +603,112 @@ pub unsafe extern "C" fn ade_walk_open(image: *const AdeImage, partition: u32) -
         found.map_or(std::ptr::null_mut(), |listing| {
             Box::into_raw(Box::new(listing))
         })
+    })
+}
+
+/// Load every datfile in a directory.
+///
+/// Returns null when the directory holds none, or cannot be read. Release with
+/// [`ade_catalogue_free`].
+///
+/// # Safety
+/// `dir` must be a NUL-terminated path, or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ade_catalogue_open(dir: *const c_char) -> *mut AdeCatalogue {
+    guard(std::ptr::null_mut(), || {
+        if dir.is_null() {
+            return std::ptr::null_mut();
+        }
+        // SAFETY: checked non-null; the caller promises NUL termination.
+        let raw = unsafe { CStr::from_ptr(dir) };
+        let Ok(text) = raw.to_str() else {
+            return std::ptr::null_mut();
+        };
+        match ade_core::layers::catalogue::Catalogue::load_dir(&PathBuf::from(text)) {
+            Ok(inner) => Box::into_raw(Box::new(AdeCatalogue { inner })),
+            Err(_) => std::ptr::null_mut(),
+        }
+    })
+}
+
+/// Where a dataset lives when the front end was not told.
+///
+/// Checks `$ADE_DATFILES` then the conventional data directory, and returns
+/// null when neither exists — which is the ordinary case and not an error.
+/// The returned string is owned by the caller and must be freed with
+/// [`ade_string_free`].
+#[unsafe(no_mangle)]
+pub extern "C" fn ade_datfiles_location() -> *mut c_char {
+    guard(std::ptr::null_mut(), || {
+        let Some(dir) = ade_core::datfiles_location(None) else {
+            return std::ptr::null_mut();
+        };
+        CString::new(dir.display().to_string())
+            .map_or(std::ptr::null_mut(), std::ffi::CString::into_raw)
+    })
+}
+
+/// Release a string this library allocated.
+///
+/// # Safety
+/// `text` must have come from a call documented as returning an owned string,
+/// or be null. Freeing twice is undefined.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ade_string_free(text: *mut c_char) {
+    guard((), || {
+        if !text.is_null() {
+            // SAFETY: the caller's contract.
+            drop(unsafe { CString::from_raw(text) });
+        }
+    });
+}
+
+/// How many entries a dataset holds.
+///
+/// # Safety
+/// `catalogue` must be a live handle or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ade_catalogue_count(catalogue: *const AdeCatalogue) -> usize {
+    guard(0, || {
+        // SAFETY: the caller's contract; null is checked.
+        unsafe { catalogue.as_ref() }.map_or(0, |c| c.inner.len())
+    })
+}
+
+/// Release a dataset.
+///
+/// # Safety
+/// `catalogue` must come from [`ade_catalogue_open`], or be null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ade_catalogue_free(catalogue: *mut AdeCatalogue) {
+    guard((), || {
+        if !catalogue.is_null() {
+            // SAFETY: the caller's contract.
+            drop(unsafe { Box::from_raw(catalogue) });
+        }
+    });
+}
+
+/// What a dataset called this image, from [`ade_image_open`].
+///
+/// Empty when no catalogue was supplied at open, or when the dataset does not
+/// hold this image. The bytes borrow from the handle.
+///
+/// # Why this is decided at open and not asked later
+///
+/// The handle holds a mounted image, not the file's bytes (IMP-006), so it
+/// cannot hash itself after the fact. That suits F-013, which asks for
+/// identification **on open** rather than on demand: the bytes are in hand
+/// exactly once, and that is when the question gets answered.
+///
+/// # Safety
+/// `image` must be a live handle or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ade_image_identified(image: *const AdeImage) -> AdeBytes {
+    with_image(image, AdeBytes::empty(), |i| {
+        i.identified
+            .as_ref()
+            .map_or(AdeBytes::empty(), |name| AdeBytes::of(name.as_bytes()))
     })
 }
 

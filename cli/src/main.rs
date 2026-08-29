@@ -43,7 +43,7 @@ use std::{
 };
 
 use ade_core::{
-    Health, Image, Inspection, Severity, conversion, examine_partition, inspect_path,
+    Health, Image, Inspection, Severity, conversion, examine_partition,
     layers::{
         container::Window,
         filesystem::{rdb::Partition, volume::Volume},
@@ -224,8 +224,13 @@ fn main() -> ExitCode {
     let p = |n: usize| args.positional.get(n).map_or("", String::as_str);
 
     match (args.command.as_str(), args.positional.len()) {
-        ("info", 1) => info(Path::new(p(0)), args.format),
-        ("check", 1) => check(Path::new(p(0)), args.format, args.partition.as_deref()),
+        ("info", 1) => info(Path::new(p(0)), args.format, args.datfiles.as_deref()),
+        ("check", 1) => check(
+            Path::new(p(0)),
+            args.format,
+            args.partition.as_deref(),
+            args.datfiles.as_deref(),
+        ),
         ("ls", 1) => list(
             Path::new(p(0)),
             None,
@@ -320,9 +325,28 @@ fn usage() {
     emit_lines(&mut std::io::stdout().lock(), &lines);
 }
 
-fn info(path: &Path, format: Format) -> ExitCode {
-    let inspection = match inspect_path(path) {
-        Ok(i) => i,
+/// Load the dataset a caller configured, if any (F-013).
+///
+/// `None` when nothing is configured — the ordinary case, and not an error.
+/// A configured directory that cannot be read *is* reported, because someone
+/// who set `ADE_DATFILES` meant it.
+fn configured_catalogue(explicit: Option<&Path>) -> Option<ade_core::layers::catalogue::Catalogue> {
+    let dir = ade_core::datfiles_location(explicit)?;
+    match ade_core::layers::catalogue::Catalogue::load_dir(&dir) {
+        Ok(c) => Some(c),
+        Err(e) => {
+            eprintln!("ade: {}: {e}", dir.display());
+            None
+        }
+    }
+}
+
+fn info(path: &Path, format: Format, datfiles: Option<&Path>) -> ExitCode {
+    // Identification on open: the dataset is consulted when one is configured
+    // and costs nothing when it is not (F-013).
+    let catalogue = configured_catalogue(datfiles);
+    let inspection = match std::fs::read(path) {
+        Ok(bytes) => ade_core::inspect_bytes_named(bytes, catalogue.as_ref()),
         Err(e) => {
             eprintln!("ade: {}: {e}", path.display());
             return ExitCode::from(EXIT_UNREADABLE);
@@ -473,6 +497,21 @@ fn device_lines(lines: &mut Vec<String>, i: &Inspection) {
         }
         if d.truncated {
             lines.push("    | ... (truncated)".to_owned());
+        }
+    }
+
+    if !i.identified.is_empty() {
+        // What a dataset calls this disk, which is frequently the only place
+        // its real name survives: the file may have been renamed by anyone.
+        lines.push("  identified".to_owned());
+        for name in &i.identified {
+            lines.push(format!("    {name}"));
+        }
+        if i.identified.len() > 1 {
+            lines.push(format!(
+                "    ({} names for identical content — every one of them correct)",
+                i.identified.len()
+            ));
         }
     }
 
@@ -904,7 +943,12 @@ fn extract(path: &Path, inner: &str, dest: Option<PathBuf>, partition: Option<&s
 }
 
 /// Report an image's condition (F-010).
-fn check(path: &Path, format: Format, partition: Option<&str>) -> ExitCode {
+fn check(
+    path: &Path,
+    format: Format,
+    partition: Option<&str>,
+    datfiles: Option<&Path>,
+) -> ExitCode {
     let bytes = match std::fs::read(path) {
         Ok(b) => b,
         Err(e) => {
@@ -912,7 +956,15 @@ fn check(path: &Path, format: Format, partition: Option<&str>) -> ExitCode {
             return ExitCode::from(EXIT_UNREADABLE);
         }
     };
-    let health = examine_partition(bytes, partition);
+    // Identified from the same bytes, before the examination consumes them.
+    let identified = configured_catalogue(datfiles).map_or_else(Vec::new, |c| {
+        c.identify(&bytes)
+            .into_iter()
+            .map(|e| e.name.clone())
+            .collect()
+    });
+    let mut health = examine_partition(bytes, partition);
+    health.inspection.identified = identified;
     let mut out = std::io::stdout().lock();
     match format {
         Format::Json => {
@@ -937,6 +989,11 @@ fn report_health(out: &mut impl Write, path: &Path, h: &Health) {
         format!("{}", path.display()),
         format!("  container   {}", h.inspection.detection.kind),
     ];
+    if let Some(name) = h.inspection.identified.first() {
+        // The dataset's name, near the top where a person looks first: on a
+        // renamed file it is the only place the real title survives.
+        lines.push(format!("  identified  {name}"));
+    }
     if let Some(e) = &h.examined {
         // On a device this names the partition, so a report cannot be mistaken
         // for one covering the whole disk.

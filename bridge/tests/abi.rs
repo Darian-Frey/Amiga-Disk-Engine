@@ -55,7 +55,7 @@ fn null_is_tolerated_everywhere() {
     let mut err = AdeResult::Internal;
     // SAFETY: passing null is explicitly allowed by every one of these.
     unsafe {
-        assert!(ade::ade_image_open(std::ptr::null(), &raw mut err).is_null());
+        assert!(ade::ade_image_open(std::ptr::null(), std::ptr::null(), &raw mut err).is_null());
         assert_eq!(err, AdeResult::NullArgument);
 
         assert!(ade::ade_image_container(std::ptr::null()).is_null());
@@ -81,7 +81,7 @@ fn a_missing_file_reports_io_rather_than_panicking() {
     let path = CString::new("/nonexistent/definitely/not/here.adf").unwrap();
     let mut err = AdeResult::Internal;
     // SAFETY: a valid NUL-terminated path and a writable error slot.
-    let image = unsafe { ade::ade_image_open(path.as_ptr(), &raw mut err) };
+    let image = unsafe { ade::ade_image_open(path.as_ptr(), std::ptr::null(), &raw mut err) };
 
     assert!(image.is_null());
     assert_eq!(err, AdeResult::Io);
@@ -92,7 +92,7 @@ fn an_image_opens_and_reports_itself() {
     let (path, c_path) = fixture("open", &sound_disk());
     let mut err = AdeResult::Internal;
     // SAFETY: valid path, writable error slot.
-    let image = unsafe { ade::ade_image_open(c_path.as_ptr(), &raw mut err) };
+    let image = unsafe { ade::ade_image_open(c_path.as_ptr(), std::ptr::null(), &raw mut err) };
     assert!(!image.is_null());
     assert_eq!(err, AdeResult::Ok);
 
@@ -120,7 +120,8 @@ fn an_image_opens_and_reports_itself() {
 fn a_directory_lists_and_entries_come_back() {
     let (path, c_path) = fixture("list", &sound_disk());
     // SAFETY: valid path; null error slot is allowed.
-    let image = unsafe { ade::ade_image_open(c_path.as_ptr(), std::ptr::null_mut()) };
+    let image =
+        unsafe { ade::ade_image_open(c_path.as_ptr(), std::ptr::null(), std::ptr::null_mut()) };
     assert!(!image.is_null());
 
     // SAFETY: a live handle, and a root block from it.
@@ -178,7 +179,8 @@ fn a_directory_lists_and_entries_come_back() {
 fn a_file_reads_back_its_contents() {
     let (path, c_path) = fixture("read", &sound_disk());
     // SAFETY: valid path.
-    let image = unsafe { ade::ade_image_open(c_path.as_ptr(), std::ptr::null_mut()) };
+    let image =
+        unsafe { ade::ade_image_open(c_path.as_ptr(), std::ptr::null(), std::ptr::null_mut()) };
 
     // SAFETY: a live handle throughout.
     unsafe {
@@ -224,7 +226,7 @@ fn a_latin1_name_keeps_its_exact_bytes() {
 
     // SAFETY: valid path, live handle.
     unsafe {
-        let image = ade::ade_image_open(c_path.as_ptr(), std::ptr::null_mut());
+        let image = ade::ade_image_open(c_path.as_ptr(), std::ptr::null(), std::ptr::null_mut());
         let listing = ade::ade_dir_open(
             image,
             ade::ADE_WHOLE_IMAGE,
@@ -252,7 +254,7 @@ fn an_image_with_no_volume_says_why_rather_than_failing_to_open() {
     let mut err = AdeResult::Internal;
     // SAFETY: valid path and error slot.
     unsafe {
-        let image = ade::ade_image_open(c_path.as_ptr(), &raw mut err);
+        let image = ade::ade_image_open(c_path.as_ptr(), std::ptr::null(), &raw mut err);
         assert!(!image.is_null(), "the file is readable, so it opens");
         assert_eq!(err, AdeResult::Ok);
         assert!(!ade::ade_image_has_volume(image));
@@ -282,7 +284,7 @@ fn a_walk_returns_every_entry_with_its_path() {
 
     // SAFETY: valid path, live handle throughout.
     unsafe {
-        let image = ade::ade_image_open(c_path.as_ptr(), std::ptr::null_mut());
+        let image = ade::ade_image_open(c_path.as_ptr(), std::ptr::null(), std::ptr::null_mut());
         assert!(!image.is_null());
         let walk = ade::ade_walk_open(image, ade::ADE_WHOLE_IMAGE);
         assert!(!walk.is_null());
@@ -322,7 +324,7 @@ fn a_plain_listing_carries_no_path() {
 
     // SAFETY: valid path, live handle.
     unsafe {
-        let image = ade::ade_image_open(c_path.as_ptr(), std::ptr::null_mut());
+        let image = ade::ade_image_open(c_path.as_ptr(), std::ptr::null(), std::ptr::null_mut());
         let listing = ade::ade_dir_open(
             image,
             ade::ADE_WHOLE_IMAGE,
@@ -345,7 +347,7 @@ fn walking_a_volumeless_image_is_null_not_a_crash() {
     let (path, c_path) = fixture("walknull", &vec![0u8; 901_120]);
     // SAFETY: valid path.
     unsafe {
-        let image = ade::ade_image_open(c_path.as_ptr(), std::ptr::null_mut());
+        let image = ade::ade_image_open(c_path.as_ptr(), std::ptr::null(), std::ptr::null_mut());
         assert!(!image.is_null());
         assert!(ade::ade_walk_open(image, ade::ADE_WHOLE_IMAGE).is_null());
         assert!(ade::ade_walk_open(std::ptr::null(), ade::ADE_WHOLE_IMAGE).is_null());
@@ -375,7 +377,7 @@ fn a_floppy_has_no_partition_table() {
     let (path, c_path) = fixture("nopart", &sound_disk());
     let mut err = AdeResult::Ok;
     // SAFETY: a valid path and a writable error slot.
-    let image = unsafe { ade::ade_image_open(c_path.as_ptr(), &raw mut err) };
+    let image = unsafe { ade::ade_image_open(c_path.as_ptr(), std::ptr::null(), &raw mut err) };
     assert!(!image.is_null());
     // SAFETY: a live handle.
     let table = unsafe { ade::ade_partitions_open(image) };
@@ -390,7 +392,7 @@ fn a_device_reports_each_partition_with_its_own_geometry() {
     let (path, c_path) = fixture("parts", &two_partition_device());
     let mut err = AdeResult::Ok;
     // SAFETY: a valid path and a writable error slot.
-    let image = unsafe { ade::ade_image_open(c_path.as_ptr(), &raw mut err) };
+    let image = unsafe { ade::ade_image_open(c_path.as_ptr(), std::ptr::null(), &raw mut err) };
     assert!(!image.is_null(), "a device should open even with no volume");
     // A device holds no volume of its own — every volume is inside a partition.
     // SAFETY: a live handle.
@@ -438,7 +440,7 @@ fn a_partition_lists_extracts_and_walks_like_any_volume() {
     let (path, c_path) = fixture("partread", &two_partition_device());
     let mut err = AdeResult::Ok;
     // SAFETY: a valid path and a writable error slot.
-    let image = unsafe { ade::ade_image_open(c_path.as_ptr(), &raw mut err) };
+    let image = unsafe { ade::ade_image_open(c_path.as_ptr(), std::ptr::null(), &raw mut err) };
     // SAFETY: a live handle.
     let table = unsafe { ade::ade_partitions_open(image) };
     let mut p = std::mem::MaybeUninit::<ade::AdePartition>::uninit();
@@ -497,7 +499,7 @@ fn a_partition_index_that_does_not_exist_is_null_not_a_crash() {
     let (path, c_path) = fixture("badpart", &two_partition_device());
     let mut err = AdeResult::Ok;
     // SAFETY: a valid path and a writable error slot.
-    let image = unsafe { ade::ade_image_open(c_path.as_ptr(), &raw mut err) };
+    let image = unsafe { ade::ade_image_open(c_path.as_ptr(), std::ptr::null(), &raw mut err) };
     // SAFETY: a live handle; partition 99 does not exist.
     assert!(unsafe { ade::ade_dir_open(image, 99, 880) }.is_null());
     // SAFETY: same.
@@ -537,7 +539,7 @@ fn a_container_with_no_usable_geometry_still_opens() {
     let (path, c_path) = fixture("nogeom", &[0xA5u8; 4096]);
     let mut err = AdeResult::Ok;
     // SAFETY: a valid path and a writable error slot.
-    let image = unsafe { ade::ade_image_open(c_path.as_ptr(), &raw mut err) };
+    let image = unsafe { ade::ade_image_open(c_path.as_ptr(), std::ptr::null(), &raw mut err) };
     assert!(!image.is_null(), "a truncated file should still open");
     // SAFETY: a live handle.
     assert!(!unsafe { ade::ade_image_has_volume(image) });
@@ -567,7 +569,7 @@ fn the_finding_count_is_the_health_check_not_the_inspection() {
     let (path, c_path) = fixture("findings", &disk);
     let mut err = AdeResult::Ok;
     // SAFETY: a valid path and a writable error slot.
-    let image = unsafe { ade::ade_image_open(c_path.as_ptr(), &raw mut err) };
+    let image = unsafe { ade::ade_image_open(c_path.as_ptr(), std::ptr::null(), &raw mut err) };
     // SAFETY: a live handle.
     let reported = unsafe { ade::ade_image_finding_count(image) };
     assert_eq!(reported, ade_core::health::examine(disk).findings.len());
@@ -578,4 +580,74 @@ fn the_finding_count_is_the_health_check_not_the_inspection() {
     // SAFETY: a live handle.
     unsafe { ade::ade_image_free(image) };
     let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn an_image_is_identified_at_open_when_a_dataset_is_given() {
+    // F-013's clause, at the seam: the name is decided while the bytes are in
+    // hand, because the handle holds a mounted image afterwards and cannot
+    // hash itself (IMP-006).
+    let disk = sound_disk();
+    let dir = std::env::temp_dir().join(format!("ade-cat-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("scratch dir");
+    let dat = format!(
+        r#"<datafile><game name="Known"><rom name="A Known Disk.adf" size="{}" crc="{:08x}"/></game></datafile>"#,
+        disk.len(),
+        ade_core::layers::block::checksum::crc32(&disk)
+    );
+    std::fs::write(dir.join("test.dat"), dat).expect("write datfile");
+
+    let c_dir = CString::new(dir.display().to_string()).expect("no NUL");
+    // SAFETY: a valid directory path.
+    let catalogue = unsafe { ade::ade_catalogue_open(c_dir.as_ptr()) };
+    assert!(!catalogue.is_null(), "the dataset should load");
+    // SAFETY: a live handle.
+    assert_eq!(unsafe { ade::ade_catalogue_count(catalogue) }, 1);
+
+    let (path, c_path) = fixture("named", &disk);
+    let mut err = AdeResult::Ok;
+    // SAFETY: valid path, live catalogue, writable slot.
+    let image = unsafe { ade::ade_image_open(c_path.as_ptr(), catalogue, &raw mut err) };
+    assert!(!image.is_null());
+    // SAFETY: a live handle.
+    let name = unsafe { ade::ade_image_identified(image) };
+    // SAFETY: the bytes borrow from the handle, which is alive.
+    let text = unsafe { std::slice::from_raw_parts(name.data, name.len) };
+    assert_eq!(text, b"A Known Disk.adf");
+
+    // SAFETY: live handles, each freed once.
+    unsafe {
+        ade::ade_image_free(image);
+        ade::ade_catalogue_free(catalogue);
+    }
+    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn without_a_dataset_an_image_is_simply_unnamed() {
+    // Null is the ordinary case, not an error, and it must cost nothing.
+    let (path, c_path) = fixture("unnamed", &sound_disk());
+    let mut err = AdeResult::Ok;
+    // SAFETY: valid path, no catalogue, writable slot.
+    let image = unsafe { ade::ade_image_open(c_path.as_ptr(), std::ptr::null(), &raw mut err) };
+    assert!(!image.is_null());
+    // SAFETY: a live handle.
+    assert_eq!(unsafe { ade::ade_image_identified(image) }.len, 0);
+    // SAFETY: a live handle.
+    unsafe { ade::ade_image_free(image) };
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn the_catalogue_calls_tolerate_null_like_everything_else() {
+    // SAFETY: null is allowed at every entry point.
+    unsafe {
+        assert!(ade::ade_catalogue_open(std::ptr::null()).is_null());
+        assert_eq!(ade::ade_catalogue_count(std::ptr::null()), 0);
+        assert_eq!(ade::ade_image_identified(std::ptr::null()).len, 0);
+        ade::ade_catalogue_free(std::ptr::null_mut());
+        ade::ade_string_free(std::ptr::null_mut());
+    }
 }

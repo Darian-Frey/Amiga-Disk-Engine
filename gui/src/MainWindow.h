@@ -81,6 +81,9 @@ private:
     void showSummary();
     void clearViews();
 
+    // The dataset, loaded once at startup when one is configured. Images
+    // opened afterwards are named as they open (F-013).
+    ade::Catalogue m_catalogue;
     std::vector<std::unique_ptr<Open>> m_images;
     // Set while one tree is clearing the other's selection, so that the
     // clearing does not come straight back as a selection change.

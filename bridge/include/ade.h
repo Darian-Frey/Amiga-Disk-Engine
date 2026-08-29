@@ -83,6 +83,7 @@ typedef struct AdeImage      AdeImage;      /* an open image        */
 typedef struct AdeListing    AdeListing;    /* a directory listing  */
 typedef struct AdeBuffer     AdeBuffer;     /* a file's contents    */
 typedef struct AdePartitions AdePartitions; /* a device's partitions */
+typedef struct AdeCatalogue  AdeCatalogue;  /* a loaded dataset      */
 
 /* Pass as `partition` to mean "the image's own volume, not a partition".
  *
@@ -112,9 +113,29 @@ typedef struct {
 /* ADE's version. Static; never freed. */
 const char *ade_version(void);
 
+/* A dataset of TOSEC-style datfiles, loaded once and used for every image
+ * opened afterwards — 88,921 entries take about 140 ms to load, so a front end
+ * pays that at startup rather than per disk. NULL if the directory holds none.
+ * Free with ade_catalogue_free. */
+AdeCatalogue *ade_catalogue_open(const char *dir);
+size_t        ade_catalogue_count(const AdeCatalogue *catalogue);
+void          ade_catalogue_free(AdeCatalogue *catalogue);
+
+/* Where a dataset lives when the front end was not told: $ADE_DATFILES, then
+ * the conventional data directory. NULL when neither exists, which is the
+ * ordinary case and not an error. Free the result with ade_string_free. */
+char *ade_datfiles_location(void);
+void  ade_string_free(char *text);
+
 /* Open an image. Returns NULL on failure and writes the reason to `out_err`
- * unless that is NULL. Free with ade_image_free. */
-AdeImage *ade_image_open(const char *path, AdeResult *out_err);
+ * unless that is NULL. Free with ade_image_free.
+ *
+ * `catalogue` may be NULL. When it is not, the image is identified **as it is
+ * opened** — the bytes are in hand exactly once, and the handle keeps a
+ * mounted image rather than the file afterwards, so it cannot hash itself
+ * later. */
+AdeImage *ade_image_open(const char *path, const AdeCatalogue *catalogue,
+                         AdeResult *out_err);
 void      ade_image_free(AdeImage *image);
 
 /* Borrowed from the image; valid until it is freed. */
@@ -130,6 +151,8 @@ AdeBytes ade_image_volume_name(const AdeImage *image);
  * there is no volume — which is every hard disk, whose volumes are inside its
  * partitions. */
 uint32_t ade_image_root_block(const AdeImage *image);
+/* What the dataset called this image, or empty. Borrowed from the handle. */
+AdeBytes ade_image_identified(const AdeImage *image);
 /* How many findings a health check reports. */
 size_t   ade_image_finding_count(const AdeImage *image);
 

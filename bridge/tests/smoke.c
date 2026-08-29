@@ -42,11 +42,11 @@ int main(int argc, char **argv) {
 
     /* Null and error handling first: a C caller meets these before anything. */
     AdeResult err = ADE_INTERNAL;
-    check(ade_image_open(NULL, &err) == NULL, "opening NULL returns NULL");
+    check(ade_image_open(NULL, NULL, &err) == NULL, "opening NULL returns NULL");
     check(err == ADE_NULL_ARGUMENT, "and reports a null argument");
 
     err = ADE_INTERNAL;
-    check(ade_image_open("/nonexistent/nope.adf", &err) == NULL, "missing file returns NULL");
+    check(ade_image_open("/nonexistent/nope.adf", NULL, &err) == NULL, "missing file returns NULL");
     check(err == ADE_IO, "and reports IO");
 
     /* Every accessor must tolerate NULL rather than crash. */
@@ -64,7 +64,7 @@ int main(int argc, char **argv) {
 
     /* Now the real image. */
     err = ADE_INTERNAL;
-    AdeImage *image = ade_image_open(argv[1], &err);
+    AdeImage *image = ade_image_open(argv[1], NULL, &err);
     check(image != NULL, "opened the image");
     check(err == ADE_OK, "and reported success");
     if (!image) return 1;

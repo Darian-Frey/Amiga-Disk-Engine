@@ -113,6 +113,50 @@ private:
     AdeBuffer *m_raw = nullptr;
 };
 
+// A dataset of datfiles, loaded once for the session.
+//
+// Loading 88,921 entries takes about 140 ms, which is why the window holds one
+// rather than consulting the dataset per image: paid at startup, spent on
+// every disk opened afterwards (F-013).
+class Catalogue {
+public:
+    Catalogue() = default;
+    explicit Catalogue(AdeCatalogue *raw) : m_raw(raw) {}
+    ~Catalogue() { ade_catalogue_free(m_raw); }
+
+    Catalogue(const Catalogue &) = delete;
+    Catalogue &operator=(const Catalogue &) = delete;
+    Catalogue(Catalogue &&other) noexcept : m_raw(std::exchange(other.m_raw, nullptr)) {}
+    Catalogue &operator=(Catalogue &&other) noexcept {
+        if (this != &other) {
+            ade_catalogue_free(m_raw);
+            m_raw = std::exchange(other.m_raw, nullptr);
+        }
+        return *this;
+    }
+
+    // Where a dataset lives, or empty when none is configured — which is the
+    // ordinary case and not a failure.
+    static QString configuredLocation() {
+        char *dir = ade_datfiles_location();
+        if (!dir) return {};
+        const QString path = QString::fromUtf8(dir);
+        ade_string_free(dir);
+        return path;
+    }
+
+    static Catalogue load(const QString &dir) {
+        return Catalogue{ade_catalogue_open(dir.toUtf8().constData())};
+    }
+
+    explicit operator bool() const { return m_raw != nullptr; }
+    size_t count() const { return ade_catalogue_count(m_raw); }
+    const AdeCatalogue *raw() const { return m_raw; }
+
+private:
+    AdeCatalogue *m_raw = nullptr;
+};
+
 // An open disk image.
 class Image {
 public:
@@ -133,10 +177,12 @@ public:
     }
 
     // Returns a closed Image on failure; ask `error()` why.
-    static Image open(const QString &path) {
+    // `catalogue` may be null: the image is then simply unnamed, at no cost.
+    static Image open(const QString &path, const Catalogue *catalogue = nullptr) {
         Image image;
         const QByteArray utf8 = path.toUtf8();
-        image.m_raw = ade_image_open(utf8.constData(), &image.m_error);
+        image.m_raw = ade_image_open(utf8.constData(),
+                                     catalogue ? catalogue->raw() : nullptr, &image.m_error);
         return image;
     }
 
@@ -156,6 +202,9 @@ public:
     QString volumeName() const { return latin1(ade_image_volume_name(m_raw)); }
     quint32 rootBlock() const { return ade_image_root_block(m_raw); }
     size_t findingCount() const { return ade_image_finding_count(m_raw); }
+    // What the dataset called it, decided when it was opened. Empty when no
+    // dataset was loaded, or when this disk is not in it.
+    QString identified() const { return latin1(ade_image_identified(m_raw)); }
 
     // The device's partitions, or a closed handle for an image that has none —
     // which is most images, and not a fault.

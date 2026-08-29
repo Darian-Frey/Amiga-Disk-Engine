@@ -222,7 +222,18 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
         }
     });
 
-    statusBar()->showMessage(QStringLiteral("Open a disk image, or drop one here"));
+    // Identification on open (F-013). Loading the dataset takes about 140 ms,
+    // so it happens once here rather than per image — and only when one is
+    // configured, which costs nothing when it is not.
+    const QString datfiles = ade::Catalogue::configuredLocation();
+    if (!datfiles.isEmpty()) {
+        m_catalogue = ade::Catalogue::load(datfiles);
+    }
+    statusBar()->showMessage(
+        m_catalogue
+            ? QStringLiteral("%1 dataset entries loaded — open a disk image, or drop one here")
+                  .arg(m_catalogue.count())
+            : QStringLiteral("Open a disk image, or drop one here"));
 }
 
 void MainWindow::chooseImage() {
@@ -233,7 +244,7 @@ void MainWindow::chooseImage() {
 }
 
 void MainWindow::openImage(const QString &path) {
-    ade::Image image = ade::Image::open(path);
+    ade::Image image = ade::Image::open(path, m_catalogue ? &m_catalogue : nullptr);
     if (!image) {
         emit errorOccurred(QStringLiteral("%1: ADE could not read this file (error %2).")
                                .arg(QFileInfo(path).fileName())
@@ -285,7 +296,14 @@ void MainWindow::addImageRoot(Open &open) {
     // A TOSEC filename is eighty characters, so even a spanned row runs out
     // and elides the container off the end. The tooltip cannot elide, and
     // selecting the row puts the same line in the status bar.
-    root->setToolTip(ColName, QStringLiteral("%1\n%2").arg(open.path, describe(open)));
+    // The dataset's name goes in the tooltip beside the path: the row itself
+    // is already carrying the file, the container and the volume, and a TOSEC
+    // name is eighty characters on its own.
+    const QString named = open.image.identified();
+    root->setToolTip(ColName,
+                     named.isEmpty()
+                         ? QStringLiteral("%1\n%2").arg(open.path, describe(open))
+                         : QStringLiteral("%1\n%2\n%3").arg(open.path, named, describe(open)));
 
     QFont bold = m_tree->font();
     bold.setBold(true);
