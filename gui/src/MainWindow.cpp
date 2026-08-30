@@ -16,6 +16,8 @@
 #include <QScreen>
 #include <QStyle>
 #include <QLabel>
+#include <QIcon>
+#include <QMessageBox>
 #include <QMenuBar>
 #include <QMimeData>
 #include <QPlainTextEdit>
@@ -301,6 +303,14 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
     auto *quit = file->addAction(QStringLiteral("&Quit"));
     quit->setShortcut(QKeySequence::Quit);
     connect(quit, &QAction::triggered, this, &QWidget::close);
+
+    // Help. The manual will join About here; nothing stands in for it in the
+    // meantime, because a menu item that is greyed out or opens an apology is
+    // a promise the window has already broken.
+    auto *help = menuBar()->addMenu(QStringLiteral("&Help"));
+    auto *about = help->addAction(QStringLiteral("&About Amiga Disk Engine"));
+    about->setMenuRole(QAction::AboutRole);
+    connect(about, &QAction::triggered, this, &MainWindow::showAbout);
 
     // Only one of the two trees holds the selection at a time. Leaving a row
     // highlighted in the tree while the views show a search result invites
@@ -755,6 +765,43 @@ void MainWindow::markRow(quint32 block) {
     found->setFont(ColName, bold);
     m_marked = found;
     m_tree->scrollToItem(found, QAbstractItemView::EnsureVisible);
+}
+
+QString MainWindow::aboutTitle() {
+    // The version comes from the engine, like every other fact this window
+    // shows. A version string written in Qt is one that can disagree with the
+    // library it was built against, which is the most misleading thing an
+    // About box can do — it is the one place people go to find out exactly
+    // what they are running.
+    return QStringLiteral("<h3>Amiga Disk Engine %1</h3>"
+                          "<p>Reads, verifies, catalogues and converts Amiga floppy "
+                          "and hard-disk images.</p>")
+        .arg(QString::fromUtf8(ade_version()).toHtmlEscaped());
+}
+
+QString MainWindow::aboutDetail() {
+    // "No third-party code" is a claim NOTICE makes and this repeats, so it has
+    // to stay true: if D-009 ever brings xDMS in, this line changes with it.
+    return QStringLiteral(
+               "<p>Apache License 2.0. Contains no third-party code: the filesystem, "
+               "the containers, the checksums and the MFM codec are all written from "
+               "their specifications.</p>"
+               "<p style='color:gray'>Qt %1 &middot; "
+               "<a href=\"https://github.com/Darian-Frey/Amiga-Disk-Engine\">"
+               "github.com/Darian-Frey/Amiga-Disk-Engine</a></p>")
+        .arg(QString::fromLatin1(qVersion()));
+}
+
+void MainWindow::showAbout() {
+    QMessageBox about(this);
+    about.setWindowTitle(QStringLiteral("About Amiga Disk Engine"));
+    about.setTextFormat(Qt::RichText);
+    about.setIconPixmap(
+        QIcon::fromTheme(QStringLiteral("drive-removable-media")).pixmap(64, 64));
+    about.setText(aboutTitle());
+    about.setInformativeText(aboutDetail());
+    about.setStandardButtons(QMessageBox::Close);
+    about.exec();
 }
 
 void MainWindow::showLegend(const QVector<HexRegion> &regions) {

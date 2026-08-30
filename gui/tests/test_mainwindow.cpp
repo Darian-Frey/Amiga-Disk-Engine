@@ -26,6 +26,8 @@
 #include <QStatusBar>
 #include <QTreeWidgetItemIterator>
 #include <QLabel>
+#include <QMenu>
+#include <QMenuBar>
 #include <QScreen>
 #include <QScrollBar>
 #include <QTextBlock>
@@ -90,6 +92,8 @@ private slots:
     void scrollingOutOfAFileUnmarksIt();
     void aScrollQtDoesNotAnnounceIsStillFollowed();
     void theFollowStopsWhenAFileIsShown();
+    void thereIsAHelpMenuWithAnAboutBox();
+    void theAboutBoxTakesItsVersionFromTheEngine();
     void theHexPaneIsGivenTheRoomADumpLineNeeds();
     void theDefaultSizeFitsADumpLineWhereTheScreenAllows();
     void selectingHexMarksTheCharactersThoseBytesSpell();
@@ -1140,6 +1144,38 @@ void TestMainWindow::theFollowStopsWhenAFileIsShown() {
     QTest::qWait(400);
     QCOMPARE(status(*window), before);
     QVERIFY(!markedRow(*window));
+}
+
+void TestMainWindow::thereIsAHelpMenuWithAnAboutBox() {
+    MainWindow window;
+    QMenu *help = nullptr;
+    for (QAction *top : window.menuBar()->actions()) {
+        if (top->text().contains(QStringLiteral("Help"))) help = top->menu();
+    }
+    QVERIFY2(help, "the menu bar has a Help menu");
+
+    QStringList items;
+    for (QAction *item : help->actions()) items << item->text();
+    QCOMPARE(items.size(), 1);
+    QVERIFY2(items.first().contains(QStringLiteral("About")), qPrintable(items.first()));
+
+    // Deliberately only About. The manual will join it; nothing stands in for
+    // it in the meantime, because a menu item that is greyed out or opens an
+    // apology is a promise the window has already broken.
+}
+
+void TestMainWindow::theAboutBoxTakesItsVersionFromTheEngine() {
+    // Not from a string written in Qt, which can disagree with the library it
+    // was built against — and the About box is the one place people go to find
+    // out exactly what they are running.
+    const QString engine = QString::fromUtf8(ade_version());
+    QVERIFY(!engine.isEmpty());
+    QVERIFY2(MainWindow::aboutTitle().contains(engine), qPrintable(MainWindow::aboutTitle()));
+
+    // And the licence claim, which NOTICE also makes: if D-009 ever brings
+    // xDMS in, this line has to change with it.
+    QVERIFY(MainWindow::aboutDetail().contains(QStringLiteral("Apache License 2.0")));
+    QVERIFY(MainWindow::aboutDetail().contains(QStringLiteral("no third-party code")));
 }
 
 QTEST_MAIN(TestMainWindow)

@@ -55,6 +55,20 @@ public:
     // reported through `errorOccurred` rather than shown here.
     void openImage(const QString &path);
 
+    /// The About box's heading and its detail, as rich text.
+    ///
+    /// Public and static so a test can read what the box would say without
+    /// opening it: `QMessageBox::exec` blocks, and a test that has to dismiss a
+    /// modal dialog to check its contents is a test that hangs the suite the
+    /// day the dialog changes.
+    static QString aboutTitle();
+    static QString aboutDetail();
+
+private slots:
+    void showAbout();
+
+public:
+
     // Close every open image.
     void closeAll();
 
