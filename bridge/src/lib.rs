@@ -786,6 +786,180 @@ pub unsafe extern "C" fn ade_partitions_open(image: *const AdeImage) -> *mut Ade
     })
 }
 
+/// A map of a whole image. Opaque to C.
+pub struct AdeLayout {
+    /// Owns the owner strings the spans point into — same role as
+    /// [`AdeListing::names`], and the same reason it must not be removed.
+    #[allow(dead_code, reason = "keeps the owner buffers alive for `spans`")]
+    owners: Vec<Vec<u8>>,
+    spans: Vec<AdeSpan>,
+}
+
+/// One run of blocks that are all the same thing. Mirrors `AdeSpan` in `ade.h`.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct AdeSpan {
+    /// First byte.
+    pub offset: u64,
+    /// How many bytes.
+    pub length: u64,
+    /// First block.
+    pub block: u64,
+    /// How many blocks.
+    pub blocks: u64,
+    /// What it is.
+    pub region: u32,
+    /// The owning path, Latin-1; empty when nothing owns it.
+    pub owner: AdeBytes,
+}
+
+/// Map what occupies every block of an image (F-022).
+///
+/// Only [`ADE_WHOLE_IMAGE`] is mapped: a partition index returns null. A
+/// device's map would place several volumes, each with its own block size, at
+/// absolute offsets, and no image in the corpus carries an RDB — there is
+/// nothing to check such a map against, so it is refused rather than guessed.
+///
+/// Release with [`ade_layout_free`].
+///
+/// # Safety
+/// `image` must be a live handle or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ade_layout_open(image: *const AdeImage, partition: u32) -> *mut AdeLayout {
+    with_image(image, std::ptr::null_mut(), |image| {
+        if partition != ADE_WHOLE_IMAGE {
+            return std::ptr::null_mut();
+        }
+        let Some(handle) = image.image.as_ref() else {
+            return std::ptr::null_mut();
+        };
+        let map = ade_core::layout::Layout::of(handle);
+
+        let mut owners: Vec<Vec<u8>> = Vec::with_capacity(map.spans.len());
+        let mut spans = Vec::with_capacity(map.spans.len());
+        for span in &map.spans {
+            owners.push(span.owner.clone().unwrap_or_default().into_bytes());
+            let at = owners.len().saturating_sub(1);
+            spans.push(AdeSpan {
+                offset: span.start,
+                length: span.end.saturating_sub(span.start),
+                block: span.block,
+                blocks: span.blocks,
+                region: span.region as u32,
+                owner: AdeBytes::of(owners.get(at).map_or(&[][..], Vec::as_slice)),
+            });
+        }
+        Box::into_raw(Box::new(AdeLayout { owners, spans }))
+    })
+}
+
+/// How many spans the map holds.
+///
+/// # Safety
+/// `layout` must be a live handle or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ade_layout_count(layout: *const AdeLayout) -> usize {
+    guard(0, || {
+        // SAFETY: the caller's contract; null is checked.
+        unsafe { layout.as_ref() }.map_or(0, |l| l.spans.len())
+    })
+}
+
+/// Copy span `index` into `*out`.
+///
+/// # Safety
+/// `layout` must be a live handle or null, and `out` writable or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ade_layout_span(
+    layout: *const AdeLayout,
+    index: usize,
+    out: *mut AdeSpan,
+) -> AdeResult {
+    guard(AdeResult::Internal, || {
+        // SAFETY: the caller's contract; both are checked.
+        let (Some(layout), Some(out)) = (unsafe { layout.as_ref() }, unsafe { out.as_mut() })
+        else {
+            return AdeResult::NullArgument;
+        };
+        let Some(span) = layout.spans.get(index) else {
+            return AdeResult::NotFound;
+        };
+        *out = *span;
+        AdeResult::Ok
+    })
+}
+
+/// Release a map.
+///
+/// # Safety
+/// `layout` must have come from [`ade_layout_open`], or be null, and must not
+/// be used afterwards.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ade_layout_free(layout: *mut AdeLayout) {
+    guard((), || {
+        if !layout.is_null() {
+            // SAFETY: the caller's contract.
+            drop(unsafe { Box::from_raw(layout) });
+        }
+    });
+}
+
+/// A region's short name, for a legend. Static; never freed.
+///
+/// # Safety
+/// None: takes an integer and returns a pointer to static storage.
+#[unsafe(no_mangle)]
+pub extern "C" fn ade_region_name(region: u32) -> *const c_char {
+    region_text(region, &REGION_NAMES)
+}
+
+/// A region's one-line description, for a legend. Static; never freed.
+///
+/// # Safety
+/// None: takes an integer and returns a pointer to static storage.
+#[unsafe(no_mangle)]
+pub extern "C" fn ade_region_describes(region: u32) -> *const c_char {
+    region_text(region, &REGION_DESCRIPTIONS)
+}
+
+/// The region names, NUL-terminated, in `AdeRegion` order.
+///
+/// Spelled out here rather than converted from [`ade_core::layout::Region`] at
+/// call time, because converting means allocating and a call that allocates a
+/// string it never frees is a leak the caller cannot see. `the_region_strings_
+/// match_the_engines` pins these against the engine's, so the duplication
+/// cannot drift into two different names for one thing.
+static REGION_NAMES: [&CStr; 6] = [
+    c"bootblock",
+    c"rootblock",
+    c"bitmap",
+    c"directory",
+    c"file",
+    c"unclaimed",
+];
+
+/// The region descriptions, NUL-terminated, in `AdeRegion` order.
+static REGION_DESCRIPTIONS: [&CStr; 6] = [
+    c"boot code and the dostype — where protection lives",
+    c"the volume's name, datestamps and hash table",
+    c"which blocks are free; a set bit means free",
+    c"a directory header, holding its name",
+    c"a file's header or its data",
+    c"nothing points here: free space, deleted data, or damage",
+];
+
+/// One of a static table, or an empty string for a code this build does not
+/// know — never a wrong name. A front end built against a newer header must
+/// not be told that region 6 is a bootblock.
+fn region_text(region: u32, table: &'static [&'static CStr; 6]) -> *const c_char {
+    guard(c"".as_ptr(), || {
+        usize::try_from(region)
+            .ok()
+            .and_then(|i| table.get(i))
+            .map_or(c"".as_ptr(), |text| text.as_ptr())
+    })
+}
+
 /// How many partitions the table holds.
 ///
 /// # Safety
@@ -917,6 +1091,33 @@ pub unsafe extern "C" fn ade_file_read(
         found.map_or(std::ptr::null_mut(), |bytes| {
             Box::into_raw(Box::new(AdeBuffer { bytes }))
         })
+    })
+}
+
+/// Read raw bytes of the mounted image, for a hex view of the disk itself.
+///
+/// Offsets are in the space [`ade_layout_open`] maps and [`ade_image_size`]
+/// counts: the image as it mounts, not the file as it sits on disk. A short
+/// read at the end is not an error, and past the end is an empty buffer rather
+/// than null — a caller scrolling off the bottom gets nothing, not a failure.
+///
+/// Release with [`ade_buffer_free`].
+///
+/// # Safety
+/// `image` must be a live handle or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ade_image_read(
+    image: *const AdeImage,
+    offset: u64,
+    length: u64,
+) -> *mut AdeBuffer {
+    with_image(image, std::ptr::null_mut(), |image| {
+        let bytes = image
+            .image
+            .as_ref()
+            .map(|handle| handle.read_range(offset, length))
+            .unwrap_or_default();
+        Box::into_raw(Box::new(AdeBuffer { bytes }))
     })
 }
 

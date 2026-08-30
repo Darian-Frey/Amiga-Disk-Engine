@@ -11,7 +11,10 @@
 #include <QFileInfo>
 #include <QFont>
 #include <QFontMetrics>
+#include <QGuiApplication>
 #include <QHeaderView>
+#include <QScreen>
+#include <QStyle>
 #include <QLabel>
 #include <QMenuBar>
 #include <QMimeData>
@@ -72,11 +75,40 @@ QString formatProtection(quint32 bits) {
     return out;
 }
 
+// How wide the hex pane has to be to show a whole dump line.
+//
+// Measured from the pane's own font and frame rather than guessed: the font is
+// whatever the desktop calls fixed-width, which is not the same size on two
+// machines, and a guess that works here is the bug being fixed somewhere else.
+int hexPaneWidth(const QPlainTextEdit &pane) {
+    const QFontMetrics metrics(pane.font());
+    const int text = metrics.horizontalAdvance(QString(hexview::LineLength, QChar('0')));
+    // The document's own left and right margins, the frame, and room for the
+    // vertical scrollbar a full disk will always need.
+    const int margins = static_cast<int>(pane.document()->documentMargin()) * 2;
+    const int frame = pane.frameWidth() * 2;
+    const int scrollbar = pane.style()->pixelMetric(QStyle::PM_ScrollBarExtent);
+    return text + margins + frame + scrollbar + 4;
+}
+
+// How wide the tree has to be for a filename and its three measured columns.
+int treePaneWidth(const QTreeWidget &tree) {
+    const QFontMetrics metrics(tree.font());
+    // Long enough for the names real disks carry: "INSTALL PROGRAM.info" and
+    // "4GETLEVELS.ORIG" are both from one corpus image, and a name is indented
+    // by its depth in the tree.
+    int width = metrics.horizontalAdvance(QStringLiteral("INSTALL PROGRAM.info")) + 60;
+    for (int column = 1; column < tree.columnCount(); ++column) {
+        width += tree.columnWidth(column);
+    }
+    return width + tree.frameWidth() * 2 +
+           tree.style()->pixelMetric(QStyle::PM_ScrollBarExtent);
+}
+
 }  // namespace
 
 MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
     setWindowTitle(QStringLiteral("Amiga Disk Engine"));
-    resize(1100, 700);
     setAcceptDrops(true);
 
     m_tree = new ImageTree(this);
@@ -118,10 +150,10 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
     m_hex->setReadOnly(true);
     m_hex->setLineWrapMode(QPlainTextEdit::NoWrap);
     m_hex->setFont(QFontDatabase::systemFont(QFontDatabase::FixedFont));
-    // Null bytes dimmed, so real data stands out from the padding and empty
-    // space that fills most of a disk. Owned by the document, which outlives
-    // every dump put into it.
-    new HexNullDimmer(m_hex->document(), m_hex);
+    // Null bytes dimmed and disk regions tinted. Owned by the document, which
+    // outlives every dump put into it, and kept so the regions can be set as
+    // the selection changes.
+    m_paint = new HexHighlighter(m_hex->document(), m_hex);
 
     m_text = new QPlainTextEdit(this);
     m_text->setReadOnly(true);
@@ -139,8 +171,26 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
     m_results->header()->setSectionResizeMode(1, QHeaderView::Stretch);
     m_results->header()->setSectionResizeMode(2, QHeaderView::ResizeToContents);
 
+    // The legend for the region tints, under the hex pane and only when there
+    // is something to explain. A colour nobody can name is decoration; the
+    // Atari engine puts its legend behind a menu item, which means it is read
+    // once and never found again.
+    m_legend = new QLabel(this);
+    m_legend->setObjectName(QStringLiteral("legend"));
+    m_legend->setTextFormat(Qt::RichText);
+    m_legend->setWordWrap(true);
+    m_legend->setContentsMargins(4, 2, 4, 2);
+    m_legend->hide();
+
+    auto *hexTab = new QWidget(this);
+    auto *hexLayout = new QVBoxLayout(hexTab);
+    hexLayout->setContentsMargins(0, 0, 0, 0);
+    hexLayout->setSpacing(0);
+    hexLayout->addWidget(m_hex);
+    hexLayout->addWidget(m_legend);
+
     m_views = new QTabWidget(this);
-    m_views->addTab(m_hex, QStringLiteral("Hex"));
+    m_views->addTab(hexTab, QStringLiteral("Hex"));
     m_views->addTab(m_text, QStringLiteral("Text"));
     m_views->addTab(m_results, QStringLiteral("Search"));
 
@@ -160,9 +210,53 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
     auto *splitter = new QSplitter(Qt::Horizontal, this);
     splitter->addWidget(left);
     splitter->addWidget(m_views);
-    splitter->setStretchFactor(0, 1);
+    // The tree keeps the width its columns need; every extra pixel goes to the
+    // pane showing the disk. An even split instead sounds fair and is not: the
+    // tree's content has a natural width and the hex pane's does not, so half
+    // the window is more than the tree can use and less than the dump needs.
+    splitter->setStretchFactor(0, 0);
     splitter->setStretchFactor(1, 1);
     setCentralWidget(splitter);
+
+    // The window opens at the size its contents need, rather than at a number
+    // somebody typed. 1100x700 with an even split gave the hex pane about 550
+    // pixels for a line that measures 78 monospaced characters, so the
+    // characters column was cut off on the very first disk anybody opened —
+    // and the fix was to resize the window by hand every time.
+    //
+    // Both halves are measured the same way the tree's fixed columns already
+    // are: from the text they have to hold, in the font they will hold it in.
+    const int hexWidth = hexPaneWidth(*m_hex);
+    const int treeWidth = treePaneWidth(*m_tree);
+    const int handle = splitter->handleWidth();
+
+    // Clamped to the screen, because a measurement is not permission to be
+    // bigger than the display — that is the same fault in the other
+    // direction, and worse, since a window wider than the desktop can put its
+    // own edges out of reach.
+    // The height stays a choice rather than a measurement: a disk is taller
+    // than any window, so there is no content height to fit and 700 is simply
+    // a comfortable number of lines.
+    QSize wanted(treeWidth + hexWidth + handle, 700);
+    if (const QScreen *screen = QGuiApplication::primaryScreen()) {
+        const QSize room = screen->availableGeometry().size() - QSize(80, 80);
+        wanted = wanted.boundedTo(room.expandedTo(QSize(640, 400)));
+    }
+    resize(wanted);
+
+    // After the resize, not before: a splitter redistributes a resize among
+    // its children, so sizes set first are proportions the next resize spends.
+    //
+    // When the screen could not hold both, the tree is the one that gives way.
+    // Its content degrades gracefully — a long filename elides and is still a
+    // filename — where a clipped dump line is simply missing, which is the
+    // complaint that started this. It keeps a floor wide enough to read a name
+    // in, because a browser narrowed to nothing is not a trade, it is a
+    // different bug.
+    const int available = wanted.width() - handle;
+    const int floor = qMin(treeWidth, 240);
+    const int hexShare = qBound(available / 3, available - floor, hexWidth);
+    splitter->setSizes({available - hexShare, hexShare});
 
     // The tree extracts through the window, which owns the images; the tree
     // itself knows nothing about them.
@@ -548,6 +642,101 @@ void MainWindow::search() {
                                  .arg(m_images.size() == 1 ? "" : "s"));
 }
 
+void MainWindow::showLegend(const QVector<HexRegion> &regions) {
+    if (!m_legend) return;
+    if (regions.isEmpty()) {
+        m_legend->hide();
+        return;
+    }
+    // Only the regions this disk actually has. A legend listing a colour that
+    // is nowhere on screen sends someone looking for it.
+    QList<int> present;
+    for (const HexRegion &span : regions) {
+        if (!present.contains(span.region)) present.append(span.region);
+    }
+    std::sort(present.begin(), present.end());
+
+    // One line: swatch and name only. The descriptions were tried inline and
+    // took three lines out of the hex view to explain six colours, which is
+    // the wrong trade in a pane whose whole job is showing bytes. They are the
+    // tooltip instead — there when wanted, costing nothing when not.
+    QStringList parts;
+    QStringList tips;
+    for (int region : present) {
+        // Names and descriptions come from the engine, like every other fact
+        // the window shows: the GUI knows nothing about Amiga filesystems, and
+        // a legend written in Qt would be the first thing to drift from
+        // `--format=json`.
+        const QString name = QString::fromUtf8(ade_region_name(static_cast<AdeRegion>(region)))
+                                 .toHtmlEscaped();
+        const QString describes =
+            QString::fromUtf8(ade_region_describes(static_cast<AdeRegion>(region)))
+                .toHtmlEscaped();
+        const QColor colour = HexHighlighter::regionColour(m_hex->palette(), region);
+        const QString swatch =
+            colour.isValid()
+                ? QStringLiteral("<span style='background:%1'>&nbsp;&nbsp;&nbsp;</span>")
+                      .arg(colour.name())
+                // A region with no tint still belongs in the legend, saying so:
+                // "files are not coloured" is the answer to why most of the
+                // disk is plain, and leaving it out makes that a mystery.
+                : QStringLiteral("<span style='opacity:0.55'>&mdash;&mdash;&mdash;</span>");
+        parts << QStringLiteral("%1&nbsp;%2").arg(swatch, name);
+        tips << QStringLiteral("<b>%1</b> — %2").arg(name, describes);
+    }
+    m_legend->setText(parts.join(QStringLiteral("&nbsp;&nbsp;&nbsp;&nbsp;")));
+    m_legend->setToolTip(tips.join(QStringLiteral("<br>")));
+    m_legend->show();
+}
+
+void MainWindow::showWholeDisk(QTreeWidgetItem *item) {
+    const Open *open = imageFor(item);
+    if (!open) {
+        clearViews();
+        return;
+    }
+    const quint64 size = open->image.size();
+    // Capped, and the cap is measured rather than chosen. A dump is five
+    // characters per byte, and Qt lays out the document when it is set: 4 MB
+    // takes about 1.4 seconds, 2 MB about 0.7. Four is the number because
+    // every image in the 4,652-image corpus is smaller than that — the largest
+    // is 2.1 MB — so every floppy, extended ADF and flux capture is shown
+    // whole, and only a hard disk is cut. Which is the right place to cut: a
+    // hex dump of a hundred megabytes was never the way to read one.
+    constexpr quint64 WholeDiskBytes = 4u * 1024 * 1024;
+    const quint64 shown = qMin(size, WholeDiskBytes);
+
+    const ade::Buffer buffer = open->image.readRange(0, shown);
+    if (!buffer) {
+        clearViews();
+        return;
+    }
+    const QByteArray bytes = buffer.data();
+
+    // The map goes in **before** the text, over a cleared pane. A
+    // QSyntaxHighlighter re-highlights its whole document when its inputs
+    // change, and a whole disk is 56,000 lines: setting the map afterwards
+    // made the GUI test suite take eleven seconds instead of ninety
+    // milliseconds, and left the pane briefly painted with the previous
+    // disk's regions. Cleared, then mapped, then filled — nothing is
+    // highlighted twice, and nothing is ever highlighted wrongly.
+    const QVector<HexRegion> regions = open->image.regions();
+    m_hex->clear();
+    if (m_paint) m_paint->setRegions(regions);
+    m_hex->setPlainText(hexview::dump(bytes));
+    m_text->setPlainText(QString::fromLatin1(bytes));
+    showLegend(regions);
+    m_extract->setEnabled(false);
+
+    QString message = describe(*open);
+    if (shown < size) {
+        message += QStringLiteral("  —  hex shows the first %1 of %2 bytes")
+                       .arg(shown)
+                       .arg(size);
+    }
+    statusBar()->showMessage(message);
+}
+
 QByteArray MainWindow::contentsOf(QTreeWidgetItem *item) const {
     if (!item || item->data(0, RoleIsDir).toBool()) return {};
     const Open *open = imageFor(item);
@@ -562,11 +751,14 @@ QByteArray MainWindow::contentsOf(QTreeWidgetItem *item) const {
 
 void MainWindow::showEntry(QTreeWidgetItem *item) {
     m_selected = item;
-    // An image row carries no block. Selecting one says what the image is,
-    // which is the part its own row may have had to elide.
+    // An image row carries no block, and selecting one shows the **whole
+    // disk**: the bytes a file view can never reach — the bootblock where
+    // protection lives, the rootblock, the bitmap, and the space no directory
+    // entry points at, which on a damaged disk is where the interesting part
+    // is. Each of those is tinted, so the structure of the disk is visible
+    // rather than having to be counted out in offsets.
     if (item && !item->data(0, RoleBlock).isValid()) {
-        clearViews();
-        if (const Open *open = imageFor(item)) statusBar()->showMessage(describe(*open));
+        showWholeDisk(item);
         return;
     }
     if (!item || item->data(0, RoleIsDir).toBool()) {
@@ -574,6 +766,17 @@ void MainWindow::showEntry(QTreeWidgetItem *item) {
         return;
     }
     m_extract->setEnabled(true);
+
+    // Anything that is not the disk itself is one region, so there is nothing
+    // to tint — and a leftover disk map would colour these bytes by where the
+    // *disk's* offsets fell, which looks deliberate and is not.
+    //
+    // Done here, before the branches, because it must happen on every one of
+    // them. It did not, and the empty-contents path below kept the previous
+    // disk's colours and legend under the words "(no readable contents)".
+    m_hex->clear();
+    if (m_paint) m_paint->setRegions({});
+    showLegend({});
 
     const QByteArray data = contentsOf(item);
     if (data.isEmpty()) {
@@ -619,6 +822,12 @@ void MainWindow::extractSelected() {
 void MainWindow::clearViews() {
     m_hex->clear();
     m_text->clear();
+    // The map and its legend belong to whatever was being shown. Left behind,
+    // they would explain colours that are no longer on screen — and worse, the
+    // map would tint the next thing put in the pane by where *this* one's
+    // offsets fell.
+    if (m_paint) m_paint->setRegions({});
+    showLegend({});
     if (m_extract) m_extract->setEnabled(false);
 }
 

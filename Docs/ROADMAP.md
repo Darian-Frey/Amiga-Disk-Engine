@@ -137,7 +137,7 @@ Neither run is the F-001 bar, which requires a fuzz corpus rather than well-form
   **Nothing in it knows anything about Amiga filesystems** — every fact on screen came through the bridge, so the window cannot drift from the CLI.
   **Search grew the ABI rather than the GUI.** Walking a disk safely is cycle detection (AV-001) and a depth bound (IMP-003); doing it in Qt would hang the window on an image the CLI handles. `ade_walk_open` was added instead, and `ade.h` documents it as existing so no future front end writes its own traversal.
   **Several images stay open at once**, each a root in the tree — without that, cross-image search has nothing to search. On 400 corpus images: 580 ms to open, 79 ms to search (7908 matches), 400 MB resident, since an open image is held in memory.
-  **28 headless tests** under `QT_QPA_PLATFORM=offscreen`, `-Wall -Wextra` clean, using a `mkfixture`-generated image (D-010 commits no binaries). Linux only so far: Qt6 and the C ABI are what make the other platforms possible, but neither has been built.
+  **33 headless tests** under `QT_QPA_PLATFORM=offscreen`, `-Wall -Wextra` clean, using a `mkfixture`-generated image (D-010 commits no binaries). Linux only so far: Qt6 and the C ABI are what make the other platforms possible, but neither has been built.
 - [x] **RDB partition browsing in the GUI (F-018's second half)** — a hard disk opens as its partitions, each with its files beneath it, and search covers every one of them. Reading has worked since 2026-08-24; what was missing was any way to see it that was not `--partition=` on a command line.
   **The ABI grew a selector rather than a second family of calls.** `ade_dir_open`, `ade_walk_open` and `ade_file_read` take a partition index or `ADE_WHOLE_IMAGE`, because a device is not a special case of an image — it is what an image is when it has an RDB. `ade_partitions_open` returns the table, and reports **whether each partition mounts** separately from whether it is flagged bootable: a `PFS\0` partition is a real partition ADE cannot read, and an empty listing would read as an empty disk.
   **A partition is not an offset.** Its own block size and reserved count determine where the rootblock sits (C-007), so the engine resolves it from an index rather than the front end adding numbers together.
@@ -160,3 +160,53 @@ Neither run is the F-001 bar, which requires a fuzz corpus rather than well-form
   **Bulk convert landed 2026-08-29**, closing the clause the feature shipped without: `ade batch --convert=<code> --output=<dir>` converts a corpus in the same pass as the health check, from bytes already read. 400 images to extended ADF in 1.36 s at 9.7 MB peak; 30 spot-checked outputs list identically to their sources. Refusals are per-image and never fatal — over a mixed set, three converted, two refused as lossy (an extended ADF and an SCP, both of which would discard the raw tracks that are the reason they exist) and one unimplemented (DMS). Existing outputs are never overwritten.
   It needed the conversion logic to leave the CLI first (IMP-007): `encode_raw_mfm` was sixty lines of track encoding living in a front end, which F-002 forbids and the layering check cannot see.
 **Acceptance:** A cold user images a real disk, sees it auto-identified and catalogued, and batch-verifies a multi-thousand-image corpus in one run.
+
+## Atari Disk Engine feature map
+
+*Surveyed 2026-08-30 against `/home/azathoth/Atari-Disk-Engine` at 23,220 lines. One-directional by request: this lists what the **Atari** engine does that ADE does not. It is not a plan — nothing here is scheduled, and several entries are recorded precisely so they are not raised again.*
+
+The predecessor is a single-disk Qt application for Atari ST `.st`/`.msa`/`.stx` images. ADE is a library, a CLI, an ABI and a GUI for Amiga media, and the two have diverged far enough that most of the difference is deliberate. What follows separates the difference that is a **gap** from the difference that is a **decision** and the difference that is simply a **different format**.
+
+### Already answered — do not re-raise
+
+| Atari feature | ADE's position |
+|---|---|
+| Pattern Scanner / Signatures | Delivered, F-020 `ade scan` — 25 magics, corpus-measured |
+| Search Disk | Delivered, F-021 `ade find` — text or hex, with region attribution |
+| Integrity Scanner / Disk Health Report | Delivered, F-010 `ade check` |
+| Disk Information, Disk Size Chart | Delivered, `ade info` (`--format=json` for the numbers) |
+| Format Disk / blank disk | Delivered, F-019 `ade create` |
+| Hex view, colour legend, full-disk view | Delivered, F-004 and F-022 — the whole disk, its regions tinted, with a legend naming only the regions that disk has |
+| Find in hex view | **Not delivered.** See **Content search in the window** below |
+| Make Disk Bootable | **Declined.** ADE will not write boot code it would then refuse to interpret. AV-002's defence is structural — no interpreter, no emulator, no execution path — and writing a bootblock is the one operation that makes ADE a vector rather than a reader. `ade create` leaves boot code zeroed on purpose, exactly as AmigaDOS's own `format` does without `install`. |
+| MSA / STX decoding | **Not applicable.** Atari containers. The Amiga equivalents are mapped already: ADZ/HDZ delivered, DMS blocked by D-009, IPF refused by C-003. |
+| FAT1/FAT2 symmetry, `syncFat1ToFat2`, `repairFatSize` | **Not applicable.** OFS/FFS has no FAT. The analogue is the block bitmap, which `ade check` already cross-checks and can compute a rebuild for — never applied, per D-004. |
+| Light / dark / terminal themes | **Declined.** The GUI takes its palette from the desktop and is tested in both, which is why the hex pane's dimming and its selection marks are blended from the palette rather than hardcoded. A theme menu would be ADE overriding a choice the user already made. |
+
+### Candidates — real gaps, unscheduled
+
+Sized S/M/L on ADE's terms, with the constraint each one runs into. **None of these is committed**; several need a DECISIONS entry before any code.
+
+- **Content search in the window** (S). F-021 is CLI-only. The GUI searches *names* across every open image; it cannot search *contents* at all, and the engine work is done — `Search::run` already returns offsets, blocks, owners and regions. This is a bridge call and a results tab. The smallest genuine gap on the list and the one a user meets first.
+
+- **Extract everything to a folder** (S). Atari has "Extract All Files to Folder"; ADE's `extract` takes one path at a time, and the GUI extracts by dragging one file. Whole-image extraction exists nowhere. Walking and writing are both solved (`volume.walk`, `ade batch`'s per-image loop) — what is missing is the command. Needs a position on name collisions and on the Latin-1-to-host filename mapping, which is where an Amiga name meets a filesystem that will not take it.
+
+- **Block map visualisation** (M) — **the data half is delivered** as F-022 (`ade layout`, `ade_layout_open`, and the GUI's whole-disk hex). What remains is the *picture*: Atari's `FatVisualizerWidget` and "View FAT Table" draw the disk as a grid of cells rather than as a hex dump, which answers "where did the space go" at a glance where a dump answers it one screen at a time. The map now exists and tiles exactly, so this is a widget over data that is already there.
+
+- **Disk surface view** (M). Atari's `DiskSurfaceWidget` shows per-sector state across the disk. For ADE this is flux-shaped rather than filesystem-shaped — which sectors decoded per track, which are weak, which are missing — and it is the natural front end for F-007's `sectors_placed`, currently a number in a report. Blocked in practice on the same thing F-005/F-006 are: no Greaseweazle hardware here to produce interesting captures.
+
+- **Recovery and carving** (M). `deepCarveDirEntries`, `tryLinearRootRecovery`, `huntForRootDirectory` and scramble detection — recovering structure when the pointers are gone. F-021's `unclaimed` region already finds the candidate blocks: searching the corpus for `DOS` alone puts a hit in unclaimed space on 840 of 4,652 images, which is a lower bound on how much material is sitting outside the directory tree. **The blocker is verifiability, not effort**: the same trap as LNFS. A carver that can only be checked against itself is what D-002 gave up ADFlib's knowledge to avoid, so this needs a way to be proven wrong before it is written — most likely deleting known files from generated fixtures and requiring exact recovery.
+
+- **The write suite** (L). Inject, delete, delete directory, rename, new folder, format in place, edit boot sector, set BPB, wipe slack space — with **undo/redo** underneath (Atari snapshots the whole image onto a stack). Gated by **D-004**, which is satisfied for reading and permits a write path once its read path is proven, and by v1's never-reversible stance. `ade create` was permitted because it only ever makes a new file; everything here writes into a disk somebody already owns, which is the damage D-004 exists to prevent. Wants its own decision entry covering backups, dry runs and what "undo" means for a file on disk rather than an image in memory.
+
+- **The repair suite** (M, after the write suite). `fixBootChecksum`, `repairGeometry`, `repairRootOffset`, `bruteForceGeometry`, `adoptOrphanClusters`, `repairDiskHealth`. ADE already *detects* every Amiga analogue and already *computes* the bitmap rebuild — the missing half is applying it, so this is the write suite's first customer rather than separate work. Worth noting the Atari engine's most-used repairs are for a format ADE does not have; the Amiga list is shorter than it looks.
+
+- **68000 disassembler and the reverse-engineering surface** (L, needs a decision first). The largest single difference: 4,672 lines across the disassembler, call graph, xref panel, strings and variables panels, function list, segment bar, minimap, library-signature matching, assembly export and a project format. ADE has **zero external dependencies** and would be writing the opcode tables from spec. The prior question is not effort but scope — whether a disk engine is where a disassembler belongs, or whether the honest answer is to extract executables cleanly (which F-020 already identifies) and let a disassembler be a disassembler.
+
+- **Lua console and plugin system** (L, needs a decision first). 3,119 lines, and the Atari engine vendors `sol` in `third_party/` to get it. That is the whole question: ADE's zero-dependency posture is not incidental, and embedding a language runtime is the largest possible exception to it. The cheaper answer already exists in part — `--format=json` on every command makes ADE scriptable in whatever language the user already has, which is the seam `Docs/VOCABULARY.md` documents for ManifeST.
+
+- **Run the disk in an emulator** (S, but external). Atari's "Test in Hatari" launches the image in an emulator. The Amiga equivalent is FS-UAE or WinUAE, and it is a `QProcess` and a configurable path rather than engine work. AV-002 is not offended — ADE would still be executing nothing; it would be handing a file to a program the user chose. The reason it is unscheduled is that it is the first feature that makes ADE depend on software it does not ship.
+
+### What the map does not say
+
+The traffic is not one-way, and the reverse list is longer: flux and SCP, MFM encode and decode, extended ADF, RDB partitioning, dircache, hard links, gzip containers, TOSEC identification, corpus-scale batch, image consolidation, a stable JSON surface, a C ABI, a CLI at all, and a 4,652-image differential corpus with an external oracle. The Atari engine has none of these. It is also a **4,237-line class with 75 methods**, measured today — which is what D-003 exists to prevent, and the reason its feature count is not the thing to envy.

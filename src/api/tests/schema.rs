@@ -483,6 +483,31 @@ fn a_search_emits_exactly_these_fields() {
 }
 
 #[test]
+fn a_layout_emits_exactly_these_fields() {
+    let mut v = ade_fixtures::Volume::dd(1).named("Schema");
+    v.add_file("readme", b"hello");
+    let image = ade_core::Image::from_bytes(v.build()).unwrap();
+    let map = ade_core::layout::Layout::of(&image);
+    assert!(!map.spans.is_empty(), "a formatted disk has spans");
+    compare(
+        "layout",
+        &paths(&map.to_json().versioned()),
+        &[
+            "schema",
+            "block_size",
+            "blocks",
+            "mounted",
+            "spans",
+            "spans[].offset",
+            "spans[].block",
+            "spans[].blocks",
+            "spans[].region",
+            "spans[].file",
+        ],
+    );
+}
+
+#[test]
 fn the_batch_summary_emits_exactly_these_fields() {
     // Over a real image, and a damaged one: the arrays are the point here, and
     // an empty array shows none of its element fields. A summary of nothing

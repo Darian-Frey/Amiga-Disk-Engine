@@ -651,3 +651,126 @@ fn the_catalogue_calls_tolerate_null_like_everything_else() {
         ade::ade_string_free(std::ptr::null_mut());
     }
 }
+
+#[test]
+fn the_region_strings_match_the_engines() {
+    // The bridge spells the region names out as NUL-terminated literals rather
+    // than converting the engine's at call time, because converting means
+    // allocating a string C never frees. The cost of that choice is two copies
+    // of the same words, so this is what stops them drifting: a rename in
+    // `ade_core::layout` that misses the bridge fails here rather than shipping
+    // a legend that disagrees with `--format=json`.
+    use ade_core::layout::Region;
+    const REGIONS: [Region; 6] = [
+        Region::Bootblock,
+        Region::Rootblock,
+        Region::Bitmap,
+        Region::Directory,
+        Region::File,
+        Region::Unclaimed,
+    ];
+    for (code, region) in REGIONS.iter().enumerate() {
+        let code = u32::try_from(code).unwrap();
+        // SAFETY: both return pointers to static storage, never null.
+        let (name, describes) = unsafe {
+            (
+                std::ffi::CStr::from_ptr(ade::ade_region_name(code)),
+                std::ffi::CStr::from_ptr(ade::ade_region_describes(code)),
+            )
+        };
+        assert_eq!(name.to_str().unwrap(), region.name(), "name for {region:?}");
+        assert_eq!(
+            describes.to_str().unwrap(),
+            region.describes(),
+            "description for {region:?}"
+        );
+    }
+}
+
+#[test]
+fn an_unknown_region_code_is_empty_rather_than_wrong() {
+    // A front end built against a newer header must not be told that region 6
+    // is a bootblock. Empty is a legend entry somebody notices; a wrong name
+    // is a legend entry they believe.
+    for code in [6u32, 99, u32::MAX] {
+        // SAFETY: both tolerate any integer and return static storage.
+        unsafe {
+            assert_eq!(
+                std::ffi::CStr::from_ptr(ade::ade_region_name(code)).to_bytes(),
+                b""
+            );
+            assert_eq!(
+                std::ffi::CStr::from_ptr(ade::ade_region_describes(code)).to_bytes(),
+                b""
+            );
+        }
+    }
+}
+
+#[test]
+fn a_layout_tiles_the_whole_image_and_tolerates_null() {
+    let (path, c_path) = fixture("layout", &sound_disk());
+    let mut err = AdeResult::Ok;
+    // SAFETY: valid path, no catalogue, writable slot.
+    let image = unsafe { ade::ade_image_open(c_path.as_ptr(), std::ptr::null(), &raw mut err) };
+    assert!(!image.is_null());
+
+    // SAFETY: a live handle.
+    let layout = unsafe { ade::ade_layout_open(image, ade::ADE_WHOLE_IMAGE) };
+    assert!(!layout.is_null());
+    // SAFETY: a live handle.
+    let count = unsafe { ade::ade_layout_count(layout) };
+    assert!(count > 1, "a formatted disk is more than one span");
+
+    // The spans must tile: no gaps, no overlaps, starting at zero. A front end
+    // colours from these, and a hole in the map is a hole in the hex view that
+    // looks like data.
+    let mut at = 0u64;
+    let mut saw_bootblock = false;
+    for index in 0..count {
+        let mut span = unsafe { std::mem::zeroed::<ade::AdeSpan>() };
+        // SAFETY: a live handle and a writable slot.
+        assert_eq!(
+            unsafe { ade::ade_layout_span(layout, index, &raw mut span) },
+            AdeResult::Ok
+        );
+        assert_eq!(span.offset, at, "span {index} does not follow the last");
+        at += span.length;
+        if span.region == 0 {
+            saw_bootblock = true;
+        }
+    }
+    assert!(saw_bootblock, "every disk has a bootblock");
+
+    // Past the end is NotFound, not a crash.
+    let mut span = unsafe { std::mem::zeroed::<ade::AdeSpan>() };
+    // SAFETY: a live handle and a writable slot.
+    assert_eq!(
+        unsafe { ade::ade_layout_span(layout, count, &raw mut span) },
+        AdeResult::NotFound
+    );
+
+    // SAFETY: a live handle.
+    unsafe { ade::ade_layout_free(layout) };
+
+    // A partition index is refused rather than guessed at: no image in the
+    // corpus carries an RDB, so a device's map has nothing to be checked
+    // against.
+    // SAFETY: a live handle.
+    assert!(unsafe { ade::ade_layout_open(image, 0) }.is_null());
+
+    // SAFETY: a live handle.
+    unsafe { ade::ade_image_free(image) };
+    let _ = std::fs::remove_file(&path);
+
+    // SAFETY: null is allowed at every entry point.
+    unsafe {
+        assert!(ade::ade_layout_open(std::ptr::null(), ade::ADE_WHOLE_IMAGE).is_null());
+        assert_eq!(ade::ade_layout_count(std::ptr::null()), 0);
+        assert_eq!(
+            ade::ade_layout_span(std::ptr::null(), 0, std::ptr::null_mut()),
+            AdeResult::NullArgument
+        );
+        ade::ade_layout_free(std::ptr::null_mut());
+    }
+}

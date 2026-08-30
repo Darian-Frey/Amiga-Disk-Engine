@@ -153,3 +153,51 @@ fn every_match_is_reported_not_just_the_first_per_block() {
         "all of them inside the one file"
     );
 }
+
+#[test]
+fn a_range_read_matches_the_image_it_came_from() {
+    // The hex view of a whole disk reads through this, and a range that is off
+    // by a block shows the wrong bytes under the right colour — which looks
+    // like a bug in the map rather than in the read.
+    let mut v = Fixture::dd(1).named("Ranges");
+    v.add_file("readme", b"hello");
+    let bytes = v.build();
+    let image = ade_core::Image::from_bytes(bytes.clone()).unwrap();
+
+    assert_eq!(image.read_range(0, 512), bytes[..512], "the first block");
+    assert_eq!(
+        image.read_range(1000, 24),
+        bytes[1000..1024],
+        "a range crossing a block boundary"
+    );
+    assert_eq!(image.read_range(3, 5), bytes[3..8], "unaligned and short");
+    assert_eq!(image.read_range(0, bytes.len() as u64), bytes, "all of it");
+}
+
+#[test]
+fn a_range_past_the_end_is_truncated_rather_than_refused() {
+    // A hex view asks for a round number of bytes at the bottom of the disk
+    // and should get what is there, not an error.
+    let v = Fixture::dd(1).named("Edges");
+    let bytes = v.build();
+    let size = bytes.len() as u64;
+
+    assert_eq!(
+        image_range(&bytes, size - 10, 512).len(),
+        10,
+        "a short tail"
+    );
+    assert!(image_range(&bytes, size, 512).is_empty(), "exactly the end");
+    assert!(
+        image_range(&bytes, size + 4096, 512).is_empty(),
+        "well past"
+    );
+    assert!(image_range(&bytes, 0, 0).is_empty(), "nothing asked for");
+}
+
+/// Read a range through a freshly mounted image.
+fn image_range(bytes: &[u8], offset: u64, length: u64) -> Vec<u8> {
+    ade_core::Image::from_bytes(bytes.to_vec())
+        .map(|i| i.read_range(offset, length))
+        .unwrap_or_default()
+}

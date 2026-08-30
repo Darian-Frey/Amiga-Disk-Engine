@@ -38,10 +38,55 @@ QString dump(const QByteArray &data) {
 
 }  // namespace hexview
 
-HexNullDimmer::HexNullDimmer(QTextDocument *document, const QPlainTextEdit *source)
+HexHighlighter::HexHighlighter(QTextDocument *document, const QPlainTextEdit *source)
     : QSyntaxHighlighter(document), m_source(source) {}
 
-QColor HexNullDimmer::dimColour(const QPalette &palette) {
+void HexHighlighter::setRegions(QVector<HexRegion> regions) {
+    m_regions = std::move(regions);
+    rehighlight();
+}
+
+QColor HexHighlighter::regionColour(const QPalette &palette, int region) {
+    // Hues rather than palette colours, because six things have to be told
+    // apart and a palette offers two. Each is then mixed most of the way into
+    // the page, so the same six read correctly on a light theme and a dark one
+    // and the text stays the text rather than becoming a label on a swatch.
+    const QColor base = palette.color(QPalette::Base);
+    const auto wash = [&base](int r, int g, int b, int percent) {
+        const auto mix = [&](int from, int to) { return from + (to - from) * percent / 100; };
+        return QColor(mix(r, base.red()), mix(g, base.green()), mix(b, base.blue()));
+    };
+    switch (region) {
+        case 0:  return wash(220, 60, 60, 78);    // bootblock — where protection lives
+        case 1:  return wash(220, 170, 40, 78);   // rootblock
+        case 2:  return wash(60, 170, 90, 78);    // bitmap
+        case 3:  return wash(70, 130, 220, 78);   // directory
+        case 4:  return QColor();                 // file — most of the disk; left alone
+        case 5:  return wash(140, 140, 150, 90);  // unclaimed — the faintest wash there is
+        default: return QColor();
+    }
+}
+
+int HexHighlighter::regionAt(quint64 offset) const {
+    // Binary search: a hard disk's map has as many spans as it has files, and
+    // this runs for every visible line on every repaint.
+    int low = 0;
+    int high = m_regions.size() - 1;
+    while (low <= high) {
+        const int mid = low + (high - low) / 2;
+        const HexRegion &span = m_regions.at(mid);
+        if (offset < span.start) {
+            high = mid - 1;
+        } else if (offset >= span.end) {
+            low = mid + 1;
+        } else {
+            return span.region;
+        }
+    }
+    return -1;
+}
+
+QColor HexHighlighter::dimColour(const QPalette &palette) {
     const QColor text = palette.color(QPalette::Text);
     const QColor base = palette.color(QPalette::Base);
     constexpr int Toward = 70;  // percent of the way to the background
@@ -50,9 +95,28 @@ QColor HexNullDimmer::dimColour(const QPalette &palette) {
                   blend(text.blue(), base.blue()));
 }
 
-void HexNullDimmer::highlightBlock(const QString &line) {
+void HexHighlighter::highlightBlock(const QString &line) {
+    const QPalette palette = m_source ? m_source->palette() : QPalette();
+
+    // The region tint first, under everything: it is the background, and the
+    // dimming that follows only ever sets a foreground.
+    //
+    // A line is sixteen bytes and a region boundary is a block boundary, so a
+    // line falls inside exactly one region — 512 is a whole number of lines.
+    // The lookup is by the line's first byte for that reason.
+    if (!m_regions.isEmpty()) {
+        const quint64 offset =
+            static_cast<quint64>(currentBlock().blockNumber()) * hexview::BytesPerLine;
+        const QColor tint = regionColour(palette, regionAt(offset));
+        if (tint.isValid()) {
+            QTextCharFormat wash;
+            wash.setBackground(tint);
+            setFormat(0, line.size(), wash);
+        }
+    }
+
     QTextCharFormat dim;
-    dim.setForeground(dimColour(m_source ? m_source->palette() : QPalette()));
+    dim.setForeground(dimColour(palette));
 
     for (int i = 0; i < hexview::BytesPerLine; ++i) {
         const int column = hexview::columnOf(i);

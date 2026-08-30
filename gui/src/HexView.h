@@ -35,6 +35,10 @@ constexpr int columnOf(int i) {
 /// The column at which the printable characters begin, past `" |"`.
 constexpr int AsciiColumn = columnOf(BytesPerLine - 1) + ByteWidth + 2;
 
+/// Characters in a full dump line: the fields, plus the two `|` around the
+/// characters. What the pane has to be wide enough to show.
+constexpr int LineLength = AsciiColumn + BytesPerLine + 1;
+
 /// The three fields of a dump line, left to right.
 enum class Zone {
     /// The eight-digit offset.
@@ -57,8 +61,21 @@ QString dump(const QByteArray &data);
 
 }  // namespace hexview
 
-/// Dims the `00` pairs in the hex field, so real data stands out from the
-/// padding and empty space that fills most of a disk.
+/// One run of the disk that is all the same thing, for tinting.
+struct HexRegion {
+    /// First byte.
+    quint64 start;
+    /// Last byte, exclusive.
+    quint64 end;
+    /// An `AdeRegion` code.
+    int region;
+};
+
+/// Paints the hex pane: dims null bytes, and tints each region of the disk.
+///
+/// Both jobs live in one class because Qt allows a document exactly one
+/// `QSyntaxHighlighter` — setting a second silently replaces the first, which
+/// would look like whichever feature was installed last simply not working.
 ///
 /// Carried over from the Atari Disk Engine, whose hex view paints itself and
 /// picks the colour with a hand-written light/dark test. ADE's is a
@@ -71,13 +88,30 @@ QString dump(const QByteArray &data);
 /// them, so the dimming is placed by column arithmetic rather than by
 /// searching each line for the text `00`. A search would dim `00000000` at the
 /// start of every line, which is the opposite of making data stand out.
-class HexNullDimmer : public QSyntaxHighlighter {
+class HexHighlighter : public QSyntaxHighlighter {
 public:
-    /// Dims nulls in `document`, taking its colour from `source`'s palette.
+    /// Paints `document`, taking its colours from `source`'s palette.
     ///
     /// The palette is read at highlight time rather than captured, so the
-    /// dimming follows a theme change instead of staying the old theme's grey.
-    HexNullDimmer(QTextDocument *document, const QPlainTextEdit *source);
+    /// colours follow a theme change instead of staying the old theme's.
+    HexHighlighter(QTextDocument *document, const QPlainTextEdit *source);
+
+    /// Tint these runs of the disk. Empty for a file's own bytes, where there
+    /// is nothing to say: a file is all one region by definition.
+    ///
+    /// Must be sorted by `start` and must not overlap, which is what
+    /// `ade_layout_open` guarantees.
+    void setRegions(QVector<HexRegion> regions);
+
+    /// The tint for a region, or an invalid colour for one that is not tinted.
+    ///
+    /// **Files are deliberately not tinted.** They are most of a disk, and
+    /// colouring them colours everything, which is the same as colouring
+    /// nothing — the eye has to be able to find the four structural blocks
+    /// among the sixteen hundred that hold data. Unclaimed space gets the
+    /// faintest wash there is, because "this is not part of any file" is worth
+    /// seeing and is also the second most common answer.
+    static QColor regionColour(const QPalette &palette, int region);
 
     /// The dim colour for a given palette.
     ///
@@ -94,7 +128,11 @@ protected:
     void highlightBlock(const QString &line) override;
 
 private:
+    /// The region covering `offset`, or -1 for none.
+    int regionAt(quint64 offset) const;
+
     const QPlainTextEdit *m_source;
+    QVector<HexRegion> m_regions;
 };
 
 /// The hex pane, whose selection stays inside one field.

@@ -9,6 +9,8 @@
 
 #include <ade.h>
 
+#include "HexView.h"
+
 #include <QByteArray>
 #include <QString>
 
@@ -222,6 +224,30 @@ public:
     Listing walk(quint32 partition) const { return Listing{ade_walk_open(m_raw, partition)}; }
     Buffer read(quint32 partition, quint32 block) const {
         return Buffer{ade_file_read(m_raw, partition, block)};
+    }
+
+    /// Raw bytes of the mounted image, for a hex view of the disk itself.
+    Buffer readRange(quint64 offset, quint64 length) const {
+        return Buffer{ade_image_read(m_raw, offset, length)};
+    }
+
+    /// What occupies each block, as runs. Empty when the map is unavailable —
+    /// which is not a failure to report: an image whose regions are unknown
+    /// still shows its bytes, just without the colour.
+    QVector<HexRegion> regions() const {
+        QVector<HexRegion> out;
+        AdeLayout *layout = ade_layout_open(m_raw, ADE_WHOLE_IMAGE);
+        if (layout == nullptr) return out;
+        const size_t count = ade_layout_count(layout);
+        out.reserve(static_cast<int>(count));
+        for (size_t i = 0; i < count; ++i) {
+            AdeSpan span;
+            if (ade_layout_span(layout, i, &span) != ADE_OK) continue;
+            out.append(HexRegion{span.offset, span.offset + span.length,
+                                 static_cast<int>(span.region)});
+        }
+        ade_layout_free(layout);
+        return out;
     }
 
 private:

@@ -301,6 +301,7 @@ fn main() -> ExitCode {
             args.text,
             args.ignore_case,
         ),
+        ("layout", 1) => layout(Path::new(p(0)), args.format),
         ("formats", 0) => formats(args.format),
         ("batch", n) if n >= 1 => batch(
             &args.positional,
@@ -348,6 +349,7 @@ fn usage() {
         "    ade scan <image>                   find known content by its magic (F-020)".to_owned(),
         "    ade find <image> <pattern>         search the image for text or hex (F-021)"
             .to_owned(),
+        "    ade layout <image>                 map what occupies each block (F-022)".to_owned(),
         "    ade formats                        what converts to what, and what it costs"
             .to_owned(),
         "    ade batch <dir|image>...           verify a whole corpus (F-014)".to_owned(),
@@ -1470,6 +1472,64 @@ fn scan(path: &Path, format: Format) -> ExitCode {
 
 /// How many matches the text output shows before summarising the rest.
 const SHOWN: usize = 20;
+
+/// Map what occupies each block of an image (F-022).
+fn layout(path: &Path, format: Format) -> ExitCode {
+    let image = match ade_core::Image::open(path) {
+        Ok(i) => i,
+        Err(e) => {
+            eprintln!("ade: {}: {e}", path.display());
+            return ExitCode::from(EXIT_UNREADABLE);
+        }
+    };
+    let map = ade_core::layout::Layout::of(&image);
+
+    let mut out = std::io::stdout().lock();
+    if format == Format::Json {
+        emit_json(&mut out, map.to_json());
+        return ExitCode::from(EXIT_CLEAN);
+    }
+
+    let mut lines = vec![
+        format!("{}", path.display()),
+        format!(
+            "  {} blocks of {} bytes{}",
+            map.blocks,
+            map.block_size,
+            if map.mounted {
+                ""
+            } else {
+                " - no volume mounted, so only the bootblock is named"
+            }
+        ),
+        String::new(),
+    ];
+    for (region, blocks) in map.totals() {
+        lines.push(format!(
+            "  {:>10}  {:>6} blocks  {}",
+            region.name(),
+            blocks,
+            region.describes()
+        ));
+    }
+    lines.push(String::new());
+
+    // The runs themselves. A floppy has a few hundred; a hard disk has as many
+    // as it has files, which is still a page rather than a dump of every
+    // block - that is the whole point of coalescing them.
+    for span in &map.spans {
+        let owner = span.owner.as_deref().unwrap_or("");
+        lines.push(format!(
+            "  {:>9}  {:>6}+{:<5} {:<10} {owner}",
+            span.start,
+            span.block,
+            span.blocks,
+            span.region.name()
+        ));
+    }
+    emit_lines(&mut out, &lines);
+    ExitCode::from(EXIT_CLEAN)
+}
 
 /// Search an image for text or hex, and say what owns each hit (F-021).
 fn find(path: &Path, pattern: &str, format: Format, text: bool, ignore_case: bool) -> ExitCode {

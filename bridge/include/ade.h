@@ -83,6 +83,7 @@ typedef struct AdeImage      AdeImage;      /* an open image        */
 typedef struct AdeListing    AdeListing;    /* a directory listing  */
 typedef struct AdeBuffer     AdeBuffer;     /* a file's contents    */
 typedef struct AdePartitions AdePartitions; /* a device's partitions */
+typedef struct AdeLayout     AdeLayout;     /* a map of a whole disk */
 typedef struct AdeCatalogue  AdeCatalogue;  /* a loaded dataset      */
 
 /* Pass as `partition` to mean "the image's own volume, not a partition".
@@ -189,6 +190,73 @@ size_t      ade_listing_count(const AdeListing *listing);
  * the entry borrows from the listing. */
 AdeResult   ade_listing_entry(const AdeListing *listing, size_t index, AdeEntry *out);
 void        ade_listing_free(AdeListing *listing);
+
+/* What occupies a part of a disk (F-022). Codes, not strings, because a front
+ * end colours by them and a switch on an integer is what that wants. */
+typedef enum {
+    ADE_REGION_BOOTBLOCK = 0, /* boot code and the dostype                */
+    ADE_REGION_ROOTBLOCK = 1, /* the volume's name, datestamps, hash table */
+    ADE_REGION_BITMAP    = 2, /* which blocks are free                     */
+    ADE_REGION_DIRECTORY = 3, /* a directory header, holding its name      */
+    ADE_REGION_FILE      = 4, /* a file's header or its data               */
+    ADE_REGION_UNCLAIMED = 5  /* nothing points here                       */
+} AdeRegion;
+
+/* A run of consecutive blocks that are all the same thing. Owner borrows from
+ * the AdeLayout it came from and is valid until that is freed; it is empty for
+ * a region no directory entry owns. */
+typedef struct {
+    uint64_t  offset;   /* first byte                                     */
+    uint64_t  length;   /* how many bytes                                 */
+    uint64_t  block;    /* first block                                    */
+    uint64_t  blocks;   /* how many blocks                                */
+    AdeRegion region;
+    AdeBytes  owner;    /* the owning path, Latin-1; empty if none        */
+} AdeSpan;
+
+/* Map what occupies every block of an image (F-022).
+ *
+ * The spans tile the image with no gaps and no overlaps, ADE_REGION_UNCLAIMED
+ * where nothing else applies, so a front end can colour a whole disk without
+ * deciding what to do about a byte the map forgot. Runs rather than blocks: an
+ * 880 KB floppy has 1,760 blocks and about ninety spans, and the largest in a
+ * 4,652-image corpus has about seven hundred.
+ *
+ * Works on an image with no mountable volume, which is a quarter of real ones
+ * — everything past the reserved blocks is then unclaimed, and the bootblock
+ * is still named, because C-008 keeps those two facts separate.
+ *
+ * Only ADE_WHOLE_IMAGE is mapped today: pass a partition index and this
+ * returns NULL. A device's map would have to place several volumes, each with
+ * its own block size, at absolute offsets on the device — and no image in the
+ * 4,652-image corpus carries an RDB, so there is nothing to verify such a map
+ * against. Refused rather than guessed.
+ *
+ * Free with ade_layout_free. */
+AdeLayout *ade_layout_open(const AdeImage *image, uint32_t partition);
+size_t     ade_layout_count(const AdeLayout *layout);
+/* Copies span `index` into `*out`. ADE_NOT_FOUND past the end. */
+AdeResult  ade_layout_span(const AdeLayout *layout, size_t index, AdeSpan *out);
+void       ade_layout_free(AdeLayout *layout);
+
+/* A region's short name and its one-line description, for a legend. Static;
+ * never freed; empty for a code this build does not know. */
+const char *ade_region_name(AdeRegion region);
+const char *ade_region_describes(AdeRegion region);
+
+/* Read raw bytes of the mounted image, for a hex view of the disk itself.
+ *
+ * Offsets are in the space `ade_layout_open` maps and `ade_image_size` counts:
+ * the image as it mounts, not the file as it sits on disk. For an ADZ that is
+ * the decompressed disk and for a flux capture the reconstruction, which is
+ * the only space in which a span at offset 1024 means anything.
+ *
+ * A short read at the end is not an error — the returned buffer holds what
+ * there was. Past the end returns an empty buffer, never NULL, so a caller
+ * scrolling off the bottom gets nothing rather than a failure.
+ *
+ * Free with ade_buffer_free. */
+AdeBuffer *ade_image_read(const AdeImage *image, uint64_t offset, uint64_t length);
 
 /* Read a file by its entry block. NULL if it is not a readable file. Free with
  * ade_buffer_free. */

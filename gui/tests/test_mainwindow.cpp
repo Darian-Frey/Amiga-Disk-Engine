@@ -22,6 +22,10 @@
 #include <QTemporaryDir>
 #include <QTest>
 #include <QClipboard>
+#include <QItemSelectionModel>
+#include <QLabel>
+#include <QScreen>
+#include <QScrollBar>
 #include <QTextBlock>
 #include <QTextLayout>
 #include <QTreeWidget>
@@ -77,6 +81,11 @@ private slots:
     void aDragThatStraysIntoAnotherFieldKeepsGoingInItsOwn();
     void copyingGivesBackExactlyWhatWasHighlighted();
     void wholeLinesCanStillBeCopiedWhenThatIsWhatIsWanted();
+    void selectingTheDiskRowShowsTheWholeDisk();
+    void theWholeDiskViewTintsItsRegionsAndAFileViewDoesNot();
+    void theLegendNamesOnlyTheRegionsTheDiskHas();
+    void theHexPaneIsGivenTheRoomADumpLineNeeds();
+    void theDefaultSizeFitsADumpLineWhereTheScreenAllows();
     void selectingHexMarksTheCharactersThoseBytesSpell();
     void selectingCharactersMarksTheirHex();
     void theMarkIsWeakerThanTheSelectionSoTheCopiedFieldIsObvious();
@@ -535,7 +544,7 @@ void TestMainWindow::theFixedColumnsShowTheirWholeContents() {
 // is visible in a screenshot: dimming the wrong columns, and dimming nothing.
 void TestMainWindow::nullBytesAreDimmedInTheHexFieldAndNowhereElse() {
     QPlainTextEdit pane;
-    HexNullDimmer dimmer(pane.document(), &pane);
+    HexHighlighter dimmer(pane.document(), &pane);
 
     // A line whose offset is all zeros, whose first byte is zero, whose ASCII
     // column contains the literal characters `00`, and which also holds a
@@ -575,14 +584,14 @@ void TestMainWindow::theDimColourFollowsTheTheme() {
     QPalette light;
     light.setColor(QPalette::Text, Qt::black);
     light.setColor(QPalette::Base, Qt::white);
-    const QColor dimLight = HexNullDimmer::dimColour(light);
+    const QColor dimLight = HexHighlighter::dimColour(light);
     QVERIFY(dimLight.lightness() > QColor(Qt::black).lightness());
     QVERIFY(dimLight.lightness() < QColor(Qt::white).lightness());
 
     QPalette dark;
     dark.setColor(QPalette::Text, Qt::white);
     dark.setColor(QPalette::Base, QColor(30, 30, 30));
-    const QColor dimDark = HexNullDimmer::dimColour(dark);
+    const QColor dimDark = HexHighlighter::dimColour(dark);
     QVERIFY2(dimDark.lightness() < dimLight.lightness(),
              "a dark theme's dim must be darker than a light theme's, not the same grey");
     QVERIFY(dimDark.lightness() > QColor(30, 30, 30).lightness());
@@ -811,6 +820,201 @@ void TestMainWindow::theMarkIsWeakerThanTheSelectionSoTheCopiedFieldIsObvious() 
         const bool isMark = selection.format.background().color() == marked;
         QCOMPARE(selection.format.hasProperty(QTextFormat::ForegroundBrush), !isMark);
     }
+}
+
+// The window used to open at a hardcoded 1100x700 with an even split, giving
+// the hex pane about 550 pixels for a line of 78 monospaced characters — so
+// the characters column was cut off on the first disk anybody opened.
+//
+// Neither test names a pixel width. The fixed font is whatever the desktop
+// calls fixed-width and is a different size on two machines: measured here a
+// line wants 563px offscreen and 609px on the development display, so a test
+// written around 1100x700 passes in CI and fails on the desk.
+namespace {
+
+// The pane, and what one dump line measures in its font.
+QPair<QPlainTextEdit *, int> hexPaneOf(MainWindow &window) {
+    auto *hex = window.findChild<QPlainTextEdit *>(QStringLiteral("hex"));
+    if (!hex) return {nullptr, 0};
+    const QFontMetrics metrics(hex->font());
+    return {hex, metrics.horizontalAdvance(QString(hexview::LineLength, QChar('0')))};
+}
+
+// Open the fixture and select a file, so the pane holds a real dump.
+bool showADump(MainWindow &window, const QString &image) {
+    window.show();
+    window.openImage(image);
+    auto *tree = browser(window);
+    if (!tree || tree->topLevelItemCount() == 0) return false;
+    QTreeWidgetItem *file = childNamed(tree->topLevelItem(0), QStringLiteral("startup"));
+    if (!file) return false;
+    tree->setCurrentItem(file);
+    QApplication::processEvents();
+    return true;
+}
+
+}  // namespace
+
+void TestMainWindow::theHexPaneIsGivenTheRoomADumpLineNeeds() {
+    // Given a window with room to spare, the split must spend it on the pane
+    // that has a content width. This is the half that was wrong: an even split
+    // gave the tree more than it could use and the dump less than it needed.
+    MainWindow window;
+    const auto [hex, line] = hexPaneOf(window);
+    QVERIFY(hex);
+    window.resize(line + 700, 700);
+    QVERIFY(showADump(window, m_image));
+
+    QVERIFY2(hex->viewport()->width() >= line,
+             qPrintable(QStringLiteral("a dump line needs %1px, the pane has %2px")
+                            .arg(line)
+                            .arg(hex->viewport()->width())));
+    QVERIFY2(!hex->horizontalScrollBar()->isVisible(),
+             "no horizontal scrollbar on a freshly opened disk");
+}
+
+void TestMainWindow::theDefaultSizeFitsADumpLineWhereTheScreenAllows() {
+    // And the window must ask for that room itself, without being resized —
+    // which is the actual complaint. Skipped rather than failed on a display
+    // too small to hold a dump line beside a usable tree: the offscreen
+    // platform reports 800x800, where no split of the width fits.
+    MainWindow window;
+    const auto [hex, line] = hexPaneOf(window);
+    QVERIFY(hex);
+    const QScreen *screen = QGuiApplication::primaryScreen();
+    QVERIFY(screen);
+    if (screen->availableGeometry().width() < line + 400) {
+        QSKIP("this screen cannot hold a dump line beside a usable tree");
+    }
+    QVERIFY(showADump(window, m_image));
+
+    QVERIFY2(hex->viewport()->width() >= line,
+             qPrintable(QStringLiteral("at its own default size of %1px wide, a dump line needs "
+                                       "%2px and the pane has %3px")
+                            .arg(window.width())
+                            .arg(line)
+                            .arg(hex->viewport()->width())));
+}
+
+// Selecting the image row shows the whole disk, with its regions tinted (F-022).
+// A file view can never reach the bootblock, the rootblock, the bitmap, or the
+// space no directory entry points at — which on a damaged disk is where the
+// interesting part is.
+namespace {
+
+// Open the fixture and select the image's own row.
+MainWindow *diskWindow(const QString &image) {
+    auto *window = new MainWindow;
+    window->resize(1200, 700);
+    window->show();
+    window->openImage(image);
+    auto *tree = browser(*window);
+    if (tree && tree->topLevelItemCount() > 0) tree->setCurrentItem(tree->topLevelItem(0));
+    QApplication::processEvents();
+    return window;
+}
+
+// The background the highlighter painted on the line holding `offset`.
+QColor tintAt(QPlainTextEdit *hex, int offset) {
+    const QTextBlock block = hex->document()->findBlockByNumber(offset / hexview::BytesPerLine);
+    if (!block.isValid()) return {};
+    // Any range carrying a background. The wash is set across the whole line,
+    // but Qt splits it into fragments wherever the null dimming sets a
+    // foreground on top — so there is no single range spanning the line, which
+    // is what this looked for first and why it found nothing.
+    for (const auto &range : block.layout()->formats()) {
+        if (range.format.background().style() != Qt::NoBrush) {
+            return range.format.background().color();
+        }
+    }
+    return {};
+}
+
+}  // namespace
+
+void TestMainWindow::selectingTheDiskRowShowsTheWholeDisk() {
+    QScopedPointer<MainWindow> window(diskWindow(m_image));
+    auto *hex = window->findChild<QPlainTextEdit *>(QStringLiteral("hex"));
+    QVERIFY(hex);
+
+    // Not a file: the first line is the disk's own byte 0, which is `DOS`.
+    const QString text = hex->toPlainText();
+    QVERIFY2(text.startsWith(QStringLiteral("00000000  44 4f 53")), qPrintable(text.left(40)));
+
+    // And it is the whole disk, not a preview of the first block.
+    QCOMPARE(hex->document()->blockCount() - 1, 901120 / hexview::BytesPerLine);
+}
+
+void TestMainWindow::theWholeDiskViewTintsItsRegionsAndAFileViewDoesNot() {
+    QScopedPointer<MainWindow> window(diskWindow(m_image));
+    auto *hex = window->findChild<QPlainTextEdit *>(QStringLiteral("hex"));
+    QVERIFY(hex);
+
+    const QColor boot = tintAt(hex, 0);
+    QVERIFY2(boot.isValid(), "the bootblock is tinted");
+    QCOMPARE(boot, HexHighlighter::regionColour(hex->palette(), ADE_REGION_BOOTBLOCK));
+
+    // A DD floppy's rootblock is block 880, and it is a different colour.
+    const QColor root = tintAt(hex, 880 * 512);
+    QVERIFY2(root.isValid(), "the rootblock is tinted");
+    QVERIFY2(root != boot, "and not the same colour as the bootblock");
+
+    // Files are deliberately not tinted: they are most of a disk, and
+    // colouring everything is the same as colouring nothing.
+    QVERIFY(!HexHighlighter::regionColour(hex->palette(), ADE_REGION_FILE).isValid());
+
+    // Selecting a file afterwards clears the map. A leftover would colour the
+    // file's bytes by where some other view's offsets fell — the worst kind of
+    // wrong, because it looks deliberate.
+    auto *tree = browser(*window);
+    // Expanded first. A row inside a collapsed parent is a row nobody can
+    // click, and selecting one emits no `itemSelectionChanged` — which made
+    // this look like the window failing to clear its map, when it was the test
+    // driving an interaction the interface cannot produce.
+    tree->expandItem(tree->topLevelItem(0));
+    QTreeWidgetItem *file = childNamed(tree->topLevelItem(0), QStringLiteral("startup"));
+    QVERIFY(file);
+    // Selected explicitly, not just made current. The window listens for
+    // `itemSelectionChanged` and reads `selectedItems()`, and plain
+    // `setCurrentItem` was observed to move the current row without moving the
+    // selection — after which the window redrew the row that was still
+    // selected, which is the disk, and looked like a failure to clear.
+    tree->setCurrentItem(file, 0, QItemSelectionModel::ClearAndSelect);
+    QApplication::processEvents();
+    QVERIFY2(!tintAt(hex, 0).isValid(), "a file's own bytes are one region, so none is shown");
+}
+
+void TestMainWindow::theLegendNamesOnlyTheRegionsTheDiskHas() {
+    QScopedPointer<MainWindow> window(diskWindow(m_image));
+    auto *legend = window->findChild<QLabel *>(QStringLiteral("legend"));
+    QVERIFY(legend);
+    QVERIFY2(legend->isVisible(), "a colour nobody can name is decoration");
+
+    // Named from the engine, not from strings written in Qt — the GUI knows
+    // nothing about Amiga filesystems, and a legend written here would be the
+    // first thing to drift from --format=json.
+    for (int region : {ADE_REGION_BOOTBLOCK, ADE_REGION_ROOTBLOCK, ADE_REGION_FILE}) {
+        const QString name = QString::fromUtf8(ade_region_name(static_cast<AdeRegion>(region)));
+        QVERIFY2(legend->text().contains(name), qPrintable(name));
+    }
+
+    // Hidden again for a file, where there is nothing to explain.
+    auto *tree = browser(*window);
+    // Expanded first. A row inside a collapsed parent is a row nobody can
+    // click, and selecting one emits no `itemSelectionChanged` — which made
+    // this look like the window failing to clear its map, when it was the test
+    // driving an interaction the interface cannot produce.
+    tree->expandItem(tree->topLevelItem(0));
+    QTreeWidgetItem *file = childNamed(tree->topLevelItem(0), QStringLiteral("startup"));
+    QVERIFY(file);
+    // Selected explicitly, not just made current. The window listens for
+    // `itemSelectionChanged` and reads `selectedItems()`, and plain
+    // `setCurrentItem` was observed to move the current row without moving the
+    // selection — after which the window redrew the row that was still
+    // selected, which is the disk, and looked like a failure to clear.
+    tree->setCurrentItem(file, 0, QItemSelectionModel::ClearAndSelect);
+    QApplication::processEvents();
+    QVERIFY(!legend->isVisible());
 }
 
 QTEST_MAIN(TestMainWindow)

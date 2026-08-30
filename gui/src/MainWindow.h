@@ -14,6 +14,7 @@ class ImageTree;
 class QAction;
 class QLabel;
 class QLineEdit;
+class HexHighlighter;
 class HexPane;
 class QPlainTextEdit;
 class QTabWidget;
@@ -76,6 +77,8 @@ private:
     void showEntry(QTreeWidgetItem *item);
     const Open *imageFor(const QTreeWidgetItem *item) const;
     // A file entry's bytes, or empty for a directory or an unreadable one.
+    void showWholeDisk(QTreeWidgetItem *item);
+    void showLegend(const QVector<HexRegion> &regions);
     QByteArray contentsOf(QTreeWidgetItem *item) const;
     // One line describing an image: container, volume, size, findings.
     static QString describe(const Open &open);
@@ -96,6 +99,8 @@ private:
     ImageTree *m_tree = nullptr;
     ImageTree *m_results = nullptr;
     HexPane *m_hex = nullptr;
+    HexHighlighter *m_paint = nullptr;
+    QLabel *m_legend = nullptr;
     QPlainTextEdit *m_text = nullptr;
     QLineEdit *m_query = nullptr;
     QTabWidget *m_views = nullptr;

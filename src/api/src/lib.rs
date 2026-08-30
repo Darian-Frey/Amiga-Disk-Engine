@@ -15,6 +15,7 @@ pub mod find;
 pub mod health;
 pub mod inspect;
 pub mod json;
+pub mod layout;
 pub mod scan;
 
 pub use assemble::{Assembly, assemble};

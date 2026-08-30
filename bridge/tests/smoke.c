@@ -180,6 +180,42 @@ int main(int argc, char **argv) {
         ade_listing_free(walk);
     }
 
+    /* The disk map (F-022). Read from C because only a C compiler checks that
+       AdeSpan and AdeRegion in the header match what the library writes — a
+       struct that disagrees by one field silently mis-colours a hex view. */
+    AdeLayout *layout = ade_layout_open(image, ADE_WHOLE_IMAGE);
+    if (layout == NULL) {
+        printf("no layout (a device: only ADE_WHOLE_IMAGE is mapped)\n");
+    } else {
+        size_t n = ade_layout_count(layout);
+        printf("layout: %zu spans\n", n);
+        check(n > 1, "a formatted disk is more than one span");
+
+        uint64_t at = 0;
+        int gaps = 0, bootblocks = 0;
+        for (size_t i = 0; i < n; i++) {
+            AdeSpan span;
+            if (ade_layout_span(layout, i, &span) != ADE_OK) continue;
+            if (span.offset != at) gaps++;
+            at += span.length;
+            if (span.region == ADE_REGION_BOOTBLOCK) bootblocks++;
+            if (i < 6) {
+                printf("  %8llu +%-6llu %-10s ",
+                       (unsigned long long)span.offset,
+                       (unsigned long long)span.blocks,
+                       ade_region_name(span.region));
+                print_name(span.owner);
+                printf("\n");
+            }
+        }
+        check(gaps == 0, "the spans tile the image with no gaps");
+        check(bootblocks > 0, "the bootblock is named");
+        check(ade_region_name(99)[0] == '\0', "an unknown region is empty, not wrong");
+        printf("  legend: %s = %s\n", ade_region_name(ADE_REGION_UNCLAIMED),
+               ade_region_describes(ADE_REGION_UNCLAIMED));
+        ade_layout_free(layout);
+    }
+
     ade_image_free(image);
     printf("\n%s\n", failures ? "FAILURES" : "all checks passed");
     return failures ? 1 : 0;

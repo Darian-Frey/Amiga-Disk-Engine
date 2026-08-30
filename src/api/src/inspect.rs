@@ -1359,6 +1359,54 @@ impl Image {
         })
     }
 
+    /// Read a range of the mounted image.
+    ///
+    /// Offsets are in the space the image *mounts* in, not the file's — for an
+    /// ADZ the decompressed disk, for a flux capture the reconstruction. That
+    /// is the only space in which a block number means anything, and it is the
+    /// space [`crate::layout::Layout`] maps.
+    ///
+    /// A range running past the end is truncated rather than refused: a caller
+    /// scrolling to the bottom of a hex view asks for a round number of bytes
+    /// and should get what is there.
+    #[must_use]
+    pub fn read_range(&self, offset: u64, length: u64) -> Vec<u8> {
+        let geometry = self.geometry();
+        let block_size = u64::from(geometry.block_size());
+        let total = geometry.total_bytes();
+        if block_size == 0 || offset >= total {
+            return Vec::new();
+        }
+        let end = offset.saturating_add(length).min(total);
+        let first = offset.checked_div(block_size).unwrap_or(0);
+        let last = end.saturating_sub(1).checked_div(block_size).unwrap_or(0);
+
+        let mut out = Vec::new();
+        // `usize::try_from` rather than `as`: a block size is small everywhere
+        // ADE runs, but a cast that silently truncates on a 32-bit target would
+        // read the wrong bytes rather than fail, which is the failure mode this
+        // whole module exists to avoid.
+        let Ok(width) = usize::try_from(block_size) else {
+            return Vec::new();
+        };
+        let mut block = vec![0u8; width];
+        for index in first..=last {
+            if ade_block::read_at(self.source(), ade_block::BlockIndex(index), &mut block).is_err()
+            {
+                break;
+            }
+            // Trim the first and last blocks to the range actually asked for.
+            let base = index.saturating_mul(block_size);
+            let from = usize::try_from(offset.saturating_sub(base).min(block_size)).unwrap_or(0);
+            let to = usize::try_from(end.saturating_sub(base).min(block_size)).unwrap_or(width);
+            let Some(slice) = block.get(from..to) else {
+                break;
+            };
+            out.extend_from_slice(slice);
+        }
+        out
+    }
+
     /// The blocks behind this image, whichever way they are backed.
     pub(crate) fn source(&self) -> &dyn ade_block::BlockSource {
         self.backing.source()
