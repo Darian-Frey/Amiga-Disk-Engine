@@ -127,7 +127,7 @@ Neither run is the F-001 bar, which requires a fuzz corpus rather than well-form
 ## Phase 5 — Catalogue & GUI
 **Goal:** The single cross-platform application: capture-to-catalogue in one place.
 **Status:** In progress — the GUI landed 2026-08-27; F-005 and F-006 remain, both needing hardware
-**Features in scope:** F-004, F-005, F-006, F-013, F-014, F-019, F-020, F-021 *(the last three added to the phase during it, from the Atari feature map of 2026-08-29)*
+**Features in scope:** F-004, F-005, F-006, F-013, F-014, F-019, F-020, F-021, F-022, F-023 *(the last five added to the phase during it, from the Atari feature map)*
 **Deliverables:**
 - [x] **C-ABI bridge** (D-001) — the seam the GUI links against, and the only place in ADE that writes `unsafe`. Opaque handles, explicit frees, and an error code rather than a Rust `Result`. `bridge/include/ade.h` is hand-written: ADE has no dependencies and a header is the contract with every future caller.
   Three rules it exists to keep: **no panic crosses the boundary** (every entry point is wrapped in `catch_unwind`, because "should not panic" and "cannot unwind into C" are different claims); **names are bytes, not C strings** (Amiga filenames are Latin-1 and hold bytes above 0x7F, so a `char*` API would either lie about the encoding or mangle the name); and **null is tolerated everywhere**, since a C caller that has just had an error will pass one.
@@ -137,7 +137,7 @@ Neither run is the F-001 bar, which requires a fuzz corpus rather than well-form
   **Nothing in it knows anything about Amiga filesystems** — every fact on screen came through the bridge, so the window cannot drift from the CLI.
   **Search grew the ABI rather than the GUI.** Walking a disk safely is cycle detection (AV-001) and a depth bound (IMP-003); doing it in Qt would hang the window on an image the CLI handles. `ade_walk_open` was added instead, and `ade.h` documents it as existing so no future front end writes its own traversal.
   **Several images stay open at once**, each a root in the tree — without that, cross-image search has nothing to search. On 400 corpus images: 580 ms to open, 79 ms to search (7908 matches), 400 MB resident, since an open image is held in memory.
-  **39 headless tests** under `QT_QPA_PLATFORM=offscreen`, `-Wall -Wextra` clean, using a `mkfixture`-generated image (D-010 commits no binaries). Linux only so far: Qt6 and the C ABI are what make the other platforms possible, but neither has been built.
+  **42 headless tests** under `QT_QPA_PLATFORM=offscreen`, `-Wall -Wextra` clean, using a `mkfixture`-generated image (D-010 commits no binaries). Linux only so far: Qt6 and the C ABI are what make the other platforms possible, but neither has been built.
 - [x] **RDB partition browsing in the GUI (F-018's second half)** — a hard disk opens as its partitions, each with its files beneath it, and search covers every one of them. Reading has worked since 2026-08-24; what was missing was any way to see it that was not `--partition=` on a command line.
   **The ABI grew a selector rather than a second family of calls.** `ade_dir_open`, `ade_walk_open` and `ade_file_read` take a partition index or `ADE_WHOLE_IMAGE`, because a device is not a special case of an image — it is what an image is when it has an RDB. `ade_partitions_open` returns the table, and reports **whether each partition mounts** separately from whether it is flagged bootable: a `PFS\0` partition is a real partition ADE cannot read, and an empty listing would read as an empty disk.
   **A partition is not an offset.** Its own block size and reserved count determine where the rootblock sits (C-007), so the engine resolves it from an index rather than the front end adding numbers together.
@@ -146,6 +146,7 @@ Neither run is the F-001 bar, which requires a fuzz corpus rather than well-form
   D-004 permits it rather than being waived: its rule is that a write path ships once its read path is proven on fixtures, and OFS/FFS reading is proven across 4,652 corpus images at 99.36% agreement with ADFlib.
   **Written from SPEC, not from `ade-fixtures`** — reusing the generator would have destroyed the independence D-010 keeps it for. There are now three independent statements of what a blank disk is, and the tests require all three to agree: ADE reads it back, the generator matches structurally, ADFlib mounts it. Verified for OFS and FFS, DD and HD.
 - [x] **Content signature scanner (F-020)** — `ade scan`, 25 magics searched across the whole image rather than across its files. The table is measured against all 4,652 corpus images and the counts are in SPEC §Content signatures; anything with no corpus hits is recorded as untested rather than trusted. It found nine images carrying **xDMS failure filler**, damage the catalogue names had missed on eight of them.
+- [x] **Content search in the window (F-023)** — the search box gains a **Contents** mode beside **Names**, searching the bytes of every open image rather than their filenames. Clicking a hit goes to it in the whole-disk view, scrolled with a few lines of lead and the byte highlighted. A refused pattern reports why rather than showing "0 matches", because "never searched" and "not there" must not look alike.
 - [x] **Content search (F-021)** — `ade find`, text or hex, over the whole image. Every hit is attributed to a **region** — bootblock, rootblock, bitmap, directory, file or unclaimed — which a measurement forced: `Copylock` appears on 103 of 4,652 corpus images, in the bootblock on 86 and in the *rootblock* on 10, where it is the volume's own name. "No owning file" had to stop meaning "unallocated". SPEC §Where a match lands.
 - [ ] In-app Greaseweazle read/write (F-006); end-to-end pipeline wired (F-005).
 - [x] **Auto-identification against TOSEC (F-013)** — `ade identify --datfiles=DIR <image>...` names images by content hash, and `ade batch --datfiles=DIR` catalogues a whole corpus in one pass. `ade-catalogue` parses Logiqx XML datfiles and indexes them by CRC32.
@@ -177,7 +178,7 @@ The predecessor is a single-disk Qt application for Atari ST `.st`/`.msa`/`.stx`
 | Disk Information, Disk Size Chart | Delivered, `ade info` (`--format=json` for the numbers) |
 | Format Disk / blank disk | Delivered, F-019 `ade create` |
 | Hex view, colour legend, full-disk view | Delivered, F-004 and F-022 — the whole disk, its regions tinted, with a legend naming only the regions that disk has |
-| Find in hex view | **Not delivered.** See **Content search in the window** below |
+| Find in hex view | Delivered, F-023 — the search box's Contents mode, across every open image rather than the one on screen |
 | Make Disk Bootable | **Declined.** ADE will not write boot code it would then refuse to interpret. AV-002's defence is structural — no interpreter, no emulator, no execution path — and writing a bootblock is the one operation that makes ADE a vector rather than a reader. `ade create` leaves boot code zeroed on purpose, exactly as AmigaDOS's own `format` does without `install`. |
 | MSA / STX decoding | **Not applicable.** Atari containers. The Amiga equivalents are mapped already: ADZ/HDZ delivered, DMS blocked by D-009, IPF refused by C-003. |
 | FAT1/FAT2 symmetry, `syncFat1ToFat2`, `repairFatSize` | **Not applicable.** OFS/FFS has no FAT. The analogue is the block bitmap, which `ade check` already cross-checks and can compute a rebuild for — never applied, per D-004. |
@@ -187,7 +188,7 @@ The predecessor is a single-disk Qt application for Atari ST `.st`/`.msa`/`.stx`
 
 Sized S/M/L on ADE's terms, with the constraint each one runs into. **None of these is committed**; several need a DECISIONS entry before any code.
 
-- **Content search in the window** (S). F-021 is CLI-only. The GUI searches *names* across every open image; it cannot search *contents* at all, and the engine work is done — `Search::run` already returns offsets, blocks, owners and regions. This is a bridge call and a results tab. The smallest genuine gap on the list and the one a user meets first.
+- ~~**Content search in the window**~~ — **delivered 2026-08-30 as F-023**, the search box's Contents mode. It was the smallest genuine gap on this list and the one a user met first.
 
 - **Extract everything to a folder** (S). Atari has "Extract All Files to Folder"; ADE's `extract` takes one path at a time, and the GUI extracts by dragging one file. Whole-image extraction exists nowhere. Walking and writing are both solved (`volume.walk`, `ade batch`'s per-image loop) — what is missing is the command. Needs a position on name collisions and on the Latin-1-to-host filename mapping, which is where an Amiga name meets a filesystem that will not take it.
 

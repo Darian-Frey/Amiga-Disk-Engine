@@ -22,6 +22,7 @@
 #include <QTemporaryDir>
 #include <QTest>
 #include <QClipboard>
+#include <QComboBox>
 #include <QItemSelectionModel>
 #include <QStatusBar>
 #include <QTreeWidgetItemIterator>
@@ -94,6 +95,9 @@ private slots:
     void theFollowStopsWhenAFileIsShown();
     void thereIsAHelpMenuWithAnAboutBox();
     void theAboutBoxTakesItsVersionFromTheEngine();
+    void theSearchBoxCanSearchContentsInsteadOfNames();
+    void aRefusedPatternSaysWhyRatherThanFindingNothing();
+    void clickingAContentHitGoesToItInTheWholeDiskView();
     void theHexPaneIsGivenTheRoomADumpLineNeeds();
     void theDefaultSizeFitsADumpLineWhereTheScreenAllows();
     void selectingHexMarksTheCharactersThoseBytesSpell();
@@ -1176,6 +1180,102 @@ void TestMainWindow::theAboutBoxTakesItsVersionFromTheEngine() {
     // xDMS in, this line has to change with it.
     QVERIFY(MainWindow::aboutDetail().contains(QStringLiteral("Apache License 2.0")));
     QVERIFY(MainWindow::aboutDetail().contains(QStringLiteral("no third-party code")));
+}
+
+// Content search in the window (F-021 through the ABI).
+namespace {
+
+// Run a search in the given mode and return the results tree.
+ImageTree *runSearch(MainWindow &window, int mode, const QString &query) {
+    auto *box = window.findChild<QComboBox *>(QStringLiteral("mode"));
+    auto *field = window.findChild<QLineEdit *>();
+    box->setCurrentIndex(mode);
+    field->setText(query);
+    emit field->returnPressed();
+    QApplication::processEvents();
+    return results(window);
+}
+
+}  // namespace
+
+void TestMainWindow::theSearchBoxCanSearchContentsInsteadOfNames() {
+    MainWindow window;
+    window.resize(1200, 700);
+    window.show();
+    window.openImage(m_image);
+
+    // Names first, which is what the box has always done.
+    ImageTree *found = runSearch(window, 0, QStringLiteral("startup"));
+    QVERIFY(found->topLevelItemCount() > 0);
+    QCOMPARE(found->headerItem()->text(0), QStringLiteral("Name"));
+
+    // Then contents: the same box, a different question, and columns that suit
+    // the answer — an offset and what part of the disk it landed in.
+    found = runSearch(window, 1, QStringLiteral("DOS"));
+    QCOMPARE(found->headerItem()->text(0), QStringLiteral("Offset"));
+    QVERIFY2(found->topLevelItemCount() > 0, "every AmigaDOS disk says DOS in its bootblock");
+
+    // The first hit is block 0, and it is named as the bootblock rather than
+    // as unallocated space.
+    QCOMPARE(found->topLevelItem(0)->text(0), QStringLiteral("0"));
+    QVERIFY2(found->topLevelItem(0)->text(1).contains(QStringLiteral("bootblock")),
+             qPrintable(found->topLevelItem(0)->text(1)));
+
+    // Contents reaches what names cannot: the bootblock is in no file.
+    QVERIFY(status(window).contains(QStringLiteral("match")));
+}
+
+void TestMainWindow::aRefusedPatternSaysWhyRatherThanFindingNothing() {
+    // "The pattern was refused" and "the pattern is not on this disk" are
+    // different answers. Reporting the first as `0 matches` would have someone
+    // conclude their disk is clean when nothing was ever searched — the same
+    // distinction the command line draws with exit 2 against exit 1.
+    MainWindow window;
+    window.resize(1200, 700);
+    window.show();
+    window.openImage(m_image);
+
+    ImageTree *found = runSearch(window, 1, QStringLiteral("0x601"));
+    QCOMPARE(found->topLevelItemCount(), 0);
+    QVERIFY2(status(window).contains(QStringLiteral("Cannot search")), qPrintable(status(window)));
+    QVERIFY2(status(window).contains(QStringLiteral("hex digits")), qPrintable(status(window)));
+
+    // Against a pattern that is fine and simply is not there.
+    found = runSearch(window, 1, QStringLiteral("zzzznotonthisdisk"));
+    QCOMPARE(found->topLevelItemCount(), 0);
+    QVERIFY2(status(window).contains(QStringLiteral("0 matches")), qPrintable(status(window)));
+    QVERIFY(!status(window).contains(QStringLiteral("Cannot search")));
+}
+
+void TestMainWindow::clickingAContentHitGoesToItInTheWholeDiskView() {
+    // A list of offsets you cannot go to is half a feature.
+    MainWindow window;
+    window.resize(1200, 700);
+    window.show();
+    window.openImage(m_image);
+    ImageTree *found = runSearch(window, 1, QStringLiteral("hello from a generated fixture"));
+    QVERIFY2(found->topLevelItemCount() > 0, "the fixture's own file contents");
+
+    const quint64 offset = found->topLevelItem(0)->text(0).toULongLong();
+    QVERIFY(offset > 0);
+    found->setCurrentItem(found->topLevelItem(0), 0, QItemSelectionModel::ClearAndSelect);
+    QApplication::processEvents();
+
+    auto *hex = window.findChild<QPlainTextEdit *>(QStringLiteral("hex"));
+    QVERIFY(hex);
+    // The whole disk, not the file: the hit is an offset into the image.
+    QCOMPARE(hex->document()->blockCount() - 1, 901120 / hexview::BytesPerLine);
+
+    // Scrolled so the hit is on screen, with a few lines of lead — a match on
+    // the very first visible line reads as the top of the view rather than as
+    // a result.
+    const int hitLine = static_cast<int>(offset / hexview::BytesPerLine);
+    const int top = hex->verticalScrollBar()->value();
+    QVERIFY2(top <= hitLine && hitLine - top <= 6,
+             qPrintable(QStringLiteral("hit on line %1, view at %2").arg(hitLine).arg(top)));
+
+    // And the hit itself is highlighted, so it can be picked out of the line.
+    QVERIFY(!hex->extraSelections().isEmpty());
 }
 
 QTEST_MAIN(TestMainWindow)

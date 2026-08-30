@@ -774,3 +774,124 @@ fn a_layout_tiles_the_whole_image_and_tolerates_null() {
         ade::ade_layout_free(std::ptr::null_mut());
     }
 }
+
+#[test]
+fn a_content_search_finds_and_attributes_its_hits() {
+    let (path, c_path) = fixture("find", &sound_disk());
+    let mut err = AdeResult::Ok;
+    // SAFETY: valid path, no catalogue, writable slot.
+    let image = unsafe { ade::ade_image_open(c_path.as_ptr(), std::ptr::null(), &raw mut err) };
+    assert!(!image.is_null());
+
+    let needle = std::ffi::CString::new("DOS").unwrap();
+    // SAFETY: a live handle and a NUL-terminated pattern.
+    let search = unsafe { ade::ade_find_open(image, needle.as_ptr(), false, false) };
+    assert!(!search.is_null());
+    // SAFETY: a live handle.
+    assert_eq!(
+        unsafe { ade::ade_find_error(search) }.len,
+        0,
+        "a good pattern"
+    );
+    // SAFETY: a live handle.
+    assert!(!unsafe { ade::ade_find_was_hex(search) }, "`DOS` is a word");
+    // SAFETY: a live handle.
+    let count = unsafe { ade::ade_find_count(search) };
+    assert!(count > 0, "every AmigaDOS disk says `DOS` in its bootblock");
+
+    let mut hit = unsafe { std::mem::zeroed::<ade::AdeMatch>() };
+    // SAFETY: a live handle and a writable slot.
+    assert_eq!(
+        unsafe { ade::ade_find_match(search, 0, &raw mut hit) },
+        AdeResult::Ok
+    );
+    assert_eq!(hit.offset, 0, "block 0, byte 0");
+    assert_eq!(hit.region, 0, "and that is the bootblock");
+
+    // Past the end is NotFound, not a crash.
+    // SAFETY: a live handle and a writable slot.
+    assert_eq!(
+        unsafe { ade::ade_find_match(search, count, &raw mut hit) },
+        AdeResult::NotFound
+    );
+    // SAFETY: a live handle.
+    unsafe { ade::ade_find_free(search) };
+
+    // SAFETY: a live handle.
+    unsafe { ade::ade_image_free(image) };
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn a_refused_pattern_is_not_a_search_that_found_nothing() {
+    // The distinction the command line draws with exit 2 against exit 1, and
+    // the reason `ade_find_open` returns a handle rather than null for a bad
+    // pattern: "ask me again" and "it is not there" must not look alike.
+    let (path, c_path) = fixture("badpattern", &sound_disk());
+    let mut err = AdeResult::Ok;
+    // SAFETY: valid path, no catalogue, writable slot.
+    let image = unsafe { ade::ade_image_open(c_path.as_ptr(), std::ptr::null(), &raw mut err) };
+    assert!(!image.is_null());
+
+    let bad = std::ffi::CString::new("0x601").unwrap();
+    // SAFETY: a live handle and a NUL-terminated pattern.
+    let search = unsafe { ade::ade_find_open(image, bad.as_ptr(), false, false) };
+    assert!(!search.is_null(), "refused, not absent");
+    // SAFETY: a live handle.
+    let why = unsafe { ade::ade_find_error(search) };
+    assert!(why.len > 0, "and it says why");
+    // SAFETY: `why` borrows the live search.
+    let message = unsafe { std::slice::from_raw_parts(why.data, why.len) };
+    assert!(
+        String::from_utf8_lossy(message).contains("hex digits"),
+        "{}",
+        String::from_utf8_lossy(message)
+    );
+    // SAFETY: a live handle.
+    assert_eq!(unsafe { ade::ade_find_count(search) }, 0);
+    // SAFETY: a live handle.
+    unsafe { ade::ade_find_free(search) };
+
+    // A pattern that is fine but matches nothing: no error, no matches.
+    let absent = std::ffi::CString::new("zzzznotonthisdisk").unwrap();
+    // SAFETY: a live handle and a NUL-terminated pattern.
+    let empty = unsafe { ade::ade_find_open(image, absent.as_ptr(), false, false) };
+    assert!(!empty.is_null());
+    // SAFETY: a live handle.
+    assert_eq!(
+        unsafe { ade::ade_find_error(empty) }.len,
+        0,
+        "nothing wrong"
+    );
+    // SAFETY: a live handle.
+    assert_eq!(unsafe { ade::ade_find_count(empty) }, 0, "just not there");
+    // SAFETY: a live handle.
+    unsafe { ade::ade_find_free(empty) };
+
+    // SAFETY: a live handle.
+    unsafe { ade::ade_image_free(image) };
+    let _ = std::fs::remove_file(&path);
+
+    // SAFETY: null is allowed at every entry point.
+    unsafe {
+        // Not null even here: a handle carrying the reason, which is this
+        // call's whole contract.
+        let nothing = ade::ade_find_open(std::ptr::null(), bad.as_ptr(), false, false);
+        assert!(!nothing.is_null());
+        assert!(ade::ade_find_error(nothing).len > 0);
+        ade::ade_find_free(nothing);
+
+        let no_pattern = ade::ade_find_open(std::ptr::null(), std::ptr::null(), false, false);
+        assert!(!no_pattern.is_null());
+        assert!(ade::ade_find_error(no_pattern).len > 0);
+        ade::ade_find_free(no_pattern);
+        assert_eq!(ade::ade_find_count(std::ptr::null()), 0);
+        assert_eq!(ade::ade_find_error(std::ptr::null()).len, 0);
+        assert!(!ade::ade_find_was_hex(std::ptr::null()));
+        assert_eq!(
+            ade::ade_find_match(std::ptr::null(), 0, std::ptr::null_mut()),
+            AdeResult::NullArgument
+        );
+        ade::ade_find_free(std::ptr::null_mut());
+    }
+}

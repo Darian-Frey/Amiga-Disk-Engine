@@ -907,6 +907,189 @@ pub unsafe extern "C" fn ade_layout_free(layout: *mut AdeLayout) {
     });
 }
 
+/// A content search over one image. Opaque to C.
+pub struct AdeSearch {
+    /// Owns the owner strings the matches point into.
+    #[allow(dead_code, reason = "keeps the owner buffers alive for `matches`")]
+    owners: Vec<Vec<u8>>,
+    matches: Vec<AdeMatch>,
+    /// Why the pattern was refused, empty when it was not.
+    error: Vec<u8>,
+    was_hex: bool,
+}
+
+/// One place a pattern was found. Mirrors `AdeMatch` in `ade.h`.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct AdeMatch {
+    /// Byte offset into the mounted image.
+    pub offset: u64,
+    /// The block it falls in.
+    pub block: u64,
+    /// What that part of the disk is.
+    pub region: u32,
+    /// The owning path, Latin-1; empty when nothing owns it.
+    pub owner: AdeBytes,
+    /// The owning entry's block, or 0 for none.
+    pub owner_block: u32,
+}
+
+/// Search an image for text or hex (F-021).
+///
+/// **This one does not return null.** Every other opening call in this ABI
+/// answers failure with a null pointer; this answers it with a handle carrying
+/// the reason, because the reason is the useful part. A search that could not
+/// run and a search that found nothing are different answers and must not look
+/// alike — the first means "ask me again", the second means "it is not there",
+/// which is the distinction the command line draws with exit 2 against exit 1.
+/// A null pointer here would collapse them back together and throw away the
+/// message a front end wants to show.
+///
+/// So: always check [`ade_find_error`] first. Non-empty means no search
+/// happened. Null is returned only if the allocation itself fails.
+///
+/// Release with [`ade_find_free`].
+///
+/// # Safety
+/// `image` must be a live handle or null, and `pattern` a NUL-terminated string
+/// or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ade_find_open(
+    image: *const AdeImage,
+    pattern: *const c_char,
+    text: bool,
+    ignore_case: bool,
+) -> *mut AdeSearch {
+    use ade_core::layers::object::find::Pattern;
+
+    guard(std::ptr::null_mut(), || {
+        if pattern.is_null() {
+            return refused(b"no pattern given".to_vec());
+        }
+        // SAFETY: checked non-null; the caller promises NUL termination.
+        let Ok(text_pattern) = (unsafe { CStr::from_ptr(pattern) }).to_str() else {
+            return refused(b"the pattern is not valid UTF-8".to_vec());
+        };
+        let parsed = match Pattern::parse(text_pattern, text, ignore_case) {
+            Ok(p) => p,
+            Err(e) => return refused(e.to_string().into_bytes()),
+        };
+
+        // SAFETY: the caller's contract; null is checked inside.
+        let found = unsafe { image.as_ref() }
+            .and_then(|handle| handle.image.as_ref())
+            .map(|open| ade_core::find::Search::of_image(open, &parsed));
+        let Some(found) = found else {
+            return refused(b"the image could not be searched".to_vec());
+        };
+
+        let mut owners: Vec<Vec<u8>> = Vec::with_capacity(found.matches.len());
+        let mut matches = Vec::with_capacity(found.matches.len());
+        for hit in &found.matches {
+            owners.push(hit.owner.clone().unwrap_or_default().into_bytes());
+            let at = owners.len().saturating_sub(1);
+            matches.push(AdeMatch {
+                offset: hit.at.offset,
+                block: hit.at.block,
+                region: hit.region as u32,
+                owner: AdeBytes::of(owners.get(at).map_or(&[][..], Vec::as_slice)),
+                owner_block: hit.owner_block.unwrap_or(0),
+            });
+        }
+        Box::into_raw(Box::new(AdeSearch {
+            owners,
+            matches,
+            error: Vec::new(),
+            was_hex: found.was_hex,
+        }))
+    })
+}
+
+/// A search that never happened, carrying why.
+fn refused(why: Vec<u8>) -> *mut AdeSearch {
+    Box::into_raw(Box::new(AdeSearch {
+        owners: Vec::new(),
+        matches: Vec::new(),
+        error: why,
+        was_hex: false,
+    }))
+}
+
+/// How many matches the search found.
+///
+/// # Safety
+/// `search` must be a live handle or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ade_find_count(search: *const AdeSearch) -> usize {
+    guard(0, || {
+        // SAFETY: the caller's contract; null is checked.
+        unsafe { search.as_ref() }.map_or(0, |s| s.matches.len())
+    })
+}
+
+/// Copy match `index` into `*out`.
+///
+/// # Safety
+/// `search` must be a live handle or null, and `out` writable or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ade_find_match(
+    search: *const AdeSearch,
+    index: usize,
+    out: *mut AdeMatch,
+) -> AdeResult {
+    guard(AdeResult::Internal, || {
+        // SAFETY: the caller's contract; both are checked.
+        let (Some(search), Some(out)) = (unsafe { search.as_ref() }, unsafe { out.as_mut() })
+        else {
+            return AdeResult::NullArgument;
+        };
+        let Some(hit) = search.matches.get(index) else {
+            return AdeResult::NotFound;
+        };
+        *out = *hit;
+        AdeResult::Ok
+    })
+}
+
+/// Whether the pattern was read as hex rather than as text.
+///
+/// # Safety
+/// `search` must be a live handle or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ade_find_was_hex(search: *const AdeSearch) -> bool {
+    guard(false, || {
+        // SAFETY: the caller's contract; null is checked.
+        unsafe { search.as_ref() }.is_some_and(|s| s.was_hex)
+    })
+}
+
+/// Why the pattern was refused, or empty if it was not.
+///
+/// # Safety
+/// `search` must be a live handle or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ade_find_error(search: *const AdeSearch) -> AdeBytes {
+    guard(AdeBytes::empty(), || {
+        // SAFETY: the caller's contract; null is checked.
+        unsafe { search.as_ref() }.map_or_else(AdeBytes::empty, |s| AdeBytes::of(&s.error))
+    })
+}
+
+/// Release a search.
+///
+/// # Safety
+/// `search` must have come from [`ade_find_open`], or be null, and must not be
+/// used afterwards.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ade_find_free(search: *mut AdeSearch) {
+    guard((), || {
+        if !search.is_null() {
+            // SAFETY: the caller's contract.
+            drop(unsafe { Box::from_raw(search) });
+        }
+    });
+}
+
 /// A region's short name, for a legend. Static; never freed.
 ///
 /// # Safety

@@ -477,6 +477,7 @@ fn a_search_emits_exactly_these_fields() {
             "matches[].offset",
             "matches[].block",
             "matches[].file",
+            "matches[].file_block",
             "matches[].region",
         ],
     );

@@ -13,6 +13,7 @@
 class ImageTree;
 class QAction;
 class QLabel;
+class QComboBox;
 class QLineEdit;
 class QTimer;
 /// How the tree stores what each row stands for.
@@ -37,6 +38,10 @@ constexpr int RoleImage = Qt::UserRole + 4;
 // nothing without the volume it belongs to, and on a hard disk the same number
 // is a different block in every partition.
 constexpr int RolePartition = Qt::UserRole + 5;
+/// Where in the image a content-search hit was found. Only search-result rows
+/// carry it; its absence is what tells a click that the row is a file rather
+/// than an offset.
+constexpr int RoleOffset = Qt::UserRole + 6;
 }  // namespace tree
 
 class HexHighlighter;
@@ -66,6 +71,8 @@ public:
 
 private slots:
     void showAbout();
+    void updateSearchHint();
+    void searchContents(const QString &query);
 
 public:
 
@@ -116,6 +123,7 @@ private:
     void showEntry(QTreeWidgetItem *item);
     const Open *imageFor(const QTreeWidgetItem *item) const;
     // A file entry's bytes, or empty for a directory or an unreadable one.
+    void showHit(QTreeWidgetItem *item);
     void showWholeDisk(QTreeWidgetItem *item);
     void showLegend(const QVector<HexRegion> &regions);
     void markWhatIsOnScreen();
@@ -141,6 +149,9 @@ private:
     ImageTree *m_results = nullptr;
     HexPane *m_hex = nullptr;
     HexHighlighter *m_paint = nullptr;
+    QComboBox *m_mode = nullptr;
+    /// The Hex tab's page, so a search hit can bring it to the front.
+    QWidget *m_hexTab = nullptr;
     QLabel *m_legend = nullptr;
     /// The open disk's map, while the whole-disk view is showing it.
     QVector<HexRegion> m_diskRegions;

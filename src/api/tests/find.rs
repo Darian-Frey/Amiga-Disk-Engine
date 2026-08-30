@@ -201,3 +201,29 @@ fn image_range(bytes: &[u8], offset: u64, length: u64) -> Vec<u8> {
         .map(|i| i.read_range(offset, length))
         .unwrap_or_default()
 }
+
+#[test]
+fn searching_an_open_image_gives_the_same_answer_as_searching_its_bytes() {
+    // Two entry points, one result. `of_image` exists so a caller holding a
+    // mounted image does not pay for a second copy of the disk and a second
+    // walk of its directory tree — it must not also give a different answer.
+    let mut v = Fixture::dd(1).named("Both");
+    v.add_file("s/startup-sequence", b"C:SetPatch QUIET\nLoadWB\n");
+    v.add_dir("Tools");
+    let bytes = v.build();
+    let image = ade_core::Image::from_bytes(bytes.clone()).unwrap();
+
+    for text in ["LoadWB", "DOS", "Tools"] {
+        let p = pattern(text);
+        let from_bytes = Search::run(&bytes, &p);
+        let from_image = Search::of_image(&image, &p);
+
+        assert_eq!(from_image.scanned, from_bytes.scanned, "{text}");
+        assert_eq!(from_image.matches.len(), from_bytes.matches.len(), "{text}");
+        for (a, b) in from_image.matches.iter().zip(&from_bytes.matches) {
+            assert_eq!(a.at, b.at, "{text}");
+            assert_eq!(a.owner, b.owner, "{text}");
+            assert_eq!(a.region, b.region, "{text}");
+        }
+    }
+}

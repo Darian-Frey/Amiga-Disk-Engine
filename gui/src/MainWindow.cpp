@@ -12,6 +12,8 @@
 #include <QFont>
 #include <QFontMetrics>
 #include <QGuiApplication>
+#include <QComboBox>
+#include <QHBoxLayout>
 #include <QHeaderView>
 #include <QScreen>
 #include <QStyle>
@@ -194,7 +196,8 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
     m_legend->setContentsMargins(4, 2, 4, 2);
     m_legend->hide();
 
-    auto *hexTab = new QWidget(this);
+    m_hexTab = new QWidget(this);
+    auto *hexTab = m_hexTab;
     auto *hexLayout = new QVBoxLayout(hexTab);
     hexLayout->setContentsMargins(0, 0, 0, 0);
     hexLayout->setSpacing(0);
@@ -213,10 +216,30 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
     m_query->setClearButtonEnabled(true);
     connect(m_query, &QLineEdit::returnPressed, this, &MainWindow::search);
 
+    // Names or contents, beside the box rather than as a second box. They are
+    // the same question asked of two different things, and two boxes would
+    // leave one of them stale and wrong-looking whenever the other was used.
+    m_mode = new QComboBox(this);
+    m_mode->setObjectName(QStringLiteral("mode"));
+    m_mode->addItem(QStringLiteral("Names"));
+    m_mode->addItem(QStringLiteral("Contents"));
+    m_mode->setToolTip(QStringLiteral(
+        "Names searches every filename on every open disk.\n"
+        "Contents searches the bytes of every open disk, including the parts "
+        "no file occupies."));
+    connect(m_mode, &QComboBox::currentIndexChanged, this, [this] { updateSearchHint(); });
+    updateSearchHint();
+
+    auto *queryRow = new QWidget(this);
+    auto *queryLayout = new QHBoxLayout(queryRow);
+    queryLayout->setContentsMargins(0, 0, 0, 0);
+    queryLayout->addWidget(m_query);
+    queryLayout->addWidget(m_mode);
+
     auto *left = new QWidget(this);
     auto *leftLayout = new QVBoxLayout(left);
     leftLayout->setContentsMargins(0, 0, 0, 0);
-    leftLayout->addWidget(m_query);
+    leftLayout->addWidget(queryRow);
     leftLayout->addWidget(m_tree);
 
     auto *splitter = new QSplitter(Qt::Horizontal, this);
@@ -601,11 +624,30 @@ void MainWindow::populate(QTreeWidgetItem *parent, const Open &open, quint32 par
     }
 }
 
+/// The placeholder and the results columns follow the mode.
+void MainWindow::updateSearchHint() {
+    const bool contents = m_mode && m_mode->currentIndex() == 1;
+    m_query->setPlaceholderText(
+        contents ? QStringLiteral("Search the bytes of all open images: text, or hex like 60 1A...")
+                 : QStringLiteral("Search all open images by name..."));
+    m_results->setHeaderLabels(contents
+                                   ? QStringList{QStringLiteral("Offset"), QStringLiteral("Where"),
+                                                 QStringLiteral("Image")}
+                                   : QStringList{QStringLiteral("Name"), QStringLiteral("Path"),
+                                                 QStringLiteral("Image")});
+}
+
 void MainWindow::search() {
     m_results->clear();
     const QString query = m_query->text().trimmed();
     if (query.isEmpty()) {
-        statusBar()->showMessage(QStringLiteral("Type a name to search for"));
+        statusBar()->showMessage(m_mode && m_mode->currentIndex() == 1
+                                     ? QStringLiteral("Type text or hex to search the disks for")
+                                     : QStringLiteral("Type a name to search for"));
+        return;
+    }
+    if (m_mode && m_mode->currentIndex() == 1) {
+        searchContents(query);
         return;
     }
 
@@ -792,6 +834,65 @@ QString MainWindow::aboutDetail() {
         .arg(QString::fromLatin1(qVersion()));
 }
 
+void MainWindow::searchContents(const QString &query) {
+    const QByteArray pattern = query.toUtf8();
+    int hits = 0;
+    QString refused;
+
+    for (const auto &open : m_images) {
+        const ade::Search found = open->image.find(pattern.constData());
+        if (!found) continue;
+        // A refused pattern is not a search that found nothing, and the two
+        // must not look alike. One image is enough to learn the pattern is bad
+        // — it is the same pattern for all of them.
+        if (!found.error().isEmpty()) {
+            refused = found.error();
+            break;
+        }
+        for (size_t i = 0; i < found.count(); ++i) {
+            AdeMatch hit{};
+            if (!found.at(i, &hit)) continue;
+            const QString owner = ade::latin1(hit.owner);
+            const QString region =
+                QString::fromUtf8(ade_region_name(static_cast<AdeRegion>(hit.region)));
+
+            auto *item = new QTreeWidgetItem(m_results);
+            item->setText(0, QString::number(hit.offset));
+            item->setText(1, owner.isEmpty() ? QStringLiteral("(%1)").arg(region)
+                                             : QStringLiteral("%1  %2").arg(region, owner));
+            item->setText(2, open->name);
+            item->setTextAlignment(0, Qt::AlignRight | Qt::AlignVCenter);
+            item->setData(0, RoleImage, static_cast<qulonglong>(open->index));
+            item->setData(0, RolePartition, ADE_WHOLE_IMAGE);
+            item->setData(0, RoleOffset, static_cast<qulonglong>(hit.offset));
+            // A hit inside a file carries that file's block, so the row drags
+            // out as the file — the same as a row found by name. A hit in the
+            // bootblock or in unclaimed space carries none, and drags nothing,
+            // because there is no file to give.
+            if (hit.owner_block != 0) {
+                item->setData(0, RoleBlock, hit.owner_block);
+                item->setData(0, RoleIsDir, false);
+            }
+            item->setToolTip(1, item->text(1));
+            item->setToolTip(2, open->path);
+            ++hits;
+        }
+    }
+
+    m_views->setCurrentWidget(m_results);
+    if (!refused.isEmpty()) {
+        m_results->clear();
+        statusBar()->showMessage(QStringLiteral("Cannot search for \"%1\": %2").arg(query, refused));
+        return;
+    }
+    statusBar()->showMessage(QStringLiteral("%1 match%2 for \"%3\" in %4 image%5")
+                                 .arg(hits)
+                                 .arg(hits == 1 ? "" : "es")
+                                 .arg(query)
+                                 .arg(m_images.size())
+                                 .arg(m_images.size() == 1 ? "" : "s"));
+}
+
 void MainWindow::showAbout() {
     QMessageBox about(this);
     about.setWindowTitle(QStringLiteral("About Amiga Disk Engine"));
@@ -849,6 +950,24 @@ void MainWindow::showLegend(const QVector<HexRegion> &regions) {
     m_legend->setText(parts.join(QStringLiteral("&nbsp;&nbsp;&nbsp;&nbsp;")));
     m_legend->setToolTip(tips.join(QStringLiteral("<br>")));
     m_legend->show();
+}
+
+void MainWindow::showHit(QTreeWidgetItem *item) {
+    showWholeDisk(item);
+    const quint64 offset = item->data(0, RoleOffset).toULongLong();
+
+    // A few lines above the hit rather than at the very top: a match on the
+    // first visible line looks like the top of the view rather than like a
+    // result, and the bytes before it are usually what makes it legible.
+    constexpr int Lead = 3;
+    const int line = static_cast<int>(offset / hexview::BytesPerLine);
+    m_hex->verticalScrollBar()->setValue(qMax(0, line - Lead));
+    // The hit itself, selected in the hex field so it is visible as well as
+    // scrolled to. Two bytes is a placeholder for "here": the pane's selection
+    // is per-field, and the search does not report the pattern's length.
+    m_hex->selectBytesAt(offset);
+    m_views->setCurrentWidget(m_hexTab);
+    markWhatIsOnScreen();
 }
 
 void MainWindow::showWholeDisk(QTreeWidgetItem *item) {
@@ -918,6 +1037,14 @@ QByteArray MainWindow::contentsOf(QTreeWidgetItem *item) const {
 
 void MainWindow::showEntry(QTreeWidgetItem *item) {
     m_selected = item;
+    // A content-search hit is an offset, not a file. Selecting one shows the
+    // whole disk and scrolls to it — a list of offsets you cannot go to is
+    // half a feature, and going there is where F-022's colouring pays off:
+    // the byte lands in a region the eye can already name.
+    if (item && item->data(0, RoleOffset).isValid()) {
+        showHit(item);
+        return;
+    }
     // An image row carries no block, and selecting one shows the **whole
     // disk**: the bytes a file view can never reach — the bootblock where
     // protection lives, the rootblock, the bitmap, and the space no directory

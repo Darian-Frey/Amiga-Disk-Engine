@@ -203,6 +203,12 @@ public:
     /// Select every line, across the whole of the last field used.
     void selectField();
 
+    /// Highlight the byte at `offset` in the hex field, as if it were dragged.
+    ///
+    /// For arriving at a search hit: scrolling to a line puts the byte on
+    /// screen, and this says which of the sixteen it is.
+    void selectBytesAt(quint64 offset);
+
 
     /// The colour marking the *other* field's view of the selected bytes.
     ///

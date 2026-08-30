@@ -296,6 +296,17 @@ void HexPane::copyField() {
     if (!text.isEmpty()) QApplication::clipboard()->setText(text);
 }
 
+void HexPane::selectBytesAt(quint64 offset) {
+    const auto line = static_cast<int>(offset / hexview::BytesPerLine);
+    const auto index = static_cast<int>(offset % hexview::BytesPerLine);
+    if (line >= document()->blockCount()) return;
+    m_zone = Zone::Hex;
+    m_anchor = {line, index};
+    m_cursor = {line, index};
+    m_hasSelection = true;
+    refresh();
+}
+
 void HexPane::selectField() {
     const int lines = document()->blockCount();
     m_anchor = {0, 0};

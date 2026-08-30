@@ -62,6 +62,43 @@ private:
 };
 
 // A device's partition table. Move-only, like every other handle.
+/// A content search over one image (F-021).
+///
+/// Unlike every other handle here, one of these exists even when the search
+/// could not run: `error()` is then non-empty and `count()` is zero. That is
+/// the whole point — "the pattern was refused" and "the pattern is not on this
+/// disk" are different answers, and a null handle would collapse them.
+class Search {
+public:
+    Search() = default;
+    explicit Search(AdeSearch *raw) : m_raw(raw) {}
+    ~Search() { ade_find_free(m_raw); }
+
+    Search(const Search &) = delete;
+    Search &operator=(const Search &) = delete;
+    Search(Search &&other) noexcept : m_raw(std::exchange(other.m_raw, nullptr)) {}
+    Search &operator=(Search &&other) noexcept {
+        if (this != &other) {
+            ade_find_free(m_raw);
+            m_raw = std::exchange(other.m_raw, nullptr);
+        }
+        return *this;
+    }
+
+    explicit operator bool() const { return m_raw != nullptr; }
+    size_t count() const { return ade_find_count(m_raw); }
+    bool wasHex() const { return ade_find_was_hex(m_raw); }
+    /// Why the pattern was refused; empty when it was not.
+    QString error() const { return latin1(ade_find_error(m_raw)); }
+
+    bool at(size_t index, AdeMatch *out) const {
+        return ade_find_match(m_raw, index, out) == ADE_OK;
+    }
+
+private:
+    AdeSearch *m_raw = nullptr;
+};
+
 class Partitions {
 public:
     Partitions() = default;
@@ -224,6 +261,11 @@ public:
     Listing walk(quint32 partition) const { return Listing{ade_walk_open(m_raw, partition)}; }
     Buffer read(quint32 partition, quint32 block) const {
         return Buffer{ade_file_read(m_raw, partition, block)};
+    }
+
+    /// Search the image's bytes for text or hex.
+    Search find(const char *pattern, bool text = false, bool ignoreCase = false) const {
+        return Search{ade_find_open(m_raw, pattern, text, ignoreCase)};
     }
 
     /// Raw bytes of the mounted image, for a hex view of the disk itself.

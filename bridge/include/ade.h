@@ -84,6 +84,7 @@ typedef struct AdeListing    AdeListing;    /* a directory listing  */
 typedef struct AdeBuffer     AdeBuffer;     /* a file's contents    */
 typedef struct AdePartitions AdePartitions; /* a device's partitions */
 typedef struct AdeLayout     AdeLayout;     /* a map of a whole disk */
+typedef struct AdeSearch     AdeSearch;     /* a content search      */
 typedef struct AdeCatalogue  AdeCatalogue;  /* a loaded dataset      */
 
 /* Pass as `partition` to mean "the image's own volume, not a partition".
@@ -251,6 +252,48 @@ void       ade_layout_free(AdeLayout *layout);
  * never freed; empty for a code this build does not know. */
 const char *ade_region_name(AdeRegion region);
 const char *ade_region_describes(AdeRegion region);
+
+/* One place a pattern was found. Owner borrows from the AdeSearch it came from
+ * and is valid until that is freed. */
+typedef struct {
+    uint64_t  offset;      /* into the mounted image                        */
+    uint64_t  block;       /* the block it falls in                         */
+    AdeRegion region;      /* what that part of the disk is                 */
+    AdeBytes  owner;       /* the owning path, Latin-1; empty if none       */
+    uint32_t  owner_block; /* the owning entry's block, or 0 for none       */
+} AdeMatch;
+
+/* Search an image for text or hex (F-021).
+ *
+ * `pattern` is read as bytes when it is entirely hex digits and separators
+ * pairing into whole bytes, and as Latin-1 text otherwise — so `60 1A` and
+ * `deadbeef` are hex while `Copylock` is text. Pass `text` to force the text
+ * reading of a pattern that looks like hex; `ade_find_was_hex` reports which
+ * way it went, and a front end should show that, because the guess is only
+ * safe while it is visible.
+ *
+ * **This one does not return NULL.** Every other opening call in this header
+ * answers failure with a null pointer; this answers it with a handle carrying
+ * the reason, because the reason is the useful part. A search that could not
+ * run and a search that found nothing are different answers and must not look
+ * alike: the first means "ask me again", the second means "it is not there" —
+ * the distinction the command line draws with exit 2 against exit 1. A null
+ * pointer would collapse them together and throw away the message.
+ *
+ * So always check `ade_find_error` first: non-empty means no search happened.
+ *
+ * Free with ade_find_free. */
+AdeSearch *ade_find_open(const AdeImage *image, const char *pattern, bool text,
+                         bool ignore_case);
+size_t     ade_find_count(const AdeSearch *search);
+/* Copies match `index` into `*out`. ADE_NOT_FOUND past the end. */
+AdeResult  ade_find_match(const AdeSearch *search, size_t index, AdeMatch *out);
+/* Whether the pattern was read as hex rather than as text. */
+bool       ade_find_was_hex(const AdeSearch *search);
+/* Why the pattern was refused, or an empty string if it was not. Borrows from
+ * the search; valid until it is freed. */
+AdeBytes   ade_find_error(const AdeSearch *search);
+void       ade_find_free(AdeSearch *search);
 
 /* Read raw bytes of the mounted image, for a hex view of the disk itself.
  *
