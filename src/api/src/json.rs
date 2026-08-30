@@ -37,7 +37,7 @@ use core::fmt::Write as _;
 /// and the fix is to edit the inventory *and* move this constant — in the same
 /// commit, where a reviewer can see both. The inventory is the mechanism; this
 /// string is what it protects.
-pub const SCHEMA: &str = "1.7";
+pub const SCHEMA: &str = "1.8";
 
 /// The name of the version field, so nothing spells it two ways.
 pub const SCHEMA_FIELD: &str = "schema";

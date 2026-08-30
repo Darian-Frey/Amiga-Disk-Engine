@@ -23,6 +23,8 @@
 #include <QTest>
 #include <QClipboard>
 #include <QItemSelectionModel>
+#include <QStatusBar>
+#include <QTreeWidgetItemIterator>
 #include <QLabel>
 #include <QScreen>
 #include <QScrollBar>
@@ -84,6 +86,10 @@ private slots:
     void selectingTheDiskRowShowsTheWholeDisk();
     void theWholeDiskViewTintsItsRegionsAndAFileViewDoesNot();
     void theLegendNamesOnlyTheRegionsTheDiskHas();
+    void scrollingIntoAFileMarksItsRowWithoutSelectingIt();
+    void scrollingOutOfAFileUnmarksIt();
+    void aScrollQtDoesNotAnnounceIsStillFollowed();
+    void theFollowStopsWhenAFileIsShown();
     void theHexPaneIsGivenTheRoomADumpLineNeeds();
     void theDefaultSizeFitsADumpLineWhereTheScreenAllows();
     void selectingHexMarksTheCharactersThoseBytesSpell();
@@ -1015,6 +1021,125 @@ void TestMainWindow::theLegendNamesOnlyTheRegionsTheDiskHas() {
     tree->setCurrentItem(file, 0, QItemSelectionModel::ClearAndSelect);
     QApplication::processEvents();
     QVERIFY(!legend->isVisible());
+}
+
+// Scrolling the whole disk says which file is on screen (F-022).
+namespace {
+
+// Scroll the hex pane so `offset` is the top line.
+void scrollTo(MainWindow &window, quint64 offset) {
+    auto *hex = window.findChild<QPlainTextEdit *>(QStringLiteral("hex"));
+    hex->verticalScrollBar()->setValue(static_cast<int>(offset / hexview::BytesPerLine));
+    QApplication::processEvents();
+}
+
+// The marked row, if any: the one shown in bold that is not an image's own
+// header row (those are bold already, to separate the disks from their files).
+QTreeWidgetItem *markedRow(MainWindow &window) {
+    auto *tree = browser(window);
+    for (QTreeWidgetItemIterator it(tree); *it; ++it) {
+        if ((*it)->font(0).bold() && (*it)->data(0, tree::RoleBlock).isValid()) return *it;
+    }
+    return nullptr;
+}
+
+QString status(MainWindow &window) {
+    auto *bar = window.findChild<QStatusBar *>();
+    return bar ? bar->currentMessage() : QString{};
+}
+
+}  // namespace
+
+void TestMainWindow::scrollingIntoAFileMarksItsRowWithoutSelectingIt() {
+    QScopedPointer<MainWindow> window(diskWindow(m_image));
+    auto *tree = browser(*window);
+    tree->expandItem(tree->topLevelItem(0));
+
+    // `data.bin` is the fixture's larger file, so it occupies a run of blocks
+    // rather than a single one — the map says where.
+    QTreeWidgetItem *file = childNamed(tree->topLevelItem(0), QStringLiteral("data.bin"));
+    QVERIFY(file);
+    const quint32 block = file->data(0, tree::RoleBlock).toUInt();
+    scrollTo(*window, static_cast<quint64>(block) * 512);
+
+    QCOMPARE(markedRow(*window), file);
+    QVERIFY2(status(*window).contains(QStringLiteral("data.bin")), qPrintable(status(*window)));
+
+    // **The mark is not a selection.** Selection is what chose the whole-disk
+    // view, so following the scroll with it would replace the very view being
+    // scrolled — the feature would undo itself on the first wheel click.
+    QCOMPARE(tree->selectedItems().size(), 1);
+    QCOMPARE(tree->selectedItems().first(), tree->topLevelItem(0));
+    auto *hex = window->findChild<QPlainTextEdit *>(QStringLiteral("hex"));
+    QCOMPARE(hex->document()->blockCount() - 1, 901120 / hexview::BytesPerLine);
+}
+
+void TestMainWindow::scrollingOutOfAFileUnmarksIt() {
+    QScopedPointer<MainWindow> window(diskWindow(m_image));
+    auto *tree = browser(*window);
+    tree->expandItem(tree->topLevelItem(0));
+    QTreeWidgetItem *file = childNamed(tree->topLevelItem(0), QStringLiteral("data.bin"));
+    QVERIFY(file);
+
+    scrollTo(*window, static_cast<quint64>(file->data(0, tree::RoleBlock).toUInt()) * 512);
+    QVERIFY(markedRow(*window));
+
+    // Back to the bootblock, which no file owns.
+    scrollTo(*window, 0);
+    QVERIFY2(!markedRow(*window), "a mark left behind names the wrong file");
+    QVERIFY2(status(*window).contains(QStringLiteral("bootblock")), qPrintable(status(*window)));
+}
+
+void TestMainWindow::aScrollQtDoesNotAnnounceIsStillFollowed() {
+    // Qt does not reliably say when the view moved. Measured on the real
+    // display: a click in the scrollbar trough scrolled the pane from line 0
+    // to line 37 — the painted text proves it moved — while emitting
+    // `valueChanged` zero times and calling `scrollContentsBy` zero times. The
+    // wheel and a drag of the handle both notify, so the gap reads as the
+    // feature working right up until somebody pages down.
+    //
+    // Blocking the signals here reproduces that shape without depending on a
+    // synthetic click: the view moves and nothing announces it.
+    QScopedPointer<MainWindow> window(diskWindow(m_image));
+    auto *tree = browser(*window);
+    tree->expandItem(tree->topLevelItem(0));
+    QTreeWidgetItem *file = childNamed(tree->topLevelItem(0), QStringLiteral("data.bin"));
+    QVERIFY(file);
+    auto *hex = window->findChild<QPlainTextEdit *>(QStringLiteral("hex"));
+
+    const int line = static_cast<int>(file->data(0, tree::RoleBlock).toUInt()) * 512 /
+                     hexview::BytesPerLine;
+    {
+        const QSignalBlocker silence(hex->verticalScrollBar());
+        hex->verticalScrollBar()->setValue(line);
+    }
+    QVERIFY2(!markedRow(*window), "nothing announced the scroll, so nothing has run yet");
+
+    QTRY_COMPARE_WITH_TIMEOUT(markedRow(*window), file, 2000);
+    QVERIFY(status(*window).contains(QStringLiteral("data.bin")));
+}
+
+void TestMainWindow::theFollowStopsWhenAFileIsShown() {
+    // The poll exists for the whole-disk view and must not outlive it: a file's
+    // own bytes are one file, and a timer still walking the tree over a
+    // document that has nothing to do with the disk map is waste at best.
+    QScopedPointer<MainWindow> window(diskWindow(m_image));
+    auto *tree = browser(*window);
+    tree->expandItem(tree->topLevelItem(0));
+    QTreeWidgetItem *file = childNamed(tree->topLevelItem(0), QStringLiteral("data.bin"));
+    QVERIFY(file);
+    tree->setCurrentItem(file, 0, QItemSelectionModel::ClearAndSelect);
+    QApplication::processEvents();
+
+    auto *hex = window->findChild<QPlainTextEdit *>(QStringLiteral("hex"));
+    const QString before = status(*window);
+    {
+        const QSignalBlocker silence(hex->verticalScrollBar());
+        hex->verticalScrollBar()->setValue(hex->verticalScrollBar()->maximum());
+    }
+    QTest::qWait(400);
+    QCOMPARE(status(*window), before);
+    QVERIFY(!markedRow(*window));
 }
 
 QTEST_MAIN(TestMainWindow)

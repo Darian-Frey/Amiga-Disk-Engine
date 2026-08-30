@@ -304,6 +304,11 @@ void HexPane::selectField() {
     refresh();
 }
 
+void HexPane::scrollContentsBy(int dx, int dy) {
+    QPlainTextEdit::scrollContentsBy(dx, dy);
+    emit scrolled();
+}
+
 void HexPane::mousePressEvent(QMouseEvent *event) {
     if (event->button() != Qt::LeftButton) {
         QPlainTextEdit::mousePressEvent(event);

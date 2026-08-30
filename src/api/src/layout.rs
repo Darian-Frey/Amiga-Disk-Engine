@@ -97,6 +97,13 @@ pub struct Span {
     pub region: Region,
     /// The path of the entry that owns it, where one does.
     pub owner: Option<String>,
+    /// The block of the directory entry that owns it, where one does.
+    ///
+    /// The path names the owner for a reader; this identifies it for a
+    /// program. A front end showing a disk in a tree has the entry's block
+    /// already and can match on it exactly, where matching Latin-1 path
+    /// strings is a comparison that can go wrong in ways a block cannot.
+    pub owner_block: Option<u32>,
 }
 
 /// A map of the whole image.
@@ -150,6 +157,12 @@ impl Layout {
                                 ("blocks", Value::Num(s.blocks)),
                                 ("region", Value::str(s.region.name())),
                                 ("file", Value::opt(s.owner.as_ref(), Value::str)),
+                                (
+                                    "file_block",
+                                    Value::opt(s.owner_block.as_ref(), |b| {
+                                        Value::Num(u64::from(*b))
+                                    }),
+                                ),
                             ])
                         })
                         .collect(),
@@ -171,8 +184,10 @@ impl Layout {
 }
 
 /// What each block is, and what owns it. `false` when no volume mounted.
-pub(crate) fn attribute(image: &crate::Image) -> (BTreeMap<u64, (Region, Option<String>)>, bool) {
-    let mut out: BTreeMap<u64, (Region, Option<String>)> = BTreeMap::new();
+pub(crate) type Owned = (Region, Option<String>, Option<u32>);
+
+pub(crate) fn attribute(image: &crate::Image) -> (BTreeMap<u64, Owned>, bool) {
+    let mut out: BTreeMap<u64, Owned> = BTreeMap::new();
     let geometry = image.geometry();
 
     // The bootblock does not depend on the volume mounting. C-008 keeps the
@@ -186,7 +201,7 @@ pub(crate) fn attribute(image: &crate::Image) -> (BTreeMap<u64, (Region, Option<
     // made twice.
     if matches!(image.rdb(), Ok(None)) {
         for block in 0..u64::from(geometry.reserved()) {
-            out.insert(block, (Region::Bootblock, None));
+            out.insert(block, (Region::Bootblock, None, None));
         }
     }
 
@@ -197,12 +212,12 @@ pub(crate) fn attribute(image: &crate::Image) -> (BTreeMap<u64, (Region, Option<
     // Then the rest of the structure, so a file can never be shadowed by one:
     // if a file's data really does sit in a reserved block the volume is
     // damaged, and the file is the more informative answer.
-    out.insert(geometry.root_block().0, (Region::Rootblock, None));
+    out.insert(geometry.root_block().0, (Region::Rootblock, None, None));
     if let Ok(bitmap) =
         ade_filesystem::bitmap::Bitmap::read(image.source(), volume.geometry(), volume.rootblock())
     {
         for &block in &bitmap.blocks {
-            out.insert(u64::from(block), (Region::Bitmap, None));
+            out.insert(u64::from(block), (Region::Bitmap, None, None));
         }
     }
 
@@ -215,7 +230,7 @@ pub(crate) fn attribute(image: &crate::Image) -> (BTreeMap<u64, (Region, Option<
         if entry.kind.is_directory() {
             out.insert(
                 u64::from(entry.block),
-                (Region::Directory, Some(path.clone())),
+                (Region::Directory, Some(path.clone()), Some(entry.block)),
             );
             continue;
         }
@@ -225,30 +240,34 @@ pub(crate) fn attribute(image: &crate::Image) -> (BTreeMap<u64, (Region, Option<
         // The header block belongs to the file too: a search matching a
         // filename in its own header should say so rather than report an
         // unowned block.
-        out.insert(u64::from(entry.block), (Region::File, Some(path.clone())));
+        out.insert(
+            u64::from(entry.block),
+            (Region::File, Some(path.clone()), Some(entry.block)),
+        );
         let Ok(blocks) = volume.file_blocks(entry) else {
             continue;
         };
         for block in blocks {
-            out.insert(u64::from(block), (Region::File, Some(path.clone())));
+            out.insert(
+                u64::from(block),
+                (Region::File, Some(path.clone()), Some(entry.block)),
+            );
         }
     }
     (out, true)
 }
 
 /// Turn a per-block map into runs covering every block.
-fn coalesce(
-    owners: &BTreeMap<u64, (Region, Option<String>)>,
-    blocks: u64,
-    block_size: u32,
-) -> Vec<Span> {
+fn coalesce(owners: &BTreeMap<u64, Owned>, blocks: u64, block_size: u32) -> Vec<Span> {
     let size = u64::from(block_size);
     let mut spans: Vec<Span> = Vec::new();
 
     for block in 0..blocks {
-        let (region, owner) = owners
+        let (region, owner, owner_block) = owners
             .get(&block)
-            .map_or((Region::Unclaimed, None), |(r, o)| (*r, o.clone()));
+            .map_or((Region::Unclaimed, None, None), |(r, o, b)| {
+                (*r, o.clone(), *b)
+            });
 
         // Extend the run when it is the same thing continuing. Two files with
         // adjacent blocks are two spans, because the owner is what a reader
@@ -268,6 +287,7 @@ fn coalesce(
             blocks: 1,
             region,
             owner,
+            owner_block,
         });
     }
     spans

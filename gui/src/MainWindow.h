@@ -14,6 +14,31 @@ class ImageTree;
 class QAction;
 class QLabel;
 class QLineEdit;
+class QTimer;
+/// How the tree stores what each row stands for.
+///
+/// In the header rather than beside the window's implementation because the
+/// tests read them: a test that checks the right row was marked has to ask the
+/// row which block it is, and a second copy of `Qt::UserRole + 1` in the test
+/// is a copy that can drift.
+namespace tree {
+/// Columns in the tree.
+enum Column { ColName = 0, ColSize, ColDate, ColProtection };
+
+// Which block an item stands for, and whether it is a directory.
+constexpr int RoleBlock = Qt::UserRole + 1;
+constexpr int RoleIsDir = Qt::UserRole + 2;
+constexpr int RolePopulated = Qt::UserRole + 3;
+// Which open image an item belongs to. Every item carries it, so a click in
+// the tree or in the search results knows which disk it means.
+constexpr int RoleImage = Qt::UserRole + 4;
+// Which partition of that image, or ADE_WHOLE_IMAGE for one that holds its own
+// volume. Carried by every item for the same reason: a block number means
+// nothing without the volume it belongs to, and on a hard disk the same number
+// is a different block in every partition.
+constexpr int RolePartition = Qt::UserRole + 5;
+}  // namespace tree
+
 class HexHighlighter;
 class HexPane;
 class QPlainTextEdit;
@@ -79,6 +104,8 @@ private:
     // A file entry's bytes, or empty for a directory or an unreadable one.
     void showWholeDisk(QTreeWidgetItem *item);
     void showLegend(const QVector<HexRegion> &regions);
+    void markWhatIsOnScreen();
+    void markRow(quint32 block);
     QByteArray contentsOf(QTreeWidgetItem *item) const;
     // One line describing an image: container, volume, size, findings.
     static QString describe(const Open &open);
@@ -101,6 +128,20 @@ private:
     HexPane *m_hex = nullptr;
     HexHighlighter *m_paint = nullptr;
     QLabel *m_legend = nullptr;
+    /// The open disk's map, while the whole-disk view is showing it.
+    QVector<HexRegion> m_diskRegions;
+    /// Polls the scroll position while a whole disk is shown.
+    QTimer *m_follow = nullptr;
+    /// The last top line acted on, so a tick that changed nothing costs one
+    /// comparison.
+    int m_topLine = -1;
+    /// Which image and partition the whole-disk view is showing, so a row is
+    /// looked up in the disk being scrolled rather than in whichever open
+    /// image happens to hold that block number.
+    qulonglong m_diskImage = 0;
+    quint32 m_diskPartition = 0;
+    /// The row currently marked as "this is what you are looking at".
+    QTreeWidgetItem *m_marked = nullptr;
     QPlainTextEdit *m_text = nullptr;
     QLineEdit *m_query = nullptr;
     QTabWidget *m_views = nullptr;

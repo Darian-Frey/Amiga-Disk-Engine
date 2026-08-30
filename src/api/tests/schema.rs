@@ -503,6 +503,7 @@ fn a_layout_emits_exactly_these_fields() {
             "spans[].blocks",
             "spans[].region",
             "spans[].file",
+            "spans[].file_block",
         ],
     );
 }

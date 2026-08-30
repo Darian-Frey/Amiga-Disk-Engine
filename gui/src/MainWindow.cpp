@@ -19,31 +19,20 @@
 #include <QMenuBar>
 #include <QMimeData>
 #include <QPlainTextEdit>
+#include <QScrollBar>
+#include <QTreeWidgetItemIterator>
 #include <QSplitter>
 #include <QStatusBar>
 #include <QTabWidget>
 #include <QLineEdit>
+#include <QTimer>
 #include <QTreeWidget>
 #include <QUrl>
 #include <QVBoxLayout>
 
 namespace {
+using namespace tree;
 
-// Columns in the tree.
-enum Column { ColName = 0, ColSize, ColDate, ColProtection };
-
-// Which block an item stands for, and whether it is a directory.
-constexpr int RoleBlock = Qt::UserRole + 1;
-constexpr int RoleIsDir = Qt::UserRole + 2;
-constexpr int RolePopulated = Qt::UserRole + 3;
-// Which open image an item belongs to. Every item carries it, so a click in
-// the tree or in the search results knows which disk it means.
-constexpr int RoleImage = Qt::UserRole + 4;
-// Which partition of that image, or ADE_WHOLE_IMAGE for one that holds its own
-// volume. Carried by every item for the same reason: a block number means
-// nothing without the volume it belongs to, and on a hard disk the same number
-// is a different block in every partition.
-constexpr int RolePartition = Qt::UserRole + 5;
 
 // How much of a file to show. A preview is a preview: reading a whole 512 KB
 // file into a text widget to look at its first line is a poor trade.
@@ -150,6 +139,27 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
     m_hex->setReadOnly(true);
     m_hex->setLineWrapMode(QPlainTextEdit::NoWrap);
     m_hex->setFont(QFontDatabase::systemFont(QFontDatabase::FixedFont));
+    // Scrolling the whole disk says which file is on screen. Not by selecting
+    // its row: selection is what *chose* the whole-disk view, so following the
+    // scroll with it would replace the view being scrolled — the feature would
+    // undo itself on the first wheel click. The row is marked instead, which
+    // is a different thing said a different way.
+    connect(m_hex, &HexPane::scrolled, this, [this] { markWhatIsOnScreen(); });
+
+    // And a backstop, because Qt does not reliably say when the view moved.
+    // Measured: a click in the scrollbar trough scrolled the pane from line 0
+    // to line 37 — the painted text proves it moved — while emitting
+    // `valueChanged` zero times and calling `scrollContentsBy` zero times. The
+    // wheel and a drag of the handle both notify, which is why the gap reads
+    // as the feature working until somebody pages down.
+    //
+    // So the position is also polled. It costs one integer comparison per
+    // tick: `markWhatIsOnScreen` returns immediately unless the top line has
+    // actually changed, and the timer only runs while a whole disk is shown.
+    m_follow = new QTimer(this);
+    m_follow->setInterval(120);
+    connect(m_follow, &QTimer::timeout, this, [this] { markWhatIsOnScreen(); });
+
     // Null bytes dimmed and disk regions tinted. Owned by the document, which
     // outlives every dump put into it, and kept so the regions can be set as
     // the selection changes.
@@ -642,6 +652,111 @@ void MainWindow::search() {
                                  .arg(m_images.size() == 1 ? "" : "s"));
 }
 
+/// Mark the tree row for whatever the hex pane is showing, and name it.
+///
+/// Only in the whole-disk view: a file's own bytes are all one file, so there
+/// is nothing to follow.
+void MainWindow::markWhatIsOnScreen() {
+    if (m_diskRegions.isEmpty()) return;
+
+    // Nothing to do unless the view actually moved. This is what makes polling
+    // cheap enough to be the backstop for Qt's missing notifications.
+    if (m_hex->verticalScrollBar()->value() == m_topLine) return;
+    m_topLine = m_hex->verticalScrollBar()->value();
+
+    // The top visible line, taken from the scrollbar rather than by asking
+    // which line is under the top-left corner of the viewport.
+    //
+    // `cursorForPosition` was the obvious way and is wrong here: it reads where
+    // the viewport has been *painted*, and `valueChanged` fires before
+    // QPlainTextEdit has scrolled. Dragging the handle happened to work, and
+    // the wheel happened to work, but a click in the scrollbar trough moved
+    // the bar from line 0 to line 37 and reported line 0 — and stayed wrong,
+    // because nothing scrolled again to correct it.
+    //
+    // The scrollbar's value is not an approximation of the top line: with word
+    // wrap off, QPlainTextEdit's vertical scrollbar counts blocks, and one
+    // block is one dump line. It is the thing that changed, so it cannot be
+    // stale.
+    const int line = m_hex->verticalScrollBar()->value();
+    const quint64 offset = static_cast<quint64>(line) * hexview::BytesPerLine;
+
+    const HexRegion *span = nullptr;
+    int low = 0;
+    int high = m_diskRegions.size() - 1;
+    while (low <= high) {
+        const int mid = low + (high - low) / 2;
+        const HexRegion &at = m_diskRegions.at(mid);
+        if (offset < at.start) {
+            high = mid - 1;
+        } else if (offset >= at.end) {
+            low = mid + 1;
+        } else {
+            span = &at;
+            break;
+        }
+    }
+    if (!span) return;
+
+    markRow(span->owner);
+
+    // The name comes from the map, not from the row that was marked: a file
+    // inside a drawer nobody has opened has no row, and "file" on its own says
+    // nothing at all. The mark is the bonus; the name is the answer.
+    QString where = QString::fromUtf8(ade_region_name(static_cast<AdeRegion>(span->region)));
+    if (!span->path.isEmpty()) where = QStringLiteral("%1  %2").arg(where, span->path);
+    statusBar()->showMessage(QStringLiteral("offset %1   %2").arg(offset).arg(where));
+}
+
+/// Mark the row for entry `block`, and unmark whatever was marked before.
+///
+/// Zero means nothing owns these bytes, which unmarks. A row that has not been
+/// realised yet — a file inside a drawer nobody has opened — simply is not
+/// found; the status bar still names the region, and the tree is deliberately
+/// **not** expanded to reveal it, because a tree that reorganises itself under
+/// the pointer while you scroll is worse than one that does not.
+void MainWindow::markRow(quint32 block) {
+    if (m_marked) {
+        QFont plain = m_marked->font(ColName);
+        plain.setBold(false);
+        m_marked->setFont(ColName, plain);
+        for (int column = 0; column < m_tree->columnCount(); ++column) {
+            m_marked->setBackground(column, QBrush());
+        }
+        m_marked = nullptr;
+    }
+    if (block == 0) return;
+
+    // Scoped to the image and partition being viewed. A block number is unique
+    // within a volume and nowhere else, so an unscoped search marks a row in
+    // whichever disk happens to hold that block first — and with several images
+    // open, scrolling one would quietly highlight a file in another.
+    QTreeWidgetItem *found = nullptr;
+    for (QTreeWidgetItemIterator it(m_tree); *it; ++it) {
+        if ((*it)->data(0, RoleBlock).toUInt() != block) continue;
+        if ((*it)->data(0, RoleImage).toULongLong() != m_diskImage) continue;
+        if ((*it)->data(0, RolePartition).toUInt() != m_diskPartition) continue;
+        found = *it;
+        break;
+    }
+    if (!found) return;
+
+    // The same wash the hex pane marks the other field with — and **bold** as
+    // well, because the wash alone is a paler version of the selection colour
+    // and the selected row is right there in the same tree. Rendered side by
+    // side the two read alike; bold is the part that cannot be mistaken for a
+    // slightly different blue.
+    const QBrush wash(HexPane::mirrorColour(m_tree->palette()));
+    for (int column = 0; column < m_tree->columnCount(); ++column) {
+        found->setBackground(column, wash);
+    }
+    QFont bold = found->font(ColName);
+    bold.setBold(true);
+    found->setFont(ColName, bold);
+    m_marked = found;
+    m_tree->scrollToItem(found, QAbstractItemView::EnsureVisible);
+}
+
 void MainWindow::showLegend(const QVector<HexRegion> &regions) {
     if (!m_legend) return;
     if (regions.isEmpty()) {
@@ -723,6 +838,11 @@ void MainWindow::showWholeDisk(QTreeWidgetItem *item) {
     const QVector<HexRegion> regions = open->image.regions();
     m_hex->clear();
     if (m_paint) m_paint->setRegions(regions);
+    m_diskRegions = regions;
+    m_diskImage = item->data(0, RoleImage).toULongLong();
+    m_diskPartition = item->data(0, RolePartition).toUInt();
+    m_topLine = -1;
+    if (m_follow) m_follow->start();
     m_hex->setPlainText(hexview::dump(bytes));
     m_text->setPlainText(QString::fromLatin1(bytes));
     showLegend(regions);
@@ -776,6 +896,9 @@ void MainWindow::showEntry(QTreeWidgetItem *item) {
     // disk's colours and legend under the words "(no readable contents)".
     m_hex->clear();
     if (m_paint) m_paint->setRegions({});
+    m_diskRegions.clear();
+    if (m_follow) m_follow->stop();
+    markRow(0);
     showLegend({});
 
     const QByteArray data = contentsOf(item);
@@ -827,6 +950,9 @@ void MainWindow::clearViews() {
     // map would tint the next thing put in the pane by where *this* one's
     // offsets fell.
     if (m_paint) m_paint->setRegions({});
+    m_diskRegions.clear();
+    if (m_follow) m_follow->stop();
+    markRow(0);
     showLegend({});
     if (m_extract) m_extract->setEnabled(false);
 }

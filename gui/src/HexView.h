@@ -69,6 +69,12 @@ struct HexRegion {
     quint64 end;
     /// An `AdeRegion` code.
     int region;
+    /// The block of the owning directory entry, or 0 for none.
+    quint32 owner = 0;
+    /// The owning entry's path. Carried as well as the block because a row
+    /// inside a drawer nobody has opened does not exist to be marked, and the
+    /// name is still the answer to "what am I looking at".
+    QString path;
 };
 
 /// Paints the hex pane: dims null bytes, and tints each region of the disk.
@@ -197,6 +203,7 @@ public:
     /// Select every line, across the whole of the last field used.
     void selectField();
 
+
     /// The colour marking the *other* field's view of the selected bytes.
     ///
     /// The highlight, mixed a third of the way into the background. Weaker
@@ -204,7 +211,21 @@ public:
     /// and only one of them is what Ctrl+C copies.
     static QColor mirrorColour(const QPalette &palette);
 
+signals:
+    /// The view scrolled, by any means.
+    ///
+    /// Not `verticalScrollBar()->valueChanged`, which is what this used first
+    /// and which **misses a click in the scrollbar trough**: measured, a trough
+    /// click moved the bar from line 0 to line 37 and emitted `valueChanged`
+    /// exactly zero times. The wheel and a drag of the handle both emit it, so
+    /// the gap looks like the feature working until somebody pages down.
+    ///
+    /// `scrollContentsBy` is the virtual QAbstractScrollArea calls whenever the
+    /// contents actually move, whatever moved them, and after they have moved.
+    void scrolled();
+
 protected:
+    void scrollContentsBy(int dx, int dy) override;
     void mousePressEvent(QMouseEvent *event) override;
     void mouseMoveEvent(QMouseEvent *event) override;
     void mouseDoubleClickEvent(QMouseEvent *event) override;

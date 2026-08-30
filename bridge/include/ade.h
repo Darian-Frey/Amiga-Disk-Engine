@@ -212,6 +212,14 @@ typedef struct {
     uint64_t  blocks;   /* how many blocks                                */
     AdeRegion region;
     AdeBytes  owner;    /* the owning path, Latin-1; empty if none        */
+    /* The block of the directory entry that owns this run, or 0 for none.
+     * Zero is safe as "none": block 0 is a bootblock and never an entry.
+     *
+     * The path names the owner for a person; this identifies it for a
+     * program. A front end showing the disk in a tree already has each
+     * entry's block and can match on it exactly, where comparing Latin-1
+     * path strings is a comparison that can go wrong in ways a block cannot. */
+    uint32_t  owner_block;
 } AdeSpan;
 
 /* Map what occupies every block of an image (F-022).

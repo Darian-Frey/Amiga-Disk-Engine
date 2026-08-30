@@ -50,7 +50,7 @@ impl Search {
             .map(|at| {
                 let (region, owner) = map
                     .get(&at.block)
-                    .map_or((Region::Unclaimed, None), |(r, o)| (*r, o.clone()));
+                    .map_or((Region::Unclaimed, None), |(r, o, _)| (*r, o.clone()));
                 Found { at, owner, region }
             })
             .collect();

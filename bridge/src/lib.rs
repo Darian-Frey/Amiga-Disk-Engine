@@ -811,6 +811,8 @@ pub struct AdeSpan {
     pub region: u32,
     /// The owning path, Latin-1; empty when nothing owns it.
     pub owner: AdeBytes,
+    /// The block of the owning directory entry, or 0 for none.
+    pub owner_block: u32,
 }
 
 /// Map what occupies every block of an image (F-022).
@@ -847,6 +849,7 @@ pub unsafe extern "C" fn ade_layout_open(image: *const AdeImage, partition: u32)
                 blocks: span.blocks,
                 region: span.region as u32,
                 owner: AdeBytes::of(owners.get(at).map_or(&[][..], Vec::as_slice)),
+                owner_block: span.owner_block.unwrap_or(0),
             });
         }
         Box::into_raw(Box::new(AdeLayout { owners, spans }))

@@ -244,7 +244,8 @@ public:
             AdeSpan span;
             if (ade_layout_span(layout, i, &span) != ADE_OK) continue;
             out.append(HexRegion{span.offset, span.offset + span.length,
-                                 static_cast<int>(span.region)});
+                                 static_cast<int>(span.region), span.owner_block,
+                                 latin1(span.owner)});
         }
         ade_layout_free(layout);
         return out;
