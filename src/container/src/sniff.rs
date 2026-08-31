@@ -285,7 +285,22 @@ pub fn sniff(head: &[u8], size: u64) -> Detection {
         let nearest = size.div_euclid(DD_CYLINDER).saturating_mul(DD_CYLINDER);
         let delta = i64::try_from(size.saturating_sub(nearest)).unwrap_or(i64::MAX);
         evidence.push(Evidence::SizeAnomaly { bytes: size, delta });
-        Kind::Hardfile
+        // A hardfile is a raw volume — bootblock, rootblock, bitmap — so its
+        // first three bytes are `DOS` (SPEC §Hardfiles). Without them this is
+        // some other file that merely fails to be a floppy, and calling it a
+        // hardfile was BUG-010: every one of the 7 corpus images detected as a
+        // hardfile begins `DOS`, while an Amiga executable dragged out of a
+        // disk and dropped back on the window was opened as a 5,732-byte hard
+        // disk and reported as damaged.
+        //
+        // `Unknown` rather than a refusal, because C-008 keeps the bootblock
+        // and the filesystem separate: a file of the right shape with an
+        // unrecognised bootblock is still worth opening and saying so about.
+        if matches!(head.get(..3), Some(b"DOS")) {
+            Kind::Hardfile
+        } else {
+            Kind::Unknown
+        }
     };
     Detection { kind, evidence }
 }
@@ -319,6 +334,46 @@ pub fn floppy_geometry(size: u64) -> Option<(u32, u32)> {
 #[cfg(test)]
 #[allow(clippy::indexing_slicing, reason = "tests build their own buffers")]
 mod tests {
+    #[test]
+    fn a_file_that_is_not_a_disk_image_is_not_called_a_hardfile() {
+        // BUG-010. The fallback used to call anything that was not an exact
+        // floppy geometry a hardfile, so an Amiga executable dragged out of a
+        // disk and dropped back on the window opened as a 5,732-byte hard disk
+        // and was reported as damaged.
+        //
+        // A hardfile is a raw volume — bootblock, rootblock, bitmap — so its
+        // first three bytes are `DOS` (SPEC §Hardfiles).
+        let executable = {
+            let mut bytes = vec![0u8; 5_732];
+            // The Amiga hunk magic, which is what one of those files began with.
+            bytes[..4].copy_from_slice(&[0x00, 0x00, 0x03, 0xF3]);
+            bytes
+        };
+        assert_eq!(
+            sniff(&executable, executable.len() as u64).kind,
+            Kind::Unknown
+        );
+
+        // Size alone does not make one either: a large file of anything.
+        let big = vec![0x42u8; 4_000_000];
+        assert_eq!(sniff(&big, big.len() as u64).kind, Kind::Unknown);
+    }
+
+    #[test]
+    fn a_raw_volume_is_still_a_hardfile() {
+        // Every one of the 7 corpus images detected as a hardfile begins
+        // `DOS`, and requiring it left the whole corpus classified identically.
+        for prefix in [b"DOS\x00", b"DOS\x01", b"DOS\x03"] {
+            let mut bytes = vec![0u8; 4_000_000];
+            bytes[..4].copy_from_slice(prefix);
+            assert_eq!(
+                sniff(&bytes, bytes.len() as u64).kind,
+                Kind::Hardfile,
+                "{prefix:?}"
+            );
+        }
+    }
+
     use super::*;
 
     fn head_of(prefix: &[u8]) -> Vec<u8> {

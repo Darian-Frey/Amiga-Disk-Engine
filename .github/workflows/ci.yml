@@ -50,7 +50,7 @@ jobs:
           # The second argument is a folder to extract into (F-024): the run
           # writes it, then runs again over the same folder to check that
           # nothing is overwritten.
-          ASAN_OPTIONS=detect_leaks=1 /tmp/ade-smoke /tmp/ade-fixture.adf /tmp/ade-unpacked
+          ASAN_OPTIONS=detect_leaks=1 /tmp/ade-smoke /tmp/ade-fixture.adf /tmp/ade-unpacked /tmp/ade-made.adf
           # Again as a hard disk: a device holds no volume of its own, so it
           # exercises the partition calls and nothing else does (F-018).
           cargo run --quiet -p ade-fixtures --bin mkfixture /tmp/ade-device.hdf --device

@@ -11,6 +11,7 @@ pub mod assemble;
 pub mod batch;
 pub mod consolidate;
 pub mod convert;
+pub mod create;
 pub mod find;
 pub mod health;
 pub mod inspect;

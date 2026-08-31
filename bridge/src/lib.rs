@@ -61,6 +61,12 @@ pub enum AdeResult {
     NotFound = 5,
     /// Something in the engine failed in a way the ABI has no code for.
     Internal = 6,
+    /// A file is already there, and the call would not overwrite it.
+    ///
+    /// Its own code rather than an I/O error because a front end wants to say
+    /// so: "already exists" is a thing the person can fix by choosing another
+    /// name, and "could not write" is not.
+    AlreadyExists = 7,
 }
 
 /// A borrowed run of bytes, with no encoding claimed.
@@ -905,6 +911,161 @@ pub unsafe extern "C" fn ade_layout_free(layout: *mut AdeLayout) {
             drop(unsafe { Box::from_raw(layout) });
         }
     });
+}
+
+/// Whether the container was recognised at all.
+///
+/// False for a file that is no kind of disk image. Distinct from having no
+/// volume: a DMS archive is recognised and unreadable, and worth opening to
+/// say so; an executable is neither.
+///
+/// # Safety
+/// `image` must be a live handle or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ade_image_recognised(image: *const AdeImage) -> bool {
+    guard(false, || {
+        // SAFETY: the caller's contract; null is checked.
+        unsafe { image.as_ref() }.is_some_and(|handle| {
+            !matches!(
+                handle.inspection.detection.kind,
+                ade_core::layers::container::Kind::Unknown
+            )
+        })
+    })
+}
+
+/// How many filesystems ADE will write.
+///
+/// # Safety
+/// None: takes nothing and returns a count.
+#[unsafe(no_mangle)]
+pub extern "C" fn ade_create_type_count() -> usize {
+    ade_core::create::TYPES.len()
+}
+
+/// The name `ade_create` takes for type `index`. Static; never freed.
+///
+/// # Safety
+/// None: takes an integer and returns a pointer to static storage.
+#[unsafe(no_mangle)]
+pub extern "C" fn ade_create_type_name(index: usize) -> *const c_char {
+    create_string(index, |t| t.name)
+}
+
+/// The label a person reads for type `index`. Static; never freed.
+///
+/// # Safety
+/// None: takes an integer and returns a pointer to static storage.
+#[unsafe(no_mangle)]
+pub extern "C" fn ade_create_type_label(index: usize) -> *const c_char {
+    create_string(index, |t| t.label)
+}
+
+/// The type strings, NUL-terminated, in `ade_core::create::TYPES` order.
+///
+/// Built once. The engine's strings are `&str` without a NUL, and converting
+/// per call would allocate something C never frees — the same problem the
+/// region names have, solved the same way, except that here there are two
+/// strings per type and a table of literals would be four places to keep in
+/// step instead of two. `the_create_type_strings_match_the_engines` pins them.
+static CREATE_STRINGS: std::sync::OnceLock<Vec<(CString, CString)>> = std::sync::OnceLock::new();
+
+/// One of the two strings for a type, or empty past the end.
+fn create_string(
+    index: usize,
+    pick: fn(&ade_core::create::DiskType) -> &'static str,
+) -> *const c_char {
+    guard(c"".as_ptr(), || {
+        let table = CREATE_STRINGS.get_or_init(|| {
+            ade_core::create::TYPES
+                .iter()
+                .map(|t| {
+                    (
+                        CString::new(t.name).unwrap_or_default(),
+                        CString::new(t.label).unwrap_or_default(),
+                    )
+                })
+                .collect()
+        });
+        let Some(entry) = table.get(index) else {
+            return c"".as_ptr();
+        };
+        let Some(source) = ade_core::create::TYPES.get(index) else {
+            return c"".as_ptr();
+        };
+        if pick(source) == source.name {
+            entry.0.as_ptr()
+        } else {
+            entry.1.as_ptr()
+        }
+    })
+}
+
+/// Make a blank disk at `path` (F-019, F-025).
+///
+/// Never overwrites: [`AdeResult::AlreadyExists`] if something is there.
+///
+/// # Safety
+/// `path` must be a NUL-terminated path; `type_name` and `volume_name` may be
+/// null for the defaults.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ade_create(
+    path: *const c_char,
+    type_name: *const c_char,
+    volume_name: *const c_char,
+    shape: u32,
+    megabytes: u32,
+) -> AdeResult {
+    use ade_core::create::{self, CreateError, Shape};
+
+    guard(AdeResult::Internal, || {
+        if path.is_null() {
+            return AdeResult::NullArgument;
+        }
+        // SAFETY: checked non-null; the caller promises NUL termination.
+        let Ok(path) = (unsafe { CStr::from_ptr(path) }).to_str() else {
+            return AdeResult::BadEncoding;
+        };
+        // SAFETY: the caller's contract; null means the default.
+        let kind = match unsafe { type_name.as_ref() } {
+            None => create::DEFAULT_TYPE,
+            // SAFETY: non-null, so NUL-terminated by the caller's contract.
+            Some(_) => match (unsafe { CStr::from_ptr(type_name) }).to_str() {
+                Ok(s) => s,
+                Err(_) => return AdeResult::BadEncoding,
+            },
+        };
+        // SAFETY: the caller's contract; null means the default.
+        let volume = match unsafe { volume_name.as_ref() } {
+            None => ade_core::layers::filesystem::format::DEFAULT_NAME,
+            // SAFETY: non-null, so NUL-terminated by the caller's contract.
+            Some(_) => match (unsafe { CStr::from_ptr(volume_name) }).to_str() {
+                Ok(s) => s,
+                Err(_) => return AdeResult::BadEncoding,
+            },
+        };
+        let shape = match shape {
+            0 => Shape::Dd,
+            1 => Shape::Hd,
+            2 => Shape::Dd525,
+            3 => Shape::Hard(megabytes),
+            _ => return AdeResult::NotFound,
+        };
+
+        match create::blank(
+            std::path::Path::new(path),
+            kind,
+            volume,
+            shape,
+            create::now(),
+        ) {
+            Ok(()) => AdeResult::Ok,
+            Err(CreateError::Exists) => AdeResult::AlreadyExists,
+            Err(CreateError::UnknownType(_) | CreateError::Shape(_)) => AdeResult::NotFound,
+            Err(CreateError::Format(_)) => AdeResult::NoVolume,
+            Err(CreateError::Io(_)) => AdeResult::Io,
+        }
+    })
 }
 
 /// Write every file on the image into `dir` (F-024).

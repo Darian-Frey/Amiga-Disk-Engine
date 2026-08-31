@@ -63,6 +63,16 @@ pub enum FormatError {
         /// Blocks the geometry offers.
         blocks: u64,
     },
+    /// The volume needs more bitmap blocks than a rootblock can name.
+    ///
+    /// Past 25 pointers the rest live in a `bm_ext` chain — a hard disk above
+    /// roughly 50 MB. Refused rather than written wrongly: a volume whose
+    /// bitmap is only half described reports free blocks that are not, which
+    /// is how a write path destroys data.
+    TooLarge {
+        /// Blocks the geometry offers.
+        blocks: u64,
+    },
 }
 
 impl core::fmt::Display for FormatError {
@@ -80,6 +90,10 @@ impl core::fmt::Display for FormatError {
             Self::TooSmall { blocks } => {
                 write!(f, "a volume needs more than {blocks} blocks")
             }
+            Self::TooLarge { blocks } => write!(
+                f,
+                "{blocks} blocks needs a bitmap extension chain, which ADE does not write"
+            ),
         }
     }
 }
@@ -116,19 +130,49 @@ pub fn blank(
     let block_size = geometry.block_size() as usize;
     let total = geometry.total_blocks();
     let root = geometry.root_block().0;
+
+    // How many bitmap blocks the volume needs. One 512-byte block carries a
+    // checksum and then 127 longs, so it maps `(512/4 - 1) * 32 = 4064`
+    // blocks — a floppy fits in one, and an 8 MB hardfile needs five. Writing
+    // exactly one regardless is BUG-006, which panicked above about 2 MB.
+    let mapped = total.saturating_sub(u64::from(geometry.reserved()));
+    let per_block = bits_per_bitmap_block(geometry.block_size());
+    let pages = mapped.div_ceil(per_block.max(1));
+
+    // 25 pointers fit in the rootblock; past that they need a `bm_ext` chain,
+    // which is a hard disk above roughly 50 MB. Refused rather than written
+    // wrongly: a volume whose bitmap is half-described reports free blocks
+    // that are not, which is how a write path destroys data.
+    if pages > BM_PAGES {
+        return Err(FormatError::TooLarge { blocks: total });
+    }
+
     // The bitmap goes immediately after the rootblock, which is where every
     // real disk puts it and where a reader looking for it will find it first.
     let bitmap = root.saturating_add(1);
-    if total <= bitmap {
+    if total <= bitmap.saturating_add(pages) {
         return Err(FormatError::TooSmall { blocks: total });
     }
+    let blocks: Vec<u64> = (0..pages).map(|i| bitmap.saturating_add(i)).collect();
 
     let mut image = vec![0u8; usize::try_from(geometry.total_bytes()).unwrap_or(0)];
     write_bootblock(&mut image, dostype, root);
-    write_rootblock(&mut image, geometry, name, created, root, bitmap);
-    write_bitmap(&mut image, geometry, root, bitmap);
+    write_rootblock(&mut image, geometry, name, created, root, &blocks);
+    write_bitmap(&mut image, geometry, root, &blocks);
     let _ = block_size;
     Ok(image)
+}
+
+/// Bitmap pointers the rootblock itself can hold. Past this a `bm_ext` chain
+/// is needed, which is a hard disk above roughly 50 MB.
+const BM_PAGES: u64 = 25;
+
+/// How many blocks one bitmap block can map.
+///
+/// A bitmap block spends its first long on a checksum and maps 32 blocks per
+/// long after that.
+const fn bits_per_bitmap_block(block_size: u32) -> u64 {
+    ((block_size as u64 / 4).saturating_sub(1)).saturating_mul(32)
 }
 
 /// A volume name AmigaDOS would accept.
@@ -172,7 +216,7 @@ fn write_rootblock(
     name: &str,
     created: Stamp,
     root: u64,
-    bitmap: u64,
+    bitmap: &[u64],
 ) {
     let bsize = geometry.block_size() as usize;
     let at = usize::try_from(root).unwrap_or(0).saturating_mul(bsize);
@@ -189,11 +233,16 @@ fn write_rootblock(
 
     let end = bsize;
     let _ = put_u32(block, end.saturating_sub(200), u32::MAX); // bm_flag = -1
-    let _ = put_u32(
-        block,
-        end.saturating_sub(196),
-        u32::try_from(bitmap).unwrap_or(0),
-    );
+    // Every bitmap block, not just the first: `bm_pages` is an array of 25,
+    // and a volume that names one of its five bitmap blocks describes an
+    // eighth of its own free space. `bm_ext` stays zero — a volume needing it
+    // was refused before this was called.
+    for (index, block_number) in bitmap.iter().enumerate() {
+        let offset = end
+            .saturating_sub(196)
+            .saturating_add(index.saturating_mul(4));
+        let _ = put_u32(block, offset, u32::try_from(*block_number).unwrap_or(0));
+    }
 
     // All three datestamps are the format date on a fresh disk: nothing has
     // changed since it was made, because nothing has happened to it.
@@ -228,35 +277,47 @@ fn write_rootblock(
 /// convention and the single easiest thing to get backwards here: inverted, a
 /// fresh disk would report itself completely full and every write to it would
 /// fail for want of space.
-fn write_bitmap(image: &mut [u8], geometry: Geometry, root: u64, bitmap: u64) {
+fn write_bitmap(image: &mut [u8], geometry: Geometry, root: u64, bitmap: &[u64]) {
     let bsize = geometry.block_size() as usize;
-    let at = usize::try_from(bitmap).unwrap_or(0).saturating_mul(bsize);
-    let Some(block) = image.get_mut(at..at.saturating_add(bsize)) else {
-        return;
-    };
-
-    // The map begins at the first block after the reserved area, so bit 0 is
-    // block `reserved`, not block 0.
     let reserved = u64::from(geometry.reserved());
     let mapped = geometry.total_blocks().saturating_sub(reserved);
-    for bit in 0..mapped {
-        let block_number = bit.saturating_add(reserved);
-        // Everything is free except the two blocks this filesystem itself
-        // occupies.
-        if block_number == root || block_number == bitmap {
-            continue;
-        }
-        let long = usize::try_from(bit / 32).unwrap_or(0);
-        let offset = 4usize.saturating_add(long.saturating_mul(4));
-        let Ok(current) = ade_endian::u32_at(block, offset) else {
-            break;
-        };
-        let _ = put_u32(block, offset, current | (1u32 << (bit % 32)));
-    }
+    let per_block = bits_per_bitmap_block(geometry.block_size());
 
-    // The bitmap block is the one exception to block layout: its checksum sits
-    // at offset 0, where every other block keeps it at 20 (BUG-004).
-    if let Some(sum) = checksum::normal_at(block, 0x00) {
-        let _ = put_u32(block, 0x00, sum);
+    for (page, block_number) in bitmap.iter().enumerate() {
+        let at = usize::try_from(*block_number)
+            .unwrap_or(0)
+            .saturating_mul(bsize);
+        let Some(block) = image.get_mut(at..at.saturating_add(bsize)) else {
+            return;
+        };
+
+        // The map begins at the first block after the reserved area, so bit 0
+        // of page 0 is block `reserved`, not block 0 — and bit 0 of page 1 is
+        // 4064 blocks after that.
+        let first = (page as u64).saturating_mul(per_block);
+        for bit in 0..per_block {
+            let index = first.saturating_add(bit);
+            if index >= mapped {
+                break;
+            }
+            let block_index = index.saturating_add(reserved);
+            // Everything is free except the blocks this filesystem occupies:
+            // the rootblock, and every one of its bitmap blocks.
+            if block_index == root || bitmap.contains(&block_index) {
+                continue;
+            }
+            let long = usize::try_from(bit / 32).unwrap_or(0);
+            let offset = 4usize.saturating_add(long.saturating_mul(4));
+            let Ok(current) = ade_endian::u32_at(block, offset) else {
+                break;
+            };
+            let _ = put_u32(block, offset, current | (1u32 << (bit % 32)));
+        }
+
+        // The bitmap block is the one exception to block layout: its checksum
+        // sits at offset 0, where every other block keeps it at 20 (BUG-004).
+        if let Some(sum) = checksum::normal_at(block, 0x00) {
+            let _ = put_u32(block, 0x00, sum);
+        }
     }
 }

@@ -144,6 +144,11 @@ struct Args {
     output: Option<PathBuf>,
     /// A directory of TOSEC datfiles, for identification (F-013).
     datfiles: Option<PathBuf>,
+    /// `create` makes a 5.25" DD disk.
+    dd525: bool,
+
+    /// `create` makes a hard disk of this many megabytes.
+    size: Option<u64>,
     /// `extract` takes the whole disk rather than one path.
     all: bool,
     /// `find` reads its pattern as text even if it looks like hex.
@@ -182,6 +187,8 @@ fn parse_args(raw: Vec<String>) -> Result<Args, String> {
     let mut volume_type: Option<String> = None;
     let mut hd = false;
     let mut all = false;
+    let mut dd525 = false;
+    let mut size: Option<u64> = None;
     let mut text = false;
     let mut ignore_case = false;
     let mut partition: Option<String> = None;
@@ -194,6 +201,10 @@ fn parse_args(raw: Vec<String>) -> Result<Args, String> {
             "--hash" => hash = true,
             "--hd" => hd = true,
             "--all" => all = true,
+            "--dd525" | "--525" => dd525 = true,
+            _ if arg.starts_with("--size=") => {
+                size = arg.trim_start_matches("--size=").parse().ok();
+            }
             "--text" => text = true,
             "--ignore-case" | "-i" => ignore_case = true,
             _ if arg.starts_with("--name=") => {
@@ -242,6 +253,8 @@ fn parse_args(raw: Vec<String>) -> Result<Args, String> {
         volume_type,
         hd,
         all,
+        dd525,
+        size,
         text,
         ignore_case,
         partition,
@@ -307,6 +320,8 @@ fn main() -> ExitCode {
             args.volume_name.as_deref(),
             args.volume_type.as_deref(),
             args.hd,
+            args.dd525,
+            args.size,
         ),
         ("scan", 1) => scan(Path::new(p(0)), args.format),
         ("find", 2) => find(
@@ -383,7 +398,11 @@ fn usage() {
         "    --raw           convert writes raw MFM tracks (an extended ADF)".to_owned(),
         "    --hash          include SHA-1 content hashes (not free; see VOCABULARY.md)".to_owned(),
         "    --name=NAME     create: the volume name (default \"Empty\")".to_owned(),
-        "    --type=ofs|ffs  create: the filesystem (default ffs)".to_owned(),
+        "    --type=T        create: ofs, ffs, ofs-intl, ffs-intl, ofs-dc, ffs-dc".to_owned(),
+        "                    (default ffs-intl; DOS\\6 and DOS\\7 are deferred by D-013)"
+            .to_owned(),
+        "    --dd525         create: a 5.25\" DD disk, 40 cylinders (440 KB)".to_owned(),
+        "    --size=N        create: an unpartitioned hard disk of N megabytes".to_owned(),
         "    --hd            create: a 1.76 MB high-density disk instead of 880 KB".to_owned(),
         "    --all           extract: take every file on the disk, not one path".to_owned(),
         "    --text          find: read the pattern as text even if it looks like hex".to_owned(),
@@ -1347,30 +1366,42 @@ fn convert(input: &Path, output: &Path, raw: bool) -> ExitCode {
 /// The first write path ADE ships, and the safest one there is: it produces a
 /// new file and touches nothing that exists, which is the irreversible damage
 /// D-004 is about. Refuses to overwrite, like `convert`.
-fn create(output: &Path, name: Option<&str>, kind: Option<&str>, hd: bool) -> ExitCode {
-    use ade_core::layers::filesystem::{dostype::Dostype, format};
+fn create(
+    output: &Path,
+    name: Option<&str>,
+    kind: Option<&str>,
+    hd: bool,
+    dd525: bool,
+    size: Option<u64>,
+) -> ExitCode {
+    use ade_core::create::{self, Shape};
 
-    // The international variants, because everything since Workbench 2.0
-    // writes them and a name with an accent sorts wrongly without (C-006).
-    let flags = match kind.unwrap_or("ffs").to_ascii_lowercase().as_str() {
-        "ffs" => 3u8,
-        "ofs" => 2u8,
-        other => {
-            eprintln!("ade: --type={other}: expected ofs or ffs");
+    // Which filesystems exist and what each disk shape is are the engine's to
+    // know, not a front end's: the GUI asks the same questions and two front
+    // ends answering separately is two chances to disagree (IMP-007).
+    let shape = match (size, hd, dd525) {
+        (Some(_), true, _) | (Some(_), _, true) => {
+            eprintln!("ade: --size makes a hard disk, which has no floppy geometry");
             return ExitCode::from(EXIT_USAGE);
         }
-    };
-    let Ok(dostype) = Dostype::from_raw(0x444F_5300 | u32::from(flags)) else {
-        eprintln!("ade: internal: could not build a dostype");
-        return ExitCode::from(EXIT_USAGE);
+        (Some(megabytes), _, _) => {
+            let Ok(m) = u32::try_from(megabytes) else {
+                eprintln!("ade: --size={megabytes}: too large");
+                return ExitCode::from(EXIT_USAGE);
+            };
+            Shape::Hard(m)
+        }
+        (None, true, true) => {
+            eprintln!("ade: --hd and --dd525 are different disks");
+            return ExitCode::from(EXIT_USAGE);
+        }
+        (None, true, false) => Shape::Hd,
+        (None, false, true) => Shape::Dd525,
+        (None, false, false) => Shape::Dd,
     };
 
-    let geometry = if hd {
-        ade_core::layers::block::Geometry::HD_FLOPPY
-    } else {
-        ade_core::layers::block::Geometry::DD_FLOPPY
-    };
-    let name = name.unwrap_or(format::DEFAULT_NAME);
+    let type_name = kind.unwrap_or(create::DEFAULT_TYPE);
+    let volume = name.unwrap_or(ade_core::layers::filesystem::format::DEFAULT_NAME);
 
     // The clock, because "created" means when the disk was made and a tool
     // that lies about that is worse than one that omits it. The default of
@@ -1378,64 +1409,26 @@ fn create(output: &Path, name: Option<&str>, kind: Option<&str>, hd: bool) -> Ex
     // unset, and ADE's own health check says so — the first disk this command
     // produced reported three `datestamp-day-zero` findings against itself.
     // The library still takes an explicit stamp, so tests stay deterministic.
-    let bytes = match format::blank(geometry, dostype, name, now()) {
-        Ok(b) => b,
-        Err(e) => {
-            eprintln!("ade: {e}");
-            return ExitCode::from(EXIT_USAGE);
+    if let Err(e) = create::blank(output, type_name, volume, shape, create::now()) {
+        eprintln!("ade: {e}");
+        if matches!(e, ade_core::create::CreateError::UnknownType(_)) {
+            eprintln!("ade: DOS\\6 and DOS\\7 (LNFS) are deferred by D-013, on verifiability");
         }
-    };
+        return ExitCode::from(match e {
+            ade_core::create::CreateError::Io(_) => EXIT_UNREADABLE,
+            _ => EXIT_USAGE,
+        });
+    }
 
-    if output.exists() {
-        eprintln!(
-            "ade: {}: already exists, refusing to overwrite",
-            output.display()
-        );
-        return ExitCode::from(EXIT_USAGE);
-    }
-    if let Err(e) = std::fs::write(output, &bytes) {
-        eprintln!("ade: {}: {e}", output.display());
-        return ExitCode::from(EXIT_UNREADABLE);
-    }
+    let size = std::fs::metadata(output).map_or(0, |m| m.len());
     emit_lines(
         &mut std::io::stdout().lock(),
         &[
-            format!("{dostype}  ->  {}", output.display()),
-            format!("  {} bytes, volume \"{name}\"", bytes.len()),
+            format!("{type_name}  ->  {}", output.display()),
+            format!("  {size} bytes, volume \"{volume}\""),
         ],
     );
     ExitCode::from(EXIT_CLEAN)
-}
-
-/// The current time, as AmigaDOS counts it.
-///
-/// Days since 1978-01-01, which is 2,922 days after the Unix epoch — eight
-/// years including the leap days of 1972 and 1976. A clock before 1978 gives
-/// day 1 rather than a negative: the field is unsigned, and a disk stamped
-/// "the day after the Amiga's epoch" is odd where an underflowed one is
-/// corrupt.
-fn now() -> ade_core::layers::filesystem::format::Stamp {
-    use ade_core::layers::filesystem::format::Stamp;
-    const AMIGA_EPOCH_IN_UNIX_DAYS: u64 = 2922;
-    let Ok(since) = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) else {
-        return Stamp {
-            days: 1,
-            mins: 0,
-            ticks: 0,
-        };
-    };
-    let secs = since.as_secs();
-    let days = secs
-        .checked_div(86_400)
-        .unwrap_or(0)
-        .saturating_sub(AMIGA_EPOCH_IN_UNIX_DAYS)
-        .max(1);
-    let in_day = secs.checked_rem(86_400).unwrap_or(0);
-    Stamp {
-        days: u32::try_from(days).unwrap_or(1),
-        mins: u32::try_from(in_day.checked_div(60).unwrap_or(0)).unwrap_or(0),
-        ticks: u32::try_from(in_day.checked_rem(60).unwrap_or(0).saturating_mul(50)).unwrap_or(0),
-    }
 }
 
 /// Find recognisable content anywhere in an image (F-020).

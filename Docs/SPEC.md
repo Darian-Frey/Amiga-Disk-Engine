@@ -55,6 +55,20 @@ Block order is increasing sector, then side, then cylinder. A DD disk holds 1760
 
 **80 cylinders is the norm, not the limit.** Drives could generally seek several tracks beyond cylinder 79, and images of 81, 82 and 83 cylinders occur in the wild — exactly `cylinders × 2 × 11 × 512` bytes, so 912,384 / 923,648 / 934,912. Extended-ADFs commonly declare 166 tracks (83 cylinders). Geometry handling must be parameterised on cylinder count rather than assuming 80. See §Corpus observations.
 
+**But such a disk is not a larger volume, and its rootblock is still at 880.** *Measured 2026-08-31.* Of six non-standard floppy-sized corpus images, **five** hold a valid rootblock at block 880 and **none** holds one at `(numReserved + highKey) / 2` of the file's own block count. They are ordinary 80-cylinder AmigaDOS filesystems in files that happen to carry extra tracks — or, in one `[u]`-tagged case, a dump that stopped early. The rootblock formula is right about a *volume* and wrong about a *file that contains* one, and feeding it a block count taken from the file's length was BUG-009, **fixed 2026-08-31**. ADFlib had it right all along and says so plainly: `Volume : Floppy 880 KBytes, "LINGO" between sectors [0-1759]` for a 912,384-byte file.
+
+**A reader must therefore try the file's own geometry and then the standard shapes.** ADE tries the file's first, so nothing that mounted before changes, then the standard floppy geometries largest first — adopting one only when the file can satisfy it and a real rootblock is genuinely at its position. Largest first is not arbitrary: on an HD disk, block 880 is ordinary data, so a DD candidate tried first would claim an oversized HD image the moment that block happened to look like a rootblock. A file **shorter** than any standard geometry is not rescued, because it does not contain a whole volume.
+
+This is also why `ade create` offers no cylinder count. An extra-cylinder image is an artefact of dumping, not of formatting; writing one would produce a file matching no real disk.
+
+### 5.25-inch disks
+
+*Sourced 2026-08-31; no corpus material.*
+
+The A1020 is a 40-track drive, giving **440 KB** through `trackdisk.device` — `40 × 2 × 11 × 512 = 450,560` bytes, 880 blocks, rootblock at `(2 + 879) / 2 = 440`. The layout is the ordinary one at a smaller block count, not a different structure.
+
+**Unverifiable against the oracle.** ADFlib refuses the size outright — `adfMountDev : unknown device type` — before it reaches any filesystem, so it can say nothing about such an image either way. That is a gap in the oracle rather than a disagreement, and it is a different thing from the extra-cylinder case above, where ADFlib mounted the device and then found no rootblock. ADE writes 5.25" disks on the strength of the formula being verified at 1760, 3520 and 16,384 blocks elsewhere, and on the fixture generator agreeing at 880.
+
 ### Locating the rootblock
 
 The rootblock sits at the volume midpoint, but **it must be computed, not read from the bootblock** — see C-007. [FAQ §4.2]

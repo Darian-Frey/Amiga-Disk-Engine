@@ -7,11 +7,75 @@ Severity vocabulary: low | medium | high.
 
 > First entries logged 2026-08-22, from the SPEC research pass rather than from testing. Use `BUG-001`, `BUG-002`, … sequentially; reference from commits, CHANGELOG `### Fixed`, and ATTACK_VECTORS where a bug pattern warrants a new vector.
 
+
 ## Open
 
 _None._
 
 ## Fixed
+
+### BUG-010 Any file that was not a floppy was called a hardfile
+
+**Severity:** Medium
+**Found:** 2026-09-01, reported from the GUI: dragging three files out of a disk and dropping them back on the window
+**Where:** [src/container/src/sniff.rs](../src/container/src/sniff.rs), the sniffing cascade's final fallback.
+
+**What was wrong.** The cascade ends by testing the size against a floppy geometry, and everything that failed that test became `Kind::Hardfile`. A 5,732-byte Amiga executable was therefore opened as a hard disk, reported as `hardfile (raw volume)` and then as damaged — `no rootblock at block 393`. Three of them made three rows in the window, each explaining nothing.
+
+**A hardfile is a raw volume** — bootblock, rootblock, bitmap, exactly like a floppy but larger — so its first three bytes are `DOS` (SPEC §Hardfiles). Size alone is not evidence of anything; it is the *absence* of evidence, and the fallback was treating it as the presence of some.
+
+**Fixed 2026-09-01.** The fallback requires the `DOS` prefix, and yields `Kind::Unknown` otherwise. `Unknown` rather than a refusal, because C-008 keeps the bootblock and the filesystem as separate facts: a file of the right shape with an unrecognised bootblock is still worth opening and describing.
+
+**Measured: the whole corpus is classified identically.** All 7 corpus images detected as hardfiles begin `DOS`, and the container counts across all 4,652 are unchanged — as are 3606 mounted and 2850 sound.
+
+**The window now declines what it cannot recognise.** `ade_image_recognised` is the new ABI predicate, because a front end has to tell "no kind of disk image" from "recognised and holds no volume". A DMS archive or an IPF is the second and is worth opening to say so (IMP-006); an executable is neither and gets one message instead of a permanent row. An unformatted 901,120-byte file stays in the first category: recognised by its size, holding no volume, and worth showing.
+
+### BUG-009 A disk with extra cylinders is unmountable: the rootblock is at 880, not at the midpoint
+
+**Severity:** Medium
+**Found:** 2026-08-31, while measuring geometries for F-025 (disk creation)
+**Where:** [src/block/src/lib.rs](../src/block/src/lib.rs), `Geometry::root_block`, and everything that mounts through it.
+
+**What is wrong.** ADE computes the rootblock as `(numReserved + highKey) / 2` from the image's **whole** block count, which BUG-002 established as the documented formula. On a disk with extra cylinders that gives the wrong answer: a 1804-block image puts ADE at block 902, where it finds a file header, and reports `no rootblock at block 902`. The volume is unmountable.
+
+**The rootblock is at 880.** Measured across the corpus: of six non-standard floppy-sized images, **five** hold a valid rootblock at 880 and none holds one where ADE looks.
+
+| image | blocks | ADE looks at |
+|---|---|---|
+| `Account Master v2.0 (1992)(Platt, Martin)[u]` | 1738 | 869 |
+| `Chambers of Shaolin_Disk2` | 1804 | 902 |
+| `Lingo` | 1782 | 891 |
+| `Preis ist Heiss, Der` | 1804 | 902 |
+| `Universal Monsters & Superhero` | 1804 | 902 |
+
+**Why.** These are not larger volumes. They are ordinary 80-cylinder AmigaDOS filesystems in files that hold extra tracks — written past cylinder 79 by a drive that could seek there, or, in the `[u]` case, a dump that stopped early. The filesystem is an 880 KB filesystem either way, so its rootblock sits where an 880 KB filesystem puts it. The formula is right about a volume and wrong about a *file that contains* one.
+
+ADFlib agrees and says so more clearly: it reports `adfReadRootBlock : id not found` for such an image, having looked in the standard place.
+
+**Correct behaviour.** `Geometry::root_block` stays correct as the formula. What was wrong is feeding it a block count taken from the *file's* length, when the volume may be smaller than the file that holds it.
+
+**Fixed 2026-08-31.** `volume_geometry` in `inspect.rs` tries the file's own geometry first — so every image that mounted before mounts identically — and only if its rootblock does not validate does it try the standard floppy shapes, **largest first**, adopting one only when the file can satisfy it *and* a real rootblock is actually at its position. It can therefore rescue an image but never invent one. Largest-first matters: tried the other way, an oversized HD image would be read as a DD volume the moment block 880 held something rootblock-shaped, and on an HD disk that block is ordinary data.
+
+Applied at all three places a geometry is built — `inspect_bytes`, `Image::from_bytes` and `Image::open_lazy`. The first attempt fixed only one, and `ade info` still reported no volume.
+
+**Measured across the whole corpus: 5 images began mounting and 0 stopped.** 3601 → 3606 of 4652.
+
+| image | file | now mounts as |
+|---|---|---|
+| `Chambers of Shaolin_Disk2` | 923,648 | `CHAMBER OF SHAOLIN - QUARTEX` |
+| `Lingo` | 912,384 | `LINGO` |
+| `Preis ist Heiss, Der` | 923,648 | `Der Preis ist heiss` |
+| `Universal Monsters & Superhero` | 923,648 | `THE ONE (B)` |
+| `Workbench v1.4a15 rev 36.1 (1989)(Commodore)(alpha)` | 908,323 | `Workbench1.4A15` |
+
+**Checked against the oracle, not just against mounting.** A wrongly adopted geometry can find a rootblock-shaped block and produce confident nonsense, so the rescued images are extracted and diffed against ADFlib: **97 files compared, 97 byte-identical**. ADFlib had the right answer all along and says it plainly — `Volume : Floppy 880 KBytes, "LINGO" between sectors [0-1759]` for a 912,384-byte file.
+
+**The truncated case is deliberately not rescued.** `Account Master v2.0 [u]` is 1738 blocks with its rootblock at 880: the volume it belongs to is a DD floppy and the file cannot cover one. Mounting it would mean claiming an extent the bytes do not have, so ADE still reports no volume — which for a dump TOSEC itself tags as underdumped is the honest answer.
+
+**Not reachable from `ade create`.** Creating such a disk was considered for F-025 and dropped: an extra-cylinder image is an artefact of dumping, not of formatting, and writing one would have produced a file matching no real disk.
+
+
+
 
 ### BUG-007 `--format=json` is accepted and silently ignored by four commands
 **Severity:** medium

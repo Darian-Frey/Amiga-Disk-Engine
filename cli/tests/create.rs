@@ -99,9 +99,12 @@ fn the_filesystem_and_density_are_chosen_not_assumed() {
 #[test]
 fn a_filesystem_ade_cannot_write_is_a_usage_error() {
     let dir = scratch("badtype");
+    // PFS is a real filesystem and not ADE's to write: it is one of the forty
+    // or so non-AmigaDOS tags in SPEC's registry, and none of them appears in
+    // the corpus.
     let (_, stderr, code) = run(&["create", dir.join("x.adf").to_str().unwrap(), "--type=pfs"]);
     assert_eq!(code, Some(2));
-    assert!(stderr.contains("expected ofs or ffs"), "{stderr}");
+    assert!(stderr.contains("ofs-dc"), "the six it does write: {stderr}");
     assert!(!dir.join("x.adf").exists(), "and nothing is written");
     let _ = fs::remove_dir_all(&dir);
 }
@@ -121,5 +124,126 @@ fn a_created_disk_carries_a_real_creation_date() {
         !info.contains("1978-01-01"),
         "a real date, not the epoch: {info}"
     );
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn every_type_the_command_offers_writes_that_dostype() {
+    // Six, not two. `DOS\6` and `DOS\7` are refused by name rather than
+    // written badly: LNFS is deferred by D-013 on verifiability.
+    let dir = scratch("types");
+    for (name, flags) in [
+        ("ofs", "DOS\\0"),
+        ("ffs", "DOS\\1"),
+        ("ofs-intl", "DOS\\2"),
+        ("ffs-intl", "DOS\\3"),
+        ("ofs-dc", "DOS\\4"),
+        ("ffs-dc", "DOS\\5"),
+    ] {
+        let path = dir.join(format!("{name}.adf"));
+        let (_, err, code) = run(&[
+            "create",
+            path.to_str().unwrap(),
+            &format!("--type={name}"),
+            "--name=Types",
+        ]);
+        assert_eq!(code, Some(0), "{name}: {err}");
+
+        let (out, _, code) = run(&["info", path.to_str().unwrap()]);
+        assert_eq!(code, Some(0));
+        assert!(out.contains(flags), "{name} should be {flags}: {out}");
+    }
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn lnfs_is_refused_by_name_and_says_why() {
+    // Not "unknown type": somebody asking for LNFS has asked for something
+    // real, and the answer is that ADE will not write what it cannot check.
+    let dir = scratch("lnfs");
+    let (_, err, code) = run(&[
+        "create",
+        dir.join("l.adf").to_str().unwrap(),
+        "--type=ffs-lnfs",
+    ]);
+    assert_eq!(code, Some(2), "{err}");
+    assert!(
+        err.contains("D-013"),
+        "the reason, not just a refusal: {err}"
+    );
+    assert!(!dir.join("l.adf").exists(), "and nothing was written");
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn the_geometries_are_the_sizes_they_claim() {
+    let dir = scratch("sizes");
+    for (flag, bytes) in [
+        (None, 901_120u64),
+        (Some("--hd"), 1_802_240),
+        (Some("--dd525"), 450_560),
+    ] {
+        let path = dir.join(format!("g{bytes}.adf"));
+        let mut args = vec!["create", path.to_str().unwrap(), "--name=Geo"];
+        if let Some(f) = flag {
+            args.push(f);
+        }
+        let (_, err, code) = run(&args);
+        assert_eq!(code, Some(0), "{flag:?}: {err}");
+        assert_eq!(fs::metadata(&path).unwrap().len(), bytes, "{flag:?}");
+
+        // And each reads back as a sound volume, which is the point of the
+        // size being right.
+        let (_, _, code) = run(&["check", path.to_str().unwrap()]);
+        assert_eq!(code, Some(0), "{flag:?} should be sound");
+    }
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_hard_disk_is_made_by_size_and_is_not_a_bigger_floppy() {
+    let dir = scratch("hardfile");
+    let path = dir.join("big.hdf");
+    let (_, err, code) = run(&[
+        "create",
+        path.to_str().unwrap(),
+        "--size=8",
+        "--name=BigDisk",
+    ]);
+    assert_eq!(code, Some(0), "{err}");
+    assert_eq!(fs::metadata(&path).unwrap().len(), 8 * 1024 * 1024);
+
+    let (out, _, code) = run(&["info", path.to_str().unwrap()]);
+    assert_eq!(code, Some(0));
+    assert!(out.contains("hardfile"), "not a floppy: {out}");
+    let (_, _, code) = run(&["check", path.to_str().unwrap()]);
+    assert_eq!(code, Some(0), "and sound, with its five bitmap blocks");
+
+    // The floppy flags describe a shape a hard disk does not have.
+    let (_, err, code) = run(&[
+        "create",
+        dir.join("clash.hdf").to_str().unwrap(),
+        "--size=8",
+        "--hd",
+    ]);
+    assert_eq!(code, Some(2), "{err}");
+    assert!(err.contains("no floppy geometry"), "{err}");
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_hard_disk_too_large_for_its_own_bitmap_is_refused() {
+    // Past 25 bitmap pointers the rest belong in a `bm_ext` chain ADE does not
+    // write. A volume whose bitmap is half described reports free blocks that
+    // are not.
+    let dir = scratch("toobig");
+    let (_, err, code) = run(&[
+        "create",
+        dir.join("huge.hdf").to_str().unwrap(),
+        "--size=64",
+    ]);
+    assert_eq!(code, Some(2), "{err}");
+    assert!(err.contains("bitmap extension"), "{err}");
+    assert!(!dir.join("huge.hdf").exists(), "nothing half-written");
     let _ = fs::remove_dir_all(&dir);
 }

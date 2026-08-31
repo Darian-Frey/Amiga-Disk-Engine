@@ -70,6 +70,7 @@ public:
     static QString aboutDetail();
 
 private slots:
+    void newDisk();
     void extractAll();
     void showAbout();
     void updateSearchHint();

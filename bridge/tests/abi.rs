@@ -895,3 +895,203 @@ fn a_refused_pattern_is_not_a_search_that_found_nothing() {
         ade::ade_find_free(std::ptr::null_mut());
     }
 }
+
+#[test]
+fn the_create_type_strings_match_the_engines() {
+    // The bridge holds NUL-terminated copies so C never has to free anything.
+    // The cost is two copies of the same words, and this is what stops them
+    // drifting: a rename in `ade_core::create` that misses the bridge fails
+    // here rather than shipping a menu that disagrees with `--type=`.
+    let count = ade::ade_create_type_count();
+    assert_eq!(count, ade_core::create::TYPES.len());
+    assert_eq!(count, 6, "six, because D-013 defers LNFS");
+
+    for (index, want) in ade_core::create::TYPES.iter().enumerate() {
+        // SAFETY: both return pointers to static storage, never null.
+        let (name, label) = unsafe {
+            (
+                std::ffi::CStr::from_ptr(ade::ade_create_type_name(index)),
+                std::ffi::CStr::from_ptr(ade::ade_create_type_label(index)),
+            )
+        };
+        assert_eq!(name.to_str().unwrap(), want.name);
+        assert_eq!(label.to_str().unwrap(), want.label);
+    }
+
+    // Past the end is empty, never a wrong name.
+    // SAFETY: both tolerate any index and return static storage.
+    unsafe {
+        assert_eq!(
+            std::ffi::CStr::from_ptr(ade::ade_create_type_name(count)).to_bytes(),
+            b""
+        );
+        assert_eq!(
+            std::ffi::CStr::from_ptr(ade::ade_create_type_label(999)).to_bytes(),
+            b""
+        );
+    }
+}
+
+#[test]
+fn creating_a_disk_across_the_abi_makes_one_ade_can_read() {
+    let dir = std::env::temp_dir().join(format!("ade-abi-create-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+
+    // One of each shape, so the sizes are checked rather than assumed.
+    for (shape, megabytes, bytes, ext) in [
+        (0u32, 0u32, 901_120u64, "adf"),
+        (1, 0, 1_802_240, "adf"),
+        (2, 0, 450_560, "adf"),
+        (3, 8, 8 * 1024 * 1024, "hdf"),
+    ] {
+        let path = dir.join(format!("s{shape}.{ext}"));
+        let c_path = std::ffi::CString::new(path.to_str().unwrap()).unwrap();
+        let kind = std::ffi::CString::new("ffs-intl").unwrap();
+        let name = std::ffi::CString::new("Made").unwrap();
+
+        // SAFETY: valid NUL-terminated strings.
+        let made = unsafe {
+            ade::ade_create(
+                c_path.as_ptr(),
+                kind.as_ptr(),
+                name.as_ptr(),
+                shape,
+                megabytes,
+            )
+        };
+        assert_eq!(made, AdeResult::Ok, "shape {shape}");
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().len(),
+            bytes,
+            "shape {shape}"
+        );
+
+        // And it reads back as the volume it was asked for.
+        let mut err = AdeResult::Ok;
+        // SAFETY: valid path, no catalogue, writable slot.
+        let image = unsafe { ade::ade_image_open(c_path.as_ptr(), std::ptr::null(), &raw mut err) };
+        assert!(!image.is_null(), "shape {shape}");
+        // SAFETY: a live handle.
+        assert!(unsafe { ade::ade_image_has_volume(image) }, "shape {shape}");
+        // SAFETY: a live handle.
+        let volume = unsafe { ade::ade_image_volume_name(image) };
+        // SAFETY: borrows the live image.
+        let text = unsafe { std::slice::from_raw_parts(volume.data, volume.len) };
+        assert_eq!(text, b"Made", "shape {shape}");
+        // SAFETY: a live handle.
+        unsafe { ade::ade_image_free(image) };
+
+        // Never overwrites, and says which kind of no it is.
+        // SAFETY: valid NUL-terminated strings.
+        let again = unsafe {
+            ade::ade_create(
+                c_path.as_ptr(),
+                kind.as_ptr(),
+                name.as_ptr(),
+                shape,
+                megabytes,
+            )
+        };
+        assert_eq!(again, AdeResult::AlreadyExists, "shape {shape}");
+    }
+
+    // A filesystem ADE will not write, and a shape it does not have.
+    let path = dir.join("refused.adf");
+    let c_path = std::ffi::CString::new(path.to_str().unwrap()).unwrap();
+    let lnfs = std::ffi::CString::new("ffs-lnfs").unwrap();
+    // SAFETY: valid NUL-terminated strings.
+    unsafe {
+        assert_eq!(
+            ade::ade_create(c_path.as_ptr(), lnfs.as_ptr(), std::ptr::null(), 0, 0),
+            AdeResult::NotFound,
+            "LNFS is deferred by D-013"
+        );
+        assert_eq!(
+            ade::ade_create(c_path.as_ptr(), std::ptr::null(), std::ptr::null(), 99, 0),
+            AdeResult::NotFound,
+            "there is no shape 99"
+        );
+        assert_eq!(
+            ade::ade_create(std::ptr::null(), std::ptr::null(), std::ptr::null(), 0, 0),
+            AdeResult::NullArgument
+        );
+    }
+    assert!(!path.exists(), "and nothing was written");
+
+    // The default type, when none is named.
+    let d = dir.join("default.adf");
+    let c_d = std::ffi::CString::new(d.to_str().unwrap()).unwrap();
+    // SAFETY: valid path, null for both defaults.
+    assert_eq!(
+        unsafe { ade::ade_create(c_d.as_ptr(), std::ptr::null(), std::ptr::null(), 0, 0) },
+        AdeResult::Ok
+    );
+    assert_eq!(std::fs::metadata(&d).unwrap().len(), 901_120);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_file_that_is_not_a_disk_image_says_so() {
+    // BUG-010. A front end needs to tell "no kind of disk image" from
+    // "recognised and holds no volume": the first is worth declining, the
+    // second is worth opening to explain. Dragging files out of a disk and
+    // dropping them back on the window is how the difference came up.
+    let dir = std::env::temp_dir().join(format!("ade-abi-recognise-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+
+    // An Amiga executable: the hunk magic and nothing else.
+    let mut executable = vec![0u8; 5_732];
+    executable[..4].copy_from_slice(&[0x00, 0x00, 0x03, 0xF3]);
+    let exe = dir.join("program");
+    std::fs::write(&exe, &executable).unwrap();
+    let c_exe = std::ffi::CString::new(exe.to_str().unwrap()).unwrap();
+
+    let mut err = AdeResult::Ok;
+    // SAFETY: valid path, no catalogue, writable slot.
+    let image = unsafe { ade::ade_image_open(c_exe.as_ptr(), std::ptr::null(), &raw mut err) };
+    assert!(!image.is_null(), "it still opens; the answer is what it is");
+    // SAFETY: a live handle.
+    assert!(
+        !unsafe { ade::ade_image_recognised(image) },
+        "an executable is no kind of disk image"
+    );
+    // SAFETY: a live handle.
+    unsafe { ade::ade_image_free(image) };
+
+    // A real disk is recognised, volume or no volume.
+    let (path, c_path) = fixture("recognised", &sound_disk());
+    // SAFETY: valid path, no catalogue, writable slot.
+    let good = unsafe { ade::ade_image_open(c_path.as_ptr(), std::ptr::null(), &raw mut err) };
+    assert!(!good.is_null());
+    // SAFETY: a live handle.
+    assert!(unsafe { ade::ade_image_recognised(good) });
+    // SAFETY: a live handle.
+    unsafe { ade::ade_image_free(good) };
+
+    // An unformatted floppy-sized file: recognised as an ADF by its size, and
+    // holding no volume. Both facts, and they are different facts.
+    let blank = dir.join("blank.adf");
+    std::fs::write(&blank, vec![0u8; 901_120]).unwrap();
+    let c_blank = std::ffi::CString::new(blank.to_str().unwrap()).unwrap();
+    // SAFETY: valid path, no catalogue, writable slot.
+    let empty = unsafe { ade::ade_image_open(c_blank.as_ptr(), std::ptr::null(), &raw mut err) };
+    assert!(!empty.is_null());
+    // SAFETY: a live handle.
+    assert!(
+        unsafe { ade::ade_image_recognised(empty) },
+        "the right size makes it an ADF even with nothing in it"
+    );
+    // SAFETY: a live handle.
+    assert!(!unsafe { ade::ade_image_has_volume(empty) });
+    // SAFETY: a live handle.
+    unsafe { ade::ade_image_free(empty) };
+
+    // SAFETY: null is allowed at every entry point.
+    assert!(!unsafe { ade::ade_image_recognised(std::ptr::null()) });
+
+    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_dir_all(&dir);
+}

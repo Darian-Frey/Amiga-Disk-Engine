@@ -228,6 +228,9 @@ public:
     explicit operator bool() const { return m_raw != nullptr; }
     AdeResult error() const { return m_error; }
 
+    /// Whether the container is a kind of disk image at all.
+    bool recognised() const { return ade_image_recognised(m_raw); }
+
     QString container() const {
         const char *s = ade_image_container(m_raw);
         return s ? QString::fromLatin1(s) : QString{};

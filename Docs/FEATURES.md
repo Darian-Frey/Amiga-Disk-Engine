@@ -62,7 +62,7 @@ Status vocabulary: **Not started** | **In progress** | **Partially delivered** (
 - Linux-first Qt6 GUI presents a directory tree, hex view, and file preview for any opened image.
 - Drag-and-drop extraction; search across the contents of multiple loaded images.
 **Status:** Delivered 2026-08-27 (Linux; Windows and macOS builds untried)
-**Notes:** ADF Opus's never-realised cross-platform port is the gap. Qt6 over the C-ABI bridge, per D-001. Both acceptance clauses met: an image drops in, a file drags out, and search covers every open image at once. 43 headless tests run without an X server.
+**Notes:** ADF Opus's never-realised cross-platform port is the gap. Qt6 over the C-ABI bridge, per D-001. Both acceptance clauses met: an image drops in, a file drags out, and search covers every open image at once. 45 headless tests run without an X server.
 **The window opens at the size its contents need** (2026-08-30). It used to open at a hardcoded 1100x700 with an even split, giving the hex pane about 550 pixels for a dump line that measures 78 monospaced characters — so the characters column was cut off on the first disk anybody opened, and the remedy was to resize the window by hand every time. Both halves are now measured the way the tree's fixed columns already were: from the text they must hold, in the font they will hold it in. **An even split sounds fair and is not** — the tree's content has a natural width and the hex pane's does not, so half the window is more than the tree can use and less than the dump needs; the tree keeps what its columns need and every extra pixel goes to the pane showing the disk. The result is clamped to the screen, because a measurement is not permission to be bigger than the display, and when there is not room for both the **tree** gives way, down to a floor still wide enough to read a name in: a long filename elides and is still a filename, where a clipped dump line is simply missing.
 **The hex pane's selection is clamped to one field** (2026-08-29). A hex dump is three columns pretending to be one line of text, and ordinary text selection does not know that: dragging down two lines in the hex field takes the end of that line's hex, then the ASCII column, then the next line's offset, and only then more hex — so copying a screenful of hex was impossible, which is one of the two things anybody does with a hex view. A drag now stays in the field it began in, including when the pointer wanders out of it, since a selection that changes meaning underneath the pointer is the fault being fixed. Copying returns what was highlighted and nothing else, one clipboard line per line on screen.
 **A selection in one field marks the same bytes in the other.** Hex and characters are two readings of the same bytes, and *which bytes* is the question a hex view exists to answer — so selecting hex marks the characters those bytes spell, and selecting characters marks their hex. The mark is **deliberately weaker than the selection**, a paler wash with the text colour left alone: painted alike the two fields would look equally selected and nothing on screen would say which one Ctrl+C is about to copy, which replaces one ambiguity with a worse one. Selecting *offsets* marks nothing, because that selects whole lines and both other fields would then be "corresponding" — marking every column of every line says nothing the highlighted offsets have not already said.
@@ -267,6 +267,31 @@ The parser reads `RDSK`, the `PART` chain and a minimal `FSHD`/`LSEG`, and every
 **Overlapping occurrences are all reported**, because a caller counting a repeating sequence — the xDMS failure filler is one — would otherwise be given a number that is quietly low. The text output shows the first twenty and says how many it kept back; `--format=json` carries every one.
 **Notes:** nothing found exits 1, as `grep` does — the search worked, and a script wants to branch on the result rather than on an error. A malformed pattern exits 2, because "searched, found nothing" and "never searched" must not look alike.
 
+### F-026 Making a disk from the window
+**Priority:** Should
+**Effort:** S · **Phase:** 5
+**Acceptance:**
+- Make any disk `ade create` can make, from the GUI, and have it open.
+**Status:** Delivered 2026-08-31 — File > New disk...
+**Why it exists:** creating a disk was command-line only, so the GUI could browse and extract but never produce. F-019's own note said dragging a file to the desktop needed a disk to drag *from*; making one needed the terminal.
+**The list of filesystems is the engine's.** `ade_create_type_count`/`_name`/`_label` enumerate what ADE will write, so the window offers six because the engine writes six — not because a list in Qt says so. Two front ends deciding separately which disks exist is two chances to disagree, and a test pins the bridge's strings to the engine's.
+**It moved policy out of the CLI on the way.** The type table, the shape-to-geometry mapping and the AmigaDOS clock all lived in `cli/src/main.rs`; the GUI needed the same three, and duplicating them would have been IMP-007 again. They are now `ade_core::create`, and both front ends ask.
+**`AdeResult` gained `ADE_ALREADY_EXISTS`.** "Already exists" is something a person can fix by choosing another name; "could not write" is not, and reporting them alike would leave somebody re-trying the same thing. It matters here because a save dialog has *already* asked about overwriting and ADE declines anyway, which needs explaining rather than reporting as a failure.
+**Notes:** the new disk opens straight away, because a disk you cannot see is not obviously a disk. The hard-disk size is capped at 49 MB in the dialog, which is where a bitmap extension chain would be needed (F-025).
+
+### F-025 Every disk type ADE can verify
+**Priority:** Should
+**Effort:** M · **Phase:** 5
+**Acceptance:**
+- Create any AmigaDOS filesystem variant ADE can check, at any floppy size, and unpartitioned hard disks.
+**Status:** Delivered 2026-08-31 — `ade create --type=… [--hd|--dd525|--size=N]`
+**Why it exists:** `create` wrote two of eight filesystems and two of six geometries. The set is closed and small, so "which ones" is answerable rather than open-ended.
+**Six of the eight, and the two absences are decisions.** `DOS\0`–`DOS\5` are written: OFS and FFS, each plain, international, and with a dircache. `DOS\6`/`DOS\7` (LNFS) are refused **by name, with the reason** — D-013 defers them on verifiability, and a caller who asked for something real deserves better than "unknown type". Beyond AmigaDOS there are some forty other 4-byte tags in SPEC's registry; none is ADE's to write and none appears in the corpus.
+**The dircache question was settled by the oracle, not by assumption.** SPEC records the rootblock's dircache pointer as "first dircache block, else 0", which left open whether a blank `DOS\4`/`DOS\5` needs a cache block. It does not: ADFlib mounts one written with a zero pointer. All twelve type-and-floppy-size combinations are checked against it.
+**Four geometries.** DD (901,120), HD (1,802,240), 5.25" DD (450,560 — the A1020's 440 KB), and hard disks by `--size=N` megabytes. Hard disks needed **multi-block bitmaps**: one bitmap block maps 4,064 blocks, so 8 MB needs five, exactly as SPEC's arithmetic says. Past 25 pointers a `bm_ext` chain is required, which ADE does not write — refused rather than half-written, because a volume whose bitmap is partly described reports free blocks that are not. The boundary is exact: 49 MB fits, 50 does not.
+**What is deliberately absent, and what it found.** No cylinder count, because a corpus measurement said an 81-, 82- or 83-cylinder image is **not a larger volume** — five of six such images keep their rootblock at 880, and ADE looks at the midpoint of the whole file and finds a file header. That is **BUG-009**, logged rather than fixed inline: it is a read-path defect that this work uncovered, not part of it.
+**5.25" has no oracle.** ADFlib refuses the size before reaching any filesystem, so it can neither confirm nor deny those bytes. Written on the formula being verified at 1760, 3520 and 16,384 blocks elsewhere, and the fixture generator agreeing at 880 — two of the usual three checks, and said so rather than counted as a pass.
+
 ### F-024 Extract everything to a folder
 **Priority:** Should
 **Effort:** S · **Phase:** 5
@@ -315,6 +340,8 @@ The parser reads `RDSK`, the `PART` chain and a minimal `FSHD`/`LSEG`, and every
 ## Candidate features (uncommitted)
 
 Nothing is committed here. The **Atari Disk Engine feature map** in [ROADMAP.md](ROADMAP.md#atari-disk-engine-feature-map) (surveyed 2026-08-30) is where unbuilt candidates are currently written down: it separates the genuine gaps from the differences that are already decisions (bootblock writing, themes) and the ones that are simply a different format (MSA/STX, FAT repair). A candidate graduates to an F- number here when it is committed to, not when it is listed there.
+
+**Named and waiting on a decision, not on effort** (requested 2026-09-01): **saving a modified disk** and **creating a directory on one**. These are the first two writes *into* a disk somebody already owns, which is precisely what D-004 defers and what v1's never-reversible stance is about — `ade create` was permitted only because it makes a new file. The write-suite entry in the ROADMAP map records what each needs; the short version is that **buffering edits until an explicit save** is what would make the whole suite safe rather than merely careful, and that creating a directory is the right first write because it is small, it exercises international hashing and the dircache, and ADFlib can be asked whether the directory is there.
 
 - Read support for modern journalling filesystems (SFS, PFS).
 - FloppyBridge-compatible output for direct WinUAE/Amiberry use.

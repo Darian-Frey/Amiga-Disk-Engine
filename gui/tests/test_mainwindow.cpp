@@ -95,6 +95,8 @@ private slots:
     void aScrollQtDoesNotAnnounceIsStillFollowed();
     void theFollowStopsWhenAFileIsShown();
     void extractingEverythingIsOfferedOnlyWithADiskToExtract();
+    void newDiskIsOfferedAndItsTypesComeFromTheEngine();
+    void aFileThatIsNotADiskImageIsDeclinedRatherThanShown();
     void thereIsAHelpMenuWithAnAboutBox();
     void theAboutBoxTakesItsVersionFromTheEngine();
     void theSearchBoxCanSearchContentsInsteadOfNames();
@@ -1319,6 +1321,84 @@ void TestMainWindow::extractingEverythingIsOfferedOnlyWithADiskToExtract() {
     window.closeAll();
     QApplication::processEvents();
     QVERIFY2(!all->isEnabled(), "and closing the disks takes it away again");
+}
+
+// Making a disk from the window (F-019, F-025).
+//
+// The action opens a modal dialog and then a file chooser, neither of which
+// can be driven headlessly, and what happens after them is tested across the
+// ABI (`bridge/tests/abi.rs`) and in C. The window's own share is offering the
+// item at all and not inventing a list of filesystems.
+void TestMainWindow::newDiskIsOfferedAndItsTypesComeFromTheEngine() {
+    MainWindow window;
+    QAction *neu = nullptr;
+    for (QAction *top : window.menuBar()->actions()) {
+        if (!top->text().contains(QStringLiteral("File"))) continue;
+        for (QAction *item : top->menu()->actions()) {
+            if (item->text().contains(QStringLiteral("New disk"))) neu = item;
+        }
+    }
+    QVERIFY2(neu, "File holds a New disk... item");
+    QVERIFY2(neu->isEnabled(), "and it needs no disk open to be useful");
+    QCOMPARE(neu->shortcut(), QKeySequence(QKeySequence::New));
+
+    // The window must not hold its own list of filesystems: two front ends
+    // deciding separately which disks exist is two chances to disagree with
+    // the engine. Six, because D-013 defers LNFS.
+    QCOMPARE(ade_create_type_count(), size_t(6));
+    for (size_t i = 0; i < ade_create_type_count(); ++i) {
+        QVERIFY(*ade_create_type_name(i) != '\0');
+        QVERIFY(*ade_create_type_label(i) != '\0');
+    }
+}
+
+void TestMainWindow::aFileThatIsNotADiskImageIsDeclinedRatherThanShown() {
+    // BUG-010, reported from the window: dragging three files out of a disk
+    // and dropping them back opened two Amiga executables and a level file as
+    // damaged hard disks. Three rows, each explaining nothing.
+    //
+    // Declining is not the same as declining everything unmountable. A DMS
+    // archive is recognised and unreadable, and opening it to say so is the
+    // point (IMP-006); an executable is neither.
+    MainWindow window;
+    QStringList errors;
+    QObject::connect(&window, &MainWindow::errorOccurred, &window,
+                     [&errors](const QString &message) { errors << message; });
+
+    // The Amiga hunk magic and nothing else, which is what those files were.
+    QByteArray executable(5732, '\0');
+    executable[2] = '\x03';
+    executable[3] = '\xF3';
+    const QString exe = m_dir.filePath(QStringLiteral("program"));
+    QFile out(exe);
+    QVERIFY(out.open(QIODevice::WriteOnly));
+    out.write(executable);
+    out.close();
+
+    window.openImage(exe);
+    auto *tree = browser(window);
+    QVERIFY(tree);
+    QCOMPARE(tree->topLevelItemCount(), 0);
+    QCOMPARE(errors.size(), 1);
+    QVERIFY2(errors.first().contains(QStringLiteral("not a disk image")),
+             qPrintable(errors.first()));
+
+    // And a real image still opens, so the check has not become a refusal to
+    // open anything.
+    window.openImage(m_image);
+    QCOMPARE(tree->topLevelItemCount(), 1);
+    QCOMPARE(errors.size(), 1);
+
+    // An unformatted floppy-sized file is recognised by its size and opens: it
+    // is a disk image that holds no volume, which is a thing worth showing.
+    const QString blank = m_dir.filePath(QStringLiteral("blank.adf"));
+    QFile empty(blank);
+    QVERIFY(empty.open(QIODevice::WriteOnly));
+    empty.write(QByteArray(901120, '\0'));
+    empty.close();
+    window.openImage(blank);
+    QCOMPARE(tree->topLevelItemCount(), 2);
+    QCOMPARE(errors.size(), 1);
 }
 
 QTEST_MAIN(TestMainWindow)

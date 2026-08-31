@@ -823,6 +823,8 @@ pub fn inspect_bytes(bytes: Vec<u8>) -> Inspection {
         }
     };
 
+    // The volume may be smaller than the file it sits in (BUG-009).
+    let geometry = volume_geometry(&bytes, geometry);
     let Ok(image) = RawImage::new(bytes, geometry) else {
         return too_short(detection, size, geometry, bootblock, compression);
     };
@@ -1242,6 +1244,62 @@ fn geometry_for(kind: Kind, size: u64) -> Option<Result<Geometry, GeometryError>
     }
 }
 
+/// The geometry to mount an image with, which is not always the file's.
+///
+/// # A volume can be smaller than the file that holds it
+///
+/// A drive could generally seek past cylinder 79, so images of 81, 82 and 83
+/// cylinders occur. Those are **not larger volumes**: they are ordinary
+/// 80-cylinder AmigaDOS filesystems in files that carry extra tracks, and
+/// their rootblock is still at 880. Computing it from the file's own block
+/// count puts a reader at the midpoint of the *file* — block 902 for a
+/// 1804-block image, where it finds a file header and reports no rootblock.
+/// That was BUG-009, and it made five corpus images unmountable.
+///
+/// So the file's own geometry is tried first — every standard image and every
+/// hard disk mounts exactly as before — and only if its rootblock does not
+/// validate are the standard floppy shapes tried, largest first. A candidate
+/// is adopted only when the file can satisfy it and a real rootblock is
+/// actually there, so this can rescue an image but never redefine one.
+///
+/// A file **shorter** than any standard geometry is not rescued: a truncated
+/// dump does not contain a whole volume, and saying so is the honest answer
+/// rather than mounting an extent the bytes cannot cover.
+fn volume_geometry(bytes: &[u8], file: Geometry) -> Geometry {
+    if has_rootblock(bytes, file) {
+        return file;
+    }
+    // Largest first, so an oversized HD image is not read as a DD volume that
+    // happens to have a rootblock where HD keeps its data.
+    for candidate in [Geometry::HD_FLOPPY, Geometry::DD_FLOPPY] {
+        if candidate.total_bytes() > bytes.len() as u64 {
+            continue;
+        }
+        if candidate.total_blocks() >= file.total_blocks() {
+            continue;
+        }
+        if has_rootblock(bytes, candidate) {
+            return candidate;
+        }
+    }
+    file
+}
+
+/// Whether `geometry`'s rootblock position really holds a rootblock.
+fn has_rootblock(bytes: &[u8], geometry: Geometry) -> bool {
+    let block_size = geometry.block_size() as usize;
+    let at = usize::try_from(geometry.root_block().0)
+        .ok()
+        .and_then(|b| b.checked_mul(block_size));
+    let Some(at) = at else {
+        return false;
+    };
+    let Some(block) = bytes.get(at..at.saturating_add(block_size)) else {
+        return false;
+    };
+    ade_filesystem::rootblock::Rootblock::parse(block).is_ok_and(|r| r.looks_like_a_rootblock())
+}
+
 /// An image opened for browsing.
 ///
 /// Owns the bytes so a [`Volume`] can borrow from it; the two-step open keeps
@@ -1306,6 +1364,8 @@ impl Image {
         let geometry = geometry_for(sniff(head, size).kind, size)
             .ok_or(InspectionError::Geometry(GeometryError::ZeroDimension))?
             .map_err(InspectionError::Geometry)?;
+        // The volume may be smaller than the file it sits in (BUG-009).
+        let geometry = volume_geometry(&bytes, geometry);
         let raw = RawImage::new(bytes, geometry)
             .map_err(|_| InspectionError::Geometry(GeometryError::ReservedExceedsVolume))?;
         Ok(Self {
@@ -1353,6 +1413,14 @@ impl Image {
         let geometry = geometry_for(kind, size)
             .ok_or(InspectionError::Geometry(GeometryError::ZeroDimension))?
             .map_err(InspectionError::Geometry)?;
+        // The volume may be smaller than the file it sits in (BUG-009). Only
+        // the head was read above, so the candidate rootblocks are read here
+        // — a few hundred bytes on an image that is about to be opened anyway,
+        // and only when the file's own geometry does not already work.
+        let geometry = match std::fs::read(path) {
+            Ok(bytes) => volume_geometry(&bytes, geometry),
+            Err(_) => geometry,
+        };
         let file = FileSource::open(path, geometry).map_err(InspectionError::Io)?;
         Ok(Self {
             backing: Backing::File(file),

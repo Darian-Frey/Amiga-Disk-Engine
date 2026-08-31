@@ -41,7 +41,8 @@ typedef enum {
     ADE_NO_VOLUME     = 3,
     ADE_BAD_ENCODING  = 4,
     ADE_NOT_FOUND     = 5,
-    ADE_INTERNAL      = 6
+    ADE_INTERNAL      = 6,
+    ADE_ALREADY_EXISTS = 7
 } AdeResult;
 
 /* A borrowed run of bytes with no encoding claimed. `data` is NULL when
@@ -252,6 +253,53 @@ void       ade_layout_free(AdeLayout *layout);
  * never freed; empty for a code this build does not know. */
 const char *ade_region_name(AdeRegion region);
 const char *ade_region_describes(AdeRegion region);
+
+/* Whether the container was recognised at all.
+ *
+ * False for a file that is no kind of disk image — an executable, a document,
+ * anything. Distinct from having no volume: a DMS archive or an IPF is
+ * recognised and holds no volume ADE can mount, and is worth opening to say
+ * so. An unrecognised file is worth *declining*, which is what a front end
+ * should do with one rather than showing a row that explains nothing.
+ *
+ * This exists because dragging files out of a disk and dropping them back on
+ * the window opened three Amiga executables as damaged hard disks (BUG-010). */
+bool ade_image_recognised(const AdeImage *image);
+
+/* The shape of a disk to make (F-025). */
+typedef enum {
+    ADE_DISK_DD = 0,    /* 3.5" double density, 880 KB — the norm  */
+    ADE_DISK_HD = 1,    /* 3.5" high density, 1.76 MB              */
+    ADE_DISK_DD525 = 2, /* 5.25" double density, 440 KB            */
+    ADE_DISK_HARD = 3   /* an unpartitioned hard disk; see megabytes */
+} AdeDiskShape;
+
+/* The filesystems ADE will write, for a front end to offer.
+ *
+ * Six, not eight: DOS and DOS (LNFS) are deferred by D-013 on
+ * verifiability, and the forty-odd non-AmigaDOS tags are other people's
+ * filesystems. Enumerated here rather than listed in a front end so that two
+ * front ends cannot disagree with the engine about which disks exist.
+ *
+ * `ade_create_type_name` is what ade_create takes ("ffs-intl");
+ * `ade_create_type_label` is what a person reads ("FFS, international
+ * (DOS)"). Both are static and never freed; empty past the end. */
+size_t      ade_create_type_count(void);
+const char *ade_create_type_name(size_t index);
+const char *ade_create_type_label(size_t index);
+
+/* Make a blank disk at `path` (F-019, F-025).
+ *
+ * `type_name` is one of ade_create_type_name's; NULL means the default, which
+ * is `ffs-intl` because everything since Workbench 2.0 writes the
+ * international variant. `volume_name` NULL means ADE's default. `megabytes`
+ * is read only for ADE_DISK_HARD.
+ *
+ * **Never overwrites.** ADE_ALREADY_EXISTS if something is already at `path`:
+ * a blank disk is the safest write there is precisely because it makes a new
+ * file, and giving that away would be a poor trade. */
+AdeResult ade_create(const char *path, const char *type_name, const char *volume_name,
+                     AdeDiskShape shape, uint32_t megabytes);
 
 /* Write every file on the image into `dir`, creating it if needed (F-024).
  *

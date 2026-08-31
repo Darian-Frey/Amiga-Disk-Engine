@@ -243,6 +243,29 @@ int main(int argc, char **argv) {
               "a null folder is refused");
     }
 
+    /* Making a disk (F-025), from C. The type list is the engine's, so a front
+       end cannot invent a filesystem ADE does not write. */
+    {
+        size_t types = ade_create_type_count();
+        printf("creatable filesystems: %zu\n", types);
+        check(types == 6, "six: DOS\\6 and DOS\\7 are deferred by D-013");
+        for (size_t i = 0; i < types; i++) {
+            printf("  %-9s %s\n", ade_create_type_name(i), ade_create_type_label(i));
+        }
+        check(ade_create_type_name(types)[0] == '\0', "past the end is empty, not wrong");
+    }
+    if (argc > 3) {
+        AdeResult made = ade_create(argv[3], "ffs-intl", "FromC", ADE_DISK_DD, 0);
+        check(made == ADE_OK, "a disk is made");
+        check(ade_create(argv[3], "ffs-intl", "FromC", ADE_DISK_DD, 0) == ADE_ALREADY_EXISTS,
+              "and never overwritten");
+        check(ade_create(argv[3], "ffs-lnfs", NULL, ADE_DISK_DD, 0) != ADE_OK,
+              "LNFS is refused");
+        AdeImage *fresh = ade_image_open(argv[3], NULL, NULL);
+        check(fresh != NULL && ade_image_has_volume(fresh), "and it holds a volume");
+        ade_image_free(fresh);
+    }
+
     ade_image_free(image);
     printf("\n%s\n", failures ? "FAILURES" : "all checks passed");
     return failures ? 1 : 0;

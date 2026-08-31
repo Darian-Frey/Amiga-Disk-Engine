@@ -287,3 +287,113 @@ fn ade_survives_what_the_oracle_does_not() {
     eprintln!("ADE handled {checked} images that crash ADFlib, without incident");
     assert!(checked > 0, "none of the known-bad images were present");
 }
+
+#[test]
+fn a_volume_smaller_than_its_file_extracts_the_same_as_adflib() {
+    // BUG-009. A disk with extra cylinders is not a larger volume: it is an
+    // 80-cylinder filesystem in a file that carries extra tracks, and its
+    // rootblock is still at 880. ADE used to compute the rootblock from the
+    // *file's* block count, land on a file header, and report no volume.
+    //
+    // ADFlib gets this right and says so plainly — `Volume : Floppy 880
+    // KBytes, "LINGO" between sectors [0-1759]` for a 912,384-byte file — so
+    // it is exactly the right thing to check the fix against. Mounting such an
+    // image is not enough on its own: a wrongly adopted geometry can find a
+    // rootblock-shaped block and produce confident nonsense.
+    //
+    // **This is not the regression guard.** With the bug present no image is
+    // rescued, so there is nothing to compare and this passes vacuously. What
+    // it proves is that the images the fix rescues are read *correctly*;
+    // `tests/oversize.rs` is what fails if the fix is removed.
+    if !have_unadf() {
+        eprintln!("unadf not installed — skipping the D-002 oracle");
+        return;
+    }
+    let Some(root) = corpus() else {
+        eprintln!("no corpus — skipping (D-010: images are never committed)");
+        return;
+    };
+
+    let tmp = std::env::temp_dir().join(format!("ade-oracle-oversize-{}", std::process::id()));
+    let mut examined = 0usize;
+    let mut compared = 0usize;
+    let mut identical = 0usize;
+    let mut differing: Vec<String> = Vec::new();
+
+    let mut paths: Vec<PathBuf> = fs::read_dir(&root)
+        .unwrap()
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.is_file())
+        .collect();
+    paths.sort();
+
+    for image in &paths {
+        // Only plain images whose file is a little larger than a DD floppy but
+        // smaller than an HD one — the shape this bug was about. An extended
+        // ADF is also "larger than its volume" and is a different mechanism.
+        let Ok(size) = fs::metadata(image).map(|m| m.len()) else {
+            continue;
+        };
+        if !(901_121..1_802_240).contains(&size) {
+            continue;
+        }
+        let Ok(img) = Image::open(image) else {
+            continue;
+        };
+        if img.geometry().total_bytes() != 901_120 {
+            continue;
+        }
+        let Ok(volume) = img.volume() else { continue };
+        let Ok(walked) = volume.walk(volume.root()) else {
+            continue;
+        };
+
+        let disk = image.file_name().unwrap().to_string_lossy().into_owned();
+        let _ = fs::remove_dir_all(&tmp);
+        if fs::create_dir_all(&tmp).is_err() {
+            continue;
+        }
+        let mut theirs = match oracle_extract(image, &tmp) {
+            Oracle::Files(f) => f,
+            // ADFlib declining tells us nothing either way about the bytes.
+            Oracle::Refused | Oracle::Crashed(_) => continue,
+        };
+        examined += 1;
+
+        for (_, entry) in walked.entries {
+            if !entry.kind.is_file() {
+                continue;
+            }
+            let rel = path_of(&volume, &entry);
+            let Some(their_bytes) = theirs.remove(&rel) else {
+                continue;
+            };
+            let Ok(ours) = volume.read_file(&entry) else {
+                continue;
+            };
+            compared += 1;
+            if ours.bytes == their_bytes {
+                identical += 1;
+            } else {
+                differing.push(format!("{disk}:{}", rel.display()));
+            }
+        }
+    }
+    let _ = fs::remove_dir_all(&tmp);
+
+    eprintln!("BUG-009: {examined} images whose volume is smaller than their file");
+    eprintln!("  files compared: {compared}, byte-identical: {identical}");
+    if examined == 0 {
+        eprintln!("  none in this corpus — nothing to compare");
+        return;
+    }
+    assert!(
+        differing.is_empty(),
+        "ADE and ADFlib disagree on a rescued image: {differing:?}"
+    );
+    assert!(
+        compared > 0,
+        "images were rescued but no file could be compared, which proves nothing"
+    );
+}

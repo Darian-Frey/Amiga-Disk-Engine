@@ -8,6 +8,10 @@
 #include <QDropEvent>
 #include <QFile>
 #include <QDir>
+#include <QDialog>
+#include <QDialogButtonBox>
+#include <QFormLayout>
+#include <QSpinBox>
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QFont>
@@ -304,6 +308,10 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
     statusBar()->addPermanentWidget(m_summary);
 
     auto *file = menuBar()->addMenu(QStringLiteral("&File"));
+    auto *blank = file->addAction(QStringLiteral("&New disk..."));
+    blank->setShortcut(QKeySequence::New);
+    connect(blank, &QAction::triggered, this, &MainWindow::newDisk);
+
     auto *open = file->addAction(QStringLiteral("&Open image..."));
     open->setShortcut(QKeySequence::Open);
     connect(open, &QAction::triggered, this, &MainWindow::chooseImage);
@@ -395,6 +403,20 @@ void MainWindow::openImage(const QString &path) {
         emit errorOccurred(QStringLiteral("%1: ADE could not read this file (error %2).")
                                .arg(QFileInfo(path).fileName())
                                .arg(static_cast<int>(image.error())));
+        return;
+    }
+
+    // A file that is no kind of disk image is declined rather than shown as a
+    // row explaining that it could not be read. This is not the same as having
+    // no volume: a DMS archive or an IPF is recognised and unmountable, and
+    // opening it to say so is the point (IMP-006).
+    //
+    // Found by dragging three files out of a disk and dropping them back on
+    // the window, which opened two Amiga executables and a level file as
+    // damaged hard disks (BUG-010).
+    if (!image.recognised()) {
+        emit errorOccurred(QStringLiteral("%1 is not a disk image.")
+                               .arg(QFileInfo(path).fileName()));
         return;
     }
 
@@ -896,6 +918,88 @@ void MainWindow::searchContents(const QString &query) {
                                  .arg(query)
                                  .arg(m_images.size())
                                  .arg(m_images.size() == 1 ? "" : "s"));
+}
+
+void MainWindow::newDisk() {
+    // The filesystems and their labels come from the engine, like every other
+    // fact this window shows. A list written in Qt is a second opinion about
+    // which disks exist, and the one most likely to drift.
+    QDialog dialog(this);
+    dialog.setWindowTitle(QStringLiteral("New disk"));
+
+    auto *name = new QLineEdit(QStringLiteral("Empty"), &dialog);
+    name->setMaxLength(30);  // what a rootblock's name field holds
+
+    auto *type = new QComboBox(&dialog);
+    type->setObjectName(QStringLiteral("newDiskType"));
+    for (size_t i = 0; i < ade_create_type_count(); ++i) {
+        type->addItem(QString::fromUtf8(ade_create_type_label(i)),
+                      QString::fromUtf8(ade_create_type_name(i)));
+    }
+    // The default is the international FFS, because everything since Workbench
+    // 2.0 writes it and a name with an accent sorts wrongly without it (C-006).
+    type->setCurrentIndex(type->findData(QStringLiteral("ffs-intl")));
+
+    auto *shape = new QComboBox(&dialog);
+    shape->setObjectName(QStringLiteral("newDiskShape"));
+    shape->addItem(QStringLiteral("3.5\" DD — 880 KB"), ADE_DISK_DD);
+    shape->addItem(QStringLiteral("3.5\" HD — 1.76 MB"), ADE_DISK_HD);
+    shape->addItem(QStringLiteral("5.25\" DD — 440 KB"), ADE_DISK_DD525);
+    shape->addItem(QStringLiteral("Hard disk"), ADE_DISK_HARD);
+
+    auto *megabytes = new QSpinBox(&dialog);
+    megabytes->setRange(1, 49);  // past 49 a bitmap extension chain is needed
+    megabytes->setValue(8);
+    megabytes->setSuffix(QStringLiteral(" MB"));
+    megabytes->setEnabled(false);
+    connect(shape, &QComboBox::currentIndexChanged, &dialog, [shape, megabytes] {
+        megabytes->setEnabled(shape->currentData().toInt() == ADE_DISK_HARD);
+    });
+
+    auto *form = new QFormLayout;
+    form->addRow(QStringLiteral("Volume name"), name);
+    form->addRow(QStringLiteral("Filesystem"), type);
+    form->addRow(QStringLiteral("Size"), shape);
+    form->addRow(QStringLiteral("Hard disk size"), megabytes);
+
+    auto *buttons =
+        new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
+    connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+    connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+
+    auto *layout = new QVBoxLayout(&dialog);
+    layout->addLayout(form);
+    layout->addWidget(buttons);
+    if (dialog.exec() != QDialog::Accepted) return;
+
+    const int kind = shape->currentData().toInt();
+    const QString suggested =
+        QStringLiteral("%1.%2").arg(name->text(), kind == ADE_DISK_HARD ? "hdf" : "adf");
+    const QString path = QFileDialog::getSaveFileName(
+        this, QStringLiteral("Save the new disk as..."), QDir::homePath() + "/" + suggested);
+    if (path.isEmpty()) return;
+
+    const QByteArray typeName = type->currentData().toString().toUtf8();
+    const QByteArray volumeName = name->text().toUtf8();
+    const AdeResult made = ade_create(path.toLocal8Bit().constData(), typeName.constData(),
+                                      volumeName.constData(),
+                                      static_cast<AdeDiskShape>(kind),
+                                      static_cast<uint32_t>(megabytes->value()));
+    if (made != ADE_OK) {
+        // "Already exists" is a thing the person can fix by choosing another
+        // name, and it is worth saying rather than reporting a generic
+        // failure — the file dialog will have asked about overwriting, and
+        // ADE declines anyway, which needs explaining.
+        emit errorOccurred(made == ADE_ALREADY_EXISTS
+                               ? QStringLiteral("%1 already exists. ADE will not overwrite a "
+                                                "disk image.")
+                                     .arg(path)
+                               : QStringLiteral("Could not create %1.").arg(path));
+        return;
+    }
+    // Opened straight away, because a disk you cannot see is not obviously a
+    // disk: the tree shows its volume name and the hex pane its bootblock.
+    openImage(path);
 }
 
 void MainWindow::extractAll() {
