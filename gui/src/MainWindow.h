@@ -70,6 +70,7 @@ public:
     static QString aboutDetail();
 
 private slots:
+    void extractAll();
     void showAbout();
     void updateSearchHint();
     void searchContents(const QString &query);
@@ -172,4 +173,5 @@ private:
     QTabWidget *m_views = nullptr;
     QLabel *m_summary = nullptr;
     QAction *m_extract = nullptr;
+    QAction *m_extractAll = nullptr;
 };

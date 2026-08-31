@@ -127,7 +127,7 @@ Neither run is the F-001 bar, which requires a fuzz corpus rather than well-form
 ## Phase 5 — Catalogue & GUI
 **Goal:** The single cross-platform application: capture-to-catalogue in one place.
 **Status:** In progress — the GUI landed 2026-08-27; F-005 and F-006 remain, both needing hardware
-**Features in scope:** F-004, F-005, F-006, F-013, F-014, F-019, F-020, F-021, F-022, F-023 *(the last five added to the phase during it, from the Atari feature map)*
+**Features in scope:** F-004, F-005, F-006, F-013, F-014, F-019, F-020, F-021, F-022, F-023, F-024 *(the last six added to the phase during it, from the Atari feature map)*
 **Deliverables:**
 - [x] **C-ABI bridge** (D-001) — the seam the GUI links against, and the only place in ADE that writes `unsafe`. Opaque handles, explicit frees, and an error code rather than a Rust `Result`. `bridge/include/ade.h` is hand-written: ADE has no dependencies and a header is the contract with every future caller.
   Three rules it exists to keep: **no panic crosses the boundary** (every entry point is wrapped in `catch_unwind`, because "should not panic" and "cannot unwind into C" are different claims); **names are bytes, not C strings** (Amiga filenames are Latin-1 and hold bytes above 0x7F, so a `char*` API would either lie about the encoding or mangle the name); and **null is tolerated everywhere**, since a C caller that has just had an error will pass one.
@@ -137,7 +137,7 @@ Neither run is the F-001 bar, which requires a fuzz corpus rather than well-form
   **Nothing in it knows anything about Amiga filesystems** — every fact on screen came through the bridge, so the window cannot drift from the CLI.
   **Search grew the ABI rather than the GUI.** Walking a disk safely is cycle detection (AV-001) and a depth bound (IMP-003); doing it in Qt would hang the window on an image the CLI handles. `ade_walk_open` was added instead, and `ade.h` documents it as existing so no future front end writes its own traversal.
   **Several images stay open at once**, each a root in the tree — without that, cross-image search has nothing to search. On 400 corpus images: 580 ms to open, 79 ms to search (7908 matches), 400 MB resident, since an open image is held in memory.
-  **42 headless tests** under `QT_QPA_PLATFORM=offscreen`, `-Wall -Wextra` clean, using a `mkfixture`-generated image (D-010 commits no binaries). Linux only so far: Qt6 and the C ABI are what make the other platforms possible, but neither has been built.
+  **43 headless tests** under `QT_QPA_PLATFORM=offscreen`, `-Wall -Wextra` clean, using a `mkfixture`-generated image (D-010 commits no binaries). Linux only so far: Qt6 and the C ABI are what make the other platforms possible, but neither has been built.
 - [x] **RDB partition browsing in the GUI (F-018's second half)** — a hard disk opens as its partitions, each with its files beneath it, and search covers every one of them. Reading has worked since 2026-08-24; what was missing was any way to see it that was not `--partition=` on a command line.
   **The ABI grew a selector rather than a second family of calls.** `ade_dir_open`, `ade_walk_open` and `ade_file_read` take a partition index or `ADE_WHOLE_IMAGE`, because a device is not a special case of an image — it is what an image is when it has an RDB. `ade_partitions_open` returns the table, and reports **whether each partition mounts** separately from whether it is flagged bootable: a `PFS\0` partition is a real partition ADE cannot read, and an empty listing would read as an empty disk.
   **A partition is not an offset.** Its own block size and reserved count determine where the rootblock sits (C-007), so the engine resolves it from an index rather than the front end adding numbers together.
@@ -190,7 +190,7 @@ Sized S/M/L on ADE's terms, with the constraint each one runs into. **None of th
 
 - ~~**Content search in the window**~~ — **delivered 2026-08-30 as F-023**, the search box's Contents mode. It was the smallest genuine gap on this list and the one a user met first.
 
-- **Extract everything to a folder** (S). Atari has "Extract All Files to Folder"; ADE's `extract` takes one path at a time, and the GUI extracts by dragging one file. Whole-image extraction exists nowhere. Walking and writing are both solved (`volume.walk`, `ade batch`'s per-image loop) — what is missing is the command. Needs a position on name collisions and on the Latin-1-to-host filename mapping, which is where an Amiga name meets a filesystem that will not take it.
+- ~~**Extract everything to a folder**~~ — **delivered 2026-08-31 as F-024**, `ade extract --all` and the GUI's File menu. The two questions it needed a position on were both settled by measuring the corpus rather than by choosing: 83,487 filenames say which characters must be escaped and which are merely awkward, and one image in 4,652 collides case-insensitively.
 
 - **Block map visualisation** (M) — **the data half is delivered** as F-022 (`ade layout`, `ade_layout_open`, and the GUI's whole-disk hex). What remains is the *picture*: Atari's `FatVisualizerWidget` and "View FAT Table" draw the disk as a grid of cells rather than as a hex dump, which answers "where did the space go" at a glance where a dump answers it one screen at a time. The map now exists and tiles exactly, so this is a widget over data that is already there.
 

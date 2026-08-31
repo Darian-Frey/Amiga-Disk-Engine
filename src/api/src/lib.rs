@@ -17,6 +17,7 @@ pub mod inspect;
 pub mod json;
 pub mod layout;
 pub mod scan;
+pub mod unpack;
 
 pub use assemble::{Assembly, assemble};
 pub use batch::{Record, Summary};

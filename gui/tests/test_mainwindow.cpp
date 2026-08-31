@@ -26,6 +26,7 @@
 #include <QItemSelectionModel>
 #include <QStatusBar>
 #include <QTreeWidgetItemIterator>
+#include <QDir>
 #include <QLabel>
 #include <QMenu>
 #include <QMenuBar>
@@ -93,6 +94,7 @@ private slots:
     void scrollingOutOfAFileUnmarksIt();
     void aScrollQtDoesNotAnnounceIsStillFollowed();
     void theFollowStopsWhenAFileIsShown();
+    void extractingEverythingIsOfferedOnlyWithADiskToExtract();
     void thereIsAHelpMenuWithAnAboutBox();
     void theAboutBoxTakesItsVersionFromTheEngine();
     void theSearchBoxCanSearchContentsInsteadOfNames();
@@ -1276,6 +1278,47 @@ void TestMainWindow::clickingAContentHitGoesToItInTheWholeDiskView() {
 
     // And the hit itself is highlighted, so it can be picked out of the line.
     QVERIFY(!hex->extraSelections().isEmpty());
+}
+
+// Extract everything to a folder (F-024).
+//
+// What the extraction *does* is tested in the engine (`src/api/tests/unpack.rs`)
+// and across the ABI (`bridge/tests/abi.rs`), where the names, the skipping and
+// the never-overwriting all live. The window's own share is the menu item and
+// when it is offered — its action opens a folder chooser, which cannot be
+// driven headlessly, and reaching past it into the window to re-test the
+// engine would be duplicate coverage bought with a leaky accessor.
+void TestMainWindow::extractingEverythingIsOfferedOnlyWithADiskToExtract() {
+    MainWindow window;
+    QAction *all = nullptr;
+    for (QAction *top : window.menuBar()->actions()) {
+        if (!top->text().contains(QStringLiteral("File"))) continue;
+        for (QAction *item : top->menu()->actions()) {
+            if (item->text().contains(QStringLiteral("all files"))) all = item;
+        }
+    }
+    QVERIFY2(all, "File holds an Extract all files... item");
+    QVERIFY2(!all->isEnabled(), "with no disk open there is nothing to extract");
+
+    window.openImage(m_image);
+    auto *tree = browser(window);
+    QVERIFY(tree && tree->topLevelItemCount() > 0);
+    tree->setCurrentItem(tree->topLevelItem(0), 0, QItemSelectionModel::ClearAndSelect);
+    QApplication::processEvents();
+    QVERIFY2(all->isEnabled(), "with a disk selected it is offered");
+
+    // And a file row still offers it: extracting everything takes the disk the
+    // row belongs to, not the row.
+    tree->expandItem(tree->topLevelItem(0));
+    QTreeWidgetItem *file = childNamed(tree->topLevelItem(0), QStringLiteral("startup"));
+    QVERIFY(file);
+    tree->setCurrentItem(file, 0, QItemSelectionModel::ClearAndSelect);
+    QApplication::processEvents();
+    QVERIFY(all->isEnabled());
+
+    window.closeAll();
+    QApplication::processEvents();
+    QVERIFY2(!all->isEnabled(), "and closing the disks takes it away again");
 }
 
 QTEST_MAIN(TestMainWindow)

@@ -7,6 +7,7 @@
 #include <QDragEnterEvent>
 #include <QDropEvent>
 #include <QFile>
+#include <QDir>
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QFont>
@@ -306,6 +307,10 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
     auto *open = file->addAction(QStringLiteral("&Open image..."));
     open->setShortcut(QKeySequence::Open);
     connect(open, &QAction::triggered, this, &MainWindow::chooseImage);
+
+    m_extractAll = file->addAction(QStringLiteral("Extract &all files..."));
+    m_extractAll->setEnabled(false);
+    connect(m_extractAll, &QAction::triggered, this, &MainWindow::extractAll);
 
     m_extract = file->addAction(QStringLiteral("&Extract selected..."));
     m_extract->setShortcut(QKeySequence(Qt::CTRL | Qt::Key_E));
@@ -893,6 +898,38 @@ void MainWindow::searchContents(const QString &query) {
                                  .arg(m_images.size() == 1 ? "" : "s"));
 }
 
+void MainWindow::extractAll() {
+    const Open *open = imageFor(m_selected);
+    if (!open) {
+        emit errorOccurred(QStringLiteral("Select a disk first."));
+        return;
+    }
+    const QString dir = QFileDialog::getExistingDirectory(
+        this, QStringLiteral("Extract every file into..."), QDir::homePath());
+    if (dir.isEmpty()) return;
+
+    uint64_t written = 0;
+    uint64_t skipped = 0;
+    const quint32 partition = m_selected->data(0, RolePartition).isValid()
+                                  ? m_selected->data(0, RolePartition).toUInt()
+                                  : ADE_WHOLE_IMAGE;
+    if (!open->image.unpack(partition, dir, &written, &skipped)) {
+        emit errorOccurred(QStringLiteral("Could not extract %1 into %2.").arg(open->name, dir));
+        return;
+    }
+
+    // A partial recovery is said plainly. "Extracted 40 files" when 3 were
+    // skipped is how somebody comes to believe they have the whole disk.
+    QString message = QStringLiteral("Extracted %1 file%2 from %3 into %4")
+                          .arg(written)
+                          .arg(written == 1 ? "" : "s")
+                          .arg(open->name, dir);
+    if (skipped > 0) {
+        message += QStringLiteral("  —  %1 skipped, nothing was overwritten").arg(skipped);
+    }
+    statusBar()->showMessage(message);
+}
+
 void MainWindow::showAbout() {
     QMessageBox about(this);
     about.setWindowTitle(QStringLiteral("About Amiga Disk Engine"));
@@ -1037,6 +1074,9 @@ QByteArray MainWindow::contentsOf(QTreeWidgetItem *item) const {
 
 void MainWindow::showEntry(QTreeWidgetItem *item) {
     m_selected = item;
+    // Extracting everything needs a disk, not a file: any row of any image
+    // will do, because the whole disk is what it takes.
+    if (m_extractAll) m_extractAll->setEnabled(imageFor(item) != nullptr);
     // A content-search hit is an offset, not a file. Selecting one shows the
     // whole disk and scrolls to it — a list of offsets you cannot go to is
     // half a feature, and going there is where F-022's colouring pays off:
@@ -1129,6 +1169,7 @@ void MainWindow::clearViews() {
     markRow(0);
     showLegend({});
     if (m_extract) m_extract->setEnabled(false);
+    if (m_extractAll) m_extractAll->setEnabled(imageFor(m_selected) != nullptr);
 }
 
 void MainWindow::dragEnterEvent(QDragEnterEvent *event) {

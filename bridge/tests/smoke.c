@@ -216,6 +216,33 @@ int main(int argc, char **argv) {
         ade_layout_free(layout);
     }
 
+    /* Extract everything (F-024), from C, so the header's out-params are
+       checked by a compiler rather than by a Rust caller that shares the
+       declarations. */
+    if (argc > 2) {
+        uint64_t written = 0, skipped = 0;
+        AdeResult r = ade_unpack(image, ADE_WHOLE_IMAGE, argv[2], &written, &skipped);
+        if (r == ADE_OK) {
+            printf("unpacked: %llu written, %llu skipped\n",
+                   (unsigned long long)written, (unsigned long long)skipped);
+            check(written > 0, "a formatted disk yields files");
+            check(skipped == 0, "into an empty folder nothing is skipped");
+            /* Again, into the same folder: everything collides and nothing is
+               overwritten, which is the whole promise. */
+            uint64_t again = 0, collided = 0;
+            check(ade_unpack(image, ADE_WHOLE_IMAGE, argv[2], &again, &collided) == ADE_OK,
+                  "a second run still succeeds");
+            check(again == 0, "and writes nothing");
+            check(collided == written, "reporting every one as skipped");
+        } else {
+            printf("unpack: not a volume (%d)\n", (int)r);
+        }
+        check(ade_unpack(NULL, ADE_WHOLE_IMAGE, argv[2], NULL, NULL) != ADE_OK,
+              "a null image is refused");
+        check(ade_unpack(image, ADE_WHOLE_IMAGE, NULL, NULL, NULL) != ADE_OK,
+              "a null folder is refused");
+    }
+
     ade_image_free(image);
     printf("\n%s\n", failures ? "FAILURES" : "all checks passed");
     return failures ? 1 : 0;

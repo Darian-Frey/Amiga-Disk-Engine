@@ -47,11 +47,14 @@ jobs:
              -o /tmp/ade-smoke bridge/tests/smoke.c \
              target/release/libade.a -lpthread -ldl -lm
           cargo run --quiet -p ade-fixtures --bin mkfixture /tmp/ade-fixture.adf
-          ASAN_OPTIONS=detect_leaks=1 /tmp/ade-smoke /tmp/ade-fixture.adf
+          # The second argument is a folder to extract into (F-024): the run
+          # writes it, then runs again over the same folder to check that
+          # nothing is overwritten.
+          ASAN_OPTIONS=detect_leaks=1 /tmp/ade-smoke /tmp/ade-fixture.adf /tmp/ade-unpacked
           # Again as a hard disk: a device holds no volume of its own, so it
           # exercises the partition calls and nothing else does (F-018).
           cargo run --quiet -p ade-fixtures --bin mkfixture /tmp/ade-device.hdf --device
-          ASAN_OPTIONS=detect_leaks=1 /tmp/ade-smoke /tmp/ade-device.hdf
+          ASAN_OPTIONS=detect_leaks=1 /tmp/ade-smoke /tmp/ade-device.hdf /tmp/ade-unpacked-hdf
 
       # The Qt6 front end (F-004). Headless: what the window *shows* needs no
       # display, and only how it *feels* needs a person.

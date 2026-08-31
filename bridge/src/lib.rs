@@ -907,6 +907,58 @@ pub unsafe extern "C" fn ade_layout_free(layout: *mut AdeLayout) {
     });
 }
 
+/// Write every file on the image into `dir` (F-024).
+///
+/// The name mapping lives in the engine, not here and not in a front end: get
+/// it wrong and a name is lost while appearing to be preserved.
+///
+/// # Safety
+/// `image` must be a live handle or null, `dir` a NUL-terminated path or null,
+/// and `written`/`skipped` writable or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ade_unpack(
+    image: *const AdeImage,
+    partition: u32,
+    dir: *const c_char,
+    written: *mut u64,
+    skipped: *mut u64,
+) -> AdeResult {
+    guard(AdeResult::Internal, || {
+        if dir.is_null() {
+            return AdeResult::NullArgument;
+        }
+        // SAFETY: checked non-null; the caller promises NUL termination.
+        let Ok(path) = (unsafe { CStr::from_ptr(dir) }).to_str() else {
+            return AdeResult::BadEncoding;
+        };
+        // SAFETY: the caller's contract; null is checked inside.
+        let Some(handle) = (unsafe { image.as_ref() }) else {
+            return AdeResult::NullArgument;
+        };
+
+        let done = with_volume(handle, partition, |volume| {
+            ade_core::unpack::unpack(volume, std::path::Path::new(path)).ok()
+        });
+        let Some(done) = done else {
+            // Two different failures, and they are worth telling apart: no
+            // volume to read, against a folder that could not be made.
+            return if handle.image.is_none() {
+                AdeResult::NoVolume
+            } else {
+                AdeResult::Io
+            };
+        };
+
+        if let Some(out) = unsafe { written.as_mut() } {
+            *out = done.files;
+        }
+        if let Some(out) = unsafe { skipped.as_mut() } {
+            *out = done.skipped.len() as u64;
+        }
+        AdeResult::Ok
+    })
+}
+
 /// A content search over one image. Opaque to C.
 pub struct AdeSearch {
     /// Owns the owner strings the matches point into.

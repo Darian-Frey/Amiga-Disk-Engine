@@ -144,6 +144,8 @@ struct Args {
     output: Option<PathBuf>,
     /// A directory of TOSEC datfiles, for identification (F-013).
     datfiles: Option<PathBuf>,
+    /// `extract` takes the whole disk rather than one path.
+    all: bool,
     /// `find` reads its pattern as text even if it looks like hex.
     text: bool,
     /// `find` matches ASCII letters in either case.
@@ -179,6 +181,7 @@ fn parse_args(raw: Vec<String>) -> Result<Args, String> {
     let mut volume_name: Option<String> = None;
     let mut volume_type: Option<String> = None;
     let mut hd = false;
+    let mut all = false;
     let mut text = false;
     let mut ignore_case = false;
     let mut partition: Option<String> = None;
@@ -190,6 +193,7 @@ fn parse_args(raw: Vec<String>) -> Result<Args, String> {
             "--raw" => raw_output = true,
             "--hash" => hash = true,
             "--hd" => hd = true,
+            "--all" => all = true,
             "--text" => text = true,
             "--ignore-case" | "-i" => ignore_case = true,
             _ if arg.starts_with("--name=") => {
@@ -237,6 +241,7 @@ fn parse_args(raw: Vec<String>) -> Result<Args, String> {
         volume_name,
         volume_type,
         hd,
+        all,
         text,
         ignore_case,
         partition,
@@ -278,6 +283,16 @@ fn main() -> ExitCode {
             args.format,
             args.partition.as_deref(),
             args.hash,
+        ),
+        // Before the one-path arm, not after: match arms are tried in order,
+        // and `("extract", 2)` matches both shapes — without this first,
+        // `--all` was silently ignored and the destination folder was read as
+        // a path on the disk ("no such entry: tmp").
+        ("extract", 2) if args.all => unpack(
+            Path::new(p(0)),
+            Path::new(p(1)),
+            args.format,
+            args.partition.as_deref(),
         ),
         ("extract", 2) => extract(Path::new(p(0)), p(1), None, args.partition.as_deref()),
         ("extract", 3) => extract(
@@ -344,6 +359,8 @@ fn usage() {
         "    ade check <image>                  full health report (F-010)".to_owned(),
         "    ade ls <image> [path]              list a directory".to_owned(),
         "    ade extract <image> <path> [dest]  extract a file".to_owned(),
+        "    ade extract <image> --all <dir>    extract every file into a folder (F-024)"
+            .to_owned(),
         "    ade convert <in> <out>             convert between containers (F-016)".to_owned(),
         "    ade create <out.adf>               make a blank formatted disk (F-019)".to_owned(),
         "    ade scan <image>                   find known content by its magic (F-020)".to_owned(),
@@ -368,6 +385,7 @@ fn usage() {
         "    --name=NAME     create: the volume name (default \"Empty\")".to_owned(),
         "    --type=ofs|ffs  create: the filesystem (default ffs)".to_owned(),
         "    --hd            create: a 1.76 MB high-density disk instead of 880 KB".to_owned(),
+        "    --all           extract: take every file on the disk, not one path".to_owned(),
         "    --text          find: read the pattern as text even if it looks like hex".to_owned(),
         "    --ignore-case   find: match ASCII letters in either case".to_owned(),
         "    --convert=CODE  batch: convert every image to CODE (adf, hdf, extended-adf)"
@@ -1472,6 +1490,91 @@ fn scan(path: &Path, format: Format) -> ExitCode {
 
 /// How many matches the text output shows before summarising the rest.
 const SHOWN: usize = 20;
+
+/// Write every file on an image into a folder (F-024).
+fn unpack(path: &Path, dest: &Path, format: Format, partition: Option<&str>) -> ExitCode {
+    let image = match Image::open(path) {
+        Ok(i) => i,
+        Err(e) => {
+            eprintln!("ade: {}: {e}", path.display());
+            return ExitCode::from(EXIT_UNREADABLE);
+        }
+    };
+    let window = match select_partition(&image, partition) {
+        Ok(w) => w,
+        Err(e) => {
+            eprintln!("ade: {}: {e}", path.display());
+            return ExitCode::from(EXIT_NO_VOLUME);
+        }
+    };
+    let mounted = match &window {
+        Some(w) => Volume::mount(w),
+        None => image.volume(),
+    };
+    let volume = match mounted {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("ade: {}: {e}", path.display());
+            return ExitCode::from(EXIT_NO_VOLUME);
+        }
+    };
+
+    let done = match ade_core::unpack::unpack(&volume, dest) {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("ade: {}: {e}", dest.display());
+            return ExitCode::from(EXIT_UNREADABLE);
+        }
+    };
+
+    let mut out = std::io::stdout().lock();
+    if format == Format::Json {
+        emit_json(
+            &mut out,
+            ade_core::json::Value::Obj(vec![
+                ("files", ade_core::json::Value::Num(done.files)),
+                ("directories", ade_core::json::Value::Num(done.directories)),
+                ("bytes", ade_core::json::Value::Num(done.bytes)),
+                (
+                    "skipped",
+                    ade_core::json::Value::Arr(
+                        done.skipped
+                            .iter()
+                            .map(|s| {
+                                ade_core::json::Value::Obj(vec![
+                                    ("path", ade_core::json::Value::str(&s.path)),
+                                    ("reason", ade_core::json::Value::str(&s.reason)),
+                                ])
+                            })
+                            .collect(),
+                    ),
+                ),
+            ]),
+        );
+    } else {
+        let mut lines = vec![format!(
+            "{} files, {} directories, {} bytes -> {}",
+            done.files,
+            done.directories,
+            done.bytes,
+            dest.display()
+        )];
+        // Every skip named, not counted. A run that says "3 skipped" has told
+        // somebody they are missing something without telling them what.
+        for skip in &done.skipped {
+            lines.push(format!("  skipped {}: {}", skip.path, skip.reason));
+        }
+        emit_lines(&mut out, &lines);
+    }
+
+    // Anything skipped is a partial recovery, and a script must be able to see
+    // that without parsing the output.
+    ExitCode::from(if done.skipped.is_empty() {
+        EXIT_CLEAN
+    } else {
+        EXIT_FAULTS
+    })
+}
 
 /// Map what occupies each block of an image (F-022).
 fn layout(path: &Path, format: Format) -> ExitCode {

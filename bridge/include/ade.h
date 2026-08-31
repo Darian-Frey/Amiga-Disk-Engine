@@ -253,6 +253,24 @@ void       ade_layout_free(AdeLayout *layout);
 const char *ade_region_name(AdeRegion region);
 const char *ade_region_describes(AdeRegion region);
 
+/* Write every file on the image into `dir`, creating it if needed (F-024).
+ *
+ * Names are mapped to what this host can hold: Latin-1 decoded to UTF-8, and
+ * anything that cannot be a filename escaped as %XX of its original byte. The
+ * mapping lives in the engine so a front end cannot invent its own — get it
+ * wrong and a name is lost while appearing to be preserved.
+ *
+ * **Nothing is ever overwritten.** A target that already exists is skipped and
+ * counted, never replaced. Returns the number of files written and sets
+ * `*skipped` to how many were not, so a partial recovery is visible without
+ * parsing anything. A run over a damaged disk does not stop at the first bad
+ * file: one that did would recover nothing.
+ *
+ * Returns ADE_NO_VOLUME if the image holds none, ADE_IO if `dir` cannot be
+ * made. `written` and `skipped` may be NULL. */
+AdeResult ade_unpack(const AdeImage *image, uint32_t partition, const char *dir,
+                     uint64_t *written, uint64_t *skipped);
+
 /* One place a pattern was found. Owner borrows from the AdeSearch it came from
  * and is valid until that is freed. */
 typedef struct {

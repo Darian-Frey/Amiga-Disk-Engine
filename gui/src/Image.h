@@ -263,6 +263,17 @@ public:
         return Buffer{ade_file_read(m_raw, partition, block)};
     }
 
+    /// Write every file into `dir`. Returns false if nothing could be read.
+    ///
+    /// `uint64_t` rather than `quint64` across the call: they are the same
+    /// width but not the same type here, and Qt's is `long long` where the
+    /// ABI's is `long`.
+    bool unpack(quint32 partition, const QString &dir, uint64_t *written,
+                uint64_t *skipped) const {
+        return ade_unpack(m_raw, partition, dir.toLocal8Bit().constData(), written, skipped) ==
+               ADE_OK;
+    }
+
     /// Search the image's bytes for text or hex.
     Search find(const char *pattern, bool text = false, bool ignoreCase = false) const {
         return Search{ade_find_open(m_raw, pattern, text, ignoreCase)};
