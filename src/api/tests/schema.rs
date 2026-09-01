@@ -484,6 +484,43 @@ fn a_search_emits_exactly_these_fields() {
 }
 
 #[test]
+fn a_carve_emits_exactly_these_fields() {
+    // A volume whose root hash table has been cleared: the files are still on
+    // the disk and nothing reaches them, which is what deletion looks like
+    // from outside.
+    let mut v = ade_fixtures::Volume::dd(0).named("Schema");
+    v.add_file("lost", b"contents that outlive their directory entry");
+    let mut bytes = v.build();
+    let root = 880usize * 512;
+    for slot in 0..72usize {
+        ade_core::layers::endian::put_u32(&mut bytes, root + 24 + slot * 4, 0).unwrap();
+    }
+    let block = &mut bytes[root..root + 512];
+    ade_core::layers::endian::put_u32(block, 20, 0).unwrap();
+    let sum = ade_core::layers::block::checksum::normal_at(block, 20).unwrap();
+    ade_core::layers::endian::put_u32(block, 20, sum).unwrap();
+
+    let image = ade_core::Image::from_bytes(bytes).unwrap();
+    let found = ade_core::carve::carve(&image);
+    assert!(!found.is_empty(), "the lost file is findable");
+    compare(
+        "carve",
+        &paths(&ade_core::carve::to_json(&found).versioned()),
+        &[
+            "schema",
+            "found",
+            "carved",
+            "carved[].block",
+            "carved[].name",
+            "carved[].size",
+            "carved[].kind",
+            "carved[].evidence",
+            "carved[].data_blocks",
+        ],
+    );
+}
+
+#[test]
 fn a_layout_emits_exactly_these_fields() {
     let mut v = ade_fixtures::Volume::dd(1).named("Schema");
     v.add_file("readme", b"hello");

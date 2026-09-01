@@ -100,6 +100,31 @@ int main(int argc, char **argv) {
     ade_partitions_free(NULL);
 
 
+    /* Files nothing points at (F-030), from C. Before the volume check on
+       purpose: carving never asks for a mounted volume, and a disk that does
+       not mount is the case it exists for. Behind the gate this never ran on
+       one. */
+    {
+        AdeCarve *carve = ade_carve_open(image);
+        check(carve != NULL, "carving opens on any image");
+        size_t n = ade_carve_count(carve);
+        printf("orphaned headers: %zu\n", n);
+        for (size_t i = 0; i < n && i < 8; i++) {
+            AdeBytes name = ade_carve_name(carve, i);
+            AdeEvidence how = ade_carve_evidence(carve, i);
+            printf("  block %-6u %-12s %8u of %-8u %.*s\n",
+                   ade_carve_block(carve, i),
+                   how == ADE_EVIDENCE_SELF_EVIDENT ? "self-evident"
+                       : how == ADE_EVIDENCE_PARTIAL ? "partial" : "header only",
+                   ade_carve_confirmed(carve, i), ade_carve_size(carve, i),
+                   (int)name.len, (const char *)name.data);
+        }
+        check(ade_carve_name(carve, n).len == 0, "past the end is empty, not wrong");
+        check(ade_carve_evidence(carve, n) == ADE_EVIDENCE_HEADER,
+              "and unknown grades as header-only, never as self-evident");
+        ade_carve_free(carve);
+    }
+
     // A device holds no volume of its own — every volume is inside a
     // partition — so this check comes *after* the partition table, not before.
     // Bailing here first meant a hard disk was never exercised at all.

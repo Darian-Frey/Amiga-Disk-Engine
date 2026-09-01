@@ -91,6 +91,9 @@ if(Qt6Test_FOUND)
     # something to identify against (F-013). Generated with the image, because
     # the datfile matches it by CRC32 and the two must be made together.
     set(ADE_TEST_DATFILES "${CMAKE_CURRENT_BINARY_DIR}/datfiles")
+    # And a disk whose directory no longer reaches its files, for recovery
+    # (F-030). OFS, because only an OFS data block can confirm itself.
+    set(ADE_TEST_LOST "${CMAKE_CURRENT_BINARY_DIR}/gui-fixture-lost.adf")
 
     # Always re-run, like the bridge above, rather than treating the images as
     # build outputs that exist or do not. As outputs they went stale the moment
@@ -106,14 +109,17 @@ if(Qt6Test_FOUND)
                 --datfile "${ADE_TEST_DATFILES}/fixture.dat"
         COMMAND cargo run --quiet ${CARGO_FLAG} -p ade-fixtures --bin mkfixture
                 --manifest-path "${ADE_ROOT}/Cargo.toml" -- "${ADE_TEST_DEVICE}" --device
-        BYPRODUCTS "${ADE_TEST_IMAGE}" "${ADE_TEST_DEVICE}"
+        COMMAND cargo run --quiet ${CARGO_FLAG} -p ade-fixtures --bin mkfixture
+                --manifest-path "${ADE_ROOT}/Cargo.toml" -- "${ADE_TEST_LOST}" --lost
+        BYPRODUCTS "${ADE_TEST_IMAGE}" "${ADE_TEST_DEVICE}" "${ADE_TEST_LOST}"
         COMMENT "Generating the GUI test images"
         VERBATIM
     )
     add_dependencies(ade-gui-tests ade_gui_fixture)
     target_compile_definitions(ade-gui-tests PRIVATE ADE_TEST_IMAGE="${ADE_TEST_IMAGE}"
                                                      ADE_TEST_DEVICE="${ADE_TEST_DEVICE}"
-                                                     ADE_TEST_DATFILES="${ADE_TEST_DATFILES}")
+                                                     ADE_TEST_DATFILES="${ADE_TEST_DATFILES}"
+                                                     ADE_TEST_LOST="${ADE_TEST_LOST}")
     target_link_libraries(ade-gui-tests PRIVATE Qt6::Widgets Qt6::Test "${ADE_LIB}" pthread dl m)
     target_compile_options(ade-gui-tests PRIVATE -Wall -Wextra)
     add_test(NAME gui COMMAND ade-gui-tests)

@@ -979,6 +979,231 @@ pub unsafe extern "C" fn ade_surface_read(
     })
 }
 
+/// Files nothing points at any more (F-030). Opaque to C.
+pub struct AdeCarve {
+    /// What was found, in disk order.
+    found: Vec<ade_core::carve::Carved>,
+    /// The host filename for each, precomputed so the accessor can borrow it.
+    names: Vec<Vec<u8>>,
+}
+
+/// Recover the files a disk no longer points at (F-030).
+///
+/// Never asks for a mounted volume: the disks worth carving are largely the
+/// ones that do not mount.
+///
+/// Release with [`ade_carve_free`].
+///
+/// # Safety
+/// `image` must be a live handle or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ade_carve_open(image: *const AdeImage) -> *mut AdeCarve {
+    with_image(image, std::ptr::null_mut(), |image| {
+        let Some(handle) = image.image.as_ref() else {
+            return std::ptr::null_mut();
+        };
+        let found = ade_core::carve::carve(handle);
+        let names = found
+            .iter()
+            .map(|c| ade_core::carve::recovered_name(c).into_bytes())
+            .collect();
+        Box::into_raw(Box::new(AdeCarve { found, names }))
+    })
+}
+
+/// How many orphaned headers were found.
+///
+/// # Safety
+/// `carve` must be a live handle or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ade_carve_count(carve: *const AdeCarve) -> usize {
+    guard(0, || {
+        // SAFETY: the caller's contract; null is checked.
+        unsafe { carve.as_ref() }.map_or(0, |c| c.found.len())
+    })
+}
+
+/// The Amiga name, borrowed until the handle is freed. Latin-1, not UTF-8.
+///
+/// # Safety
+/// `carve` must be a live handle or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ade_carve_name(carve: *const AdeCarve, index: usize) -> AdeBytes {
+    guard(AdeBytes::empty(), || {
+        // SAFETY: the caller's contract; null is checked.
+        unsafe { carve.as_ref() }
+            .and_then(|c| c.found.get(index))
+            .map_or_else(AdeBytes::empty, |c| AdeBytes::of(c.name.as_bytes()))
+    })
+}
+
+/// The block the header sits at — the thing that makes each answer unique.
+///
+/// # Safety
+/// `carve` must be a live handle or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ade_carve_block(carve: *const AdeCarve, index: usize) -> u32 {
+    guard(0, || {
+        // SAFETY: the caller's contract; null is checked.
+        unsafe { carve.as_ref() }
+            .and_then(|c| c.found.get(index))
+            .map_or(0, |c| c.block)
+    })
+}
+
+/// The size the header claims, which a partial recovery does not reach.
+///
+/// # Safety
+/// `carve` must be a live handle or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ade_carve_size(carve: *const AdeCarve, index: usize) -> u32 {
+    guard(0, || {
+        // SAFETY: the caller's contract; null is checked.
+        unsafe { carve.as_ref() }
+            .and_then(|c| c.found.get(index))
+            .map_or(0, |c| c.size)
+    })
+}
+
+/// How many bytes are actually confirmed, which is what would be written.
+///
+/// Zero for a header-only carve. Shown beside [`ade_carve_size`] this is the
+/// difference between a recovery and a claim.
+///
+/// # Safety
+/// `carve` must be a live handle or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ade_carve_confirmed(carve: *const AdeCarve, index: usize) -> u32 {
+    guard(0, || {
+        // SAFETY: the caller's contract; null is checked.
+        unsafe { carve.as_ref() }
+            .and_then(|c| c.found.get(index))
+            .map_or(0, |c| {
+                // Every confirmed block but the last is full; the last is short.
+                // Cheaper than reassembling the file to measure it.
+                u32::try_from(c.blocks.len().saturating_mul(488))
+                    .unwrap_or(u32::MAX)
+                    .min(c.size)
+            })
+    })
+}
+
+/// How far the disk supports this carve, as `AdeEvidence`.
+///
+/// # Safety
+/// `carve` must be a live handle or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ade_carve_evidence(carve: *const AdeCarve, index: usize) -> u32 {
+    guard(2, || {
+        // SAFETY: the caller's contract; null is checked.
+        unsafe { carve.as_ref() }
+            .and_then(|c| c.found.get(index))
+            .map_or(2, |c| match c.evidence {
+                ade_core::carve::Evidence::SelfEvident => 0,
+                ade_core::carve::Evidence::Partial { .. } => 1,
+                ade_core::carve::Evidence::HeaderOnly => 2,
+            })
+    })
+}
+
+/// Whether this is a directory rather than a file.
+///
+/// # Safety
+/// `carve` must be a live handle or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ade_carve_is_directory(carve: *const AdeCarve, index: usize) -> bool {
+    guard(false, || {
+        // SAFETY: the caller's contract; null is checked.
+        unsafe { carve.as_ref() }
+            .and_then(|c| c.found.get(index))
+            .is_some_and(|c| c.kind == ade_core::layers::filesystem::entry::EntryKind::Directory)
+    })
+}
+
+/// The filename this would be written under, borrowed until the handle is
+/// freed.
+///
+/// # Safety
+/// `carve` must be a live handle or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ade_carve_filename(carve: *const AdeCarve, index: usize) -> AdeBytes {
+    guard(AdeBytes::empty(), || {
+        // SAFETY: the caller's contract; null is checked.
+        unsafe { carve.as_ref() }
+            .and_then(|c| c.names.get(index))
+            .map_or_else(AdeBytes::empty, |n| AdeBytes::of(n))
+    })
+}
+
+/// Write one carved file into `dir`.
+///
+/// `AdeResult::NotFound` for a header-only carve, because there is nothing
+/// confirmed to write and a file carrying the right name with unconfirmed
+/// bytes is worse than no file. `AlreadyExists` rather than overwriting.
+///
+/// # Safety
+/// `image` and `carve` must be live handles or null, and `dir` must be a
+/// NUL-terminated path or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ade_carve_write(
+    image: *const AdeImage,
+    carve: *const AdeCarve,
+    index: usize,
+    dir: *const c_char,
+) -> AdeResult {
+    with_image(image, AdeResult::NullArgument, |image| {
+        if dir.is_null() {
+            return AdeResult::NullArgument;
+        }
+        let Some(handle) = image.image.as_ref() else {
+            return AdeResult::NoVolume;
+        };
+        // SAFETY: the caller's contract; null is checked by `as_ref`.
+        let Some(found) = (unsafe { carve.as_ref() }) else {
+            return AdeResult::NullArgument;
+        };
+        let (Some(entry), Some(name)) = (found.found.get(index), found.names.get(index)) else {
+            return AdeResult::NotFound;
+        };
+        if !ade_core::carve::is_recoverable(entry) {
+            return AdeResult::NotFound;
+        }
+        // SAFETY: checked non-null; the caller promises NUL termination.
+        let Ok(text) = (unsafe { CStr::from_ptr(dir) }).to_str() else {
+            return AdeResult::BadEncoding;
+        };
+        let Ok(name) = std::str::from_utf8(name) else {
+            return AdeResult::BadEncoding;
+        };
+        let target = PathBuf::from(text).join(name);
+        if target.exists() {
+            return AdeResult::AlreadyExists;
+        }
+        if std::fs::create_dir_all(text).is_err() {
+            return AdeResult::Io;
+        }
+        match std::fs::write(&target, ade_core::carve::contents(handle, entry)) {
+            Ok(()) => AdeResult::Ok,
+            Err(_) => AdeResult::Io,
+        }
+    })
+}
+
+/// Release a carve handle.
+///
+/// # Safety
+/// `carve` must have come from [`ade_carve_open`], or be null, and must not be
+/// used afterwards.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ade_carve_free(carve: *mut AdeCarve) {
+    guard((), || {
+        if !carve.is_null() {
+            // SAFETY: the caller's contract.
+            drop(unsafe { Box::from_raw(carve) });
+        }
+    });
+}
+
 /// What a disk says it needs. Opaque to C.
 pub struct AdeSpecs {
     /// Owns the strings the accessors hand back.

@@ -334,6 +334,8 @@ fn main() -> ExitCode {
         ("layout", 1) => layout(Path::new(p(0)), args.format),
         ("specs", 1) => specs(Path::new(p(0)), args.format),
         ("surface", 1) => surface(Path::new(p(0)), args.format),
+        ("carve", 1) => carve(Path::new(p(0)), args.format, None),
+        ("carve", 2) if args.all => carve(Path::new(p(0)), args.format, Some(Path::new(p(1)))),
         ("formats", 0) => formats(args.format),
         ("batch", n) if n >= 1 => batch(
             &args.positional,
@@ -387,6 +389,7 @@ fn usage() {
         "    ade specs <image>                  what the disk needs, and what it cannot say"
             .to_owned(),
         "    ade surface <image>                what came off each track (F-029)".to_owned(),
+        "    ade carve <image> [--all <dir>]    recover files nothing points at (F-030)".to_owned(),
         "    ade formats                        what converts to what, and what it costs"
             .to_owned(),
         "    ade batch <dir|image>...           verify a whole corpus (F-014)".to_owned(),
@@ -1571,6 +1574,124 @@ fn unpack(path: &Path, dest: &Path, format: Format, partition: Option<&str>) -> 
         EXIT_CLEAN
     } else {
         EXIT_FAULTS
+    })
+}
+
+/// Recover files nothing in the directory tree points at (F-030).
+fn carve(path: &Path, format: Format, dest: Option<&Path>) -> ExitCode {
+    let image = match Image::open(path) {
+        Ok(i) => i,
+        Err(e) => {
+            eprintln!("ade: {}: {e}", path.display());
+            return ExitCode::from(EXIT_UNREADABLE);
+        }
+    };
+    let found = ade_core::carve::carve(&image);
+
+    let mut out = std::io::stdout().lock();
+    if format == Format::Json {
+        emit_json(&mut out, ade_core::carve::to_json(&found));
+    } else {
+        let mut lines = vec![format!(
+            "{}  {} orphaned header{}",
+            path.display(),
+            found.len(),
+            if found.len() == 1 { "" } else { "s" }
+        )];
+        for c in &found {
+            lines.push(format!(
+                "  block {:>5}  {:<12} {:>9}  {:<12} {}",
+                c.block,
+                c.evidence.name(),
+                c.size,
+                ade_core::carve::kind_name(c.kind),
+                c.name
+            ));
+        }
+        if !found.is_empty() {
+            lines.push(String::new());
+            // Said every time, because the difference is the whole point. A
+            // self-evident carve is confirmed by the disk; a header-only one
+            // is a name and a size with nothing behind them.
+            lines.push(
+                "  self-evident: every data block names this header back and checksums".to_owned(),
+            );
+            lines.push(
+                "  header only:  the name and size are sound; nothing confirms the contents"
+                    .to_owned(),
+            );
+        }
+        emit_lines(&mut out, &lines);
+    }
+
+    if let Some(dir) = dest {
+        return write_carved(&image, &found, dir);
+    }
+    // Nothing found is not an error, but a script wants to branch on it.
+    ExitCode::from(if found.is_empty() {
+        EXIT_FAULTS
+    } else {
+        EXIT_CLEAN
+    })
+}
+
+/// Write what was carved into a folder, never overwriting.
+fn write_carved(image: &Image, found: &[ade_core::carve::Carved], dir: &Path) -> ExitCode {
+    use ade_core::carve::Evidence;
+
+    if let Err(e) = std::fs::create_dir_all(dir) {
+        eprintln!("ade: {}: {e}", dir.display());
+        return ExitCode::from(EXIT_UNREADABLE);
+    }
+    let mut written = 0usize;
+    let mut skipped = 0usize;
+    let mut partial = 0usize;
+
+    for c in found {
+        // Header-only carves are not written. There is nothing to write: the
+        // name and size are sound and the contents are unconfirmed, and a file
+        // on disk with the right name and the wrong bytes is worse than no
+        // file — somebody will believe it.
+        // Header-only carves are not written, and the engine decides that,
+        // not this front end.
+        if !ade_core::carve::is_recoverable(c) {
+            skipped = skipped.saturating_add(1);
+            continue;
+        }
+        let bytes = ade_core::carve::contents(image, c);
+        let target = dir.join(ade_core::carve::recovered_name(c));
+        if target.exists() {
+            skipped = skipped.saturating_add(1);
+            continue;
+        }
+        if std::fs::write(&target, &bytes).is_ok() {
+            written = written.saturating_add(1);
+            if matches!(c.evidence, Evidence::Partial { .. }) {
+                partial = partial.saturating_add(1);
+            }
+        } else {
+            skipped = skipped.saturating_add(1);
+        }
+    }
+
+    let mut out = std::io::stdout().lock();
+    let mut lines = vec![format!(
+        "  {written} written to {}, {skipped} not written",
+        dir.display()
+    )];
+    if partial > 0 {
+        lines.push(format!(
+            "  {partial} of them incomplete, and named .partial for it"
+        ));
+    }
+    emit_lines(&mut out, &lines);
+    // A partial recovery is not a clean run. A script needs to tell "everything
+    // came back whole" from "some of it came back with holes", and the second
+    // is the case where somebody has to go and look.
+    ExitCode::from(if skipped > 0 || partial > 0 {
+        EXIT_FAULTS
+    } else {
+        EXIT_CLEAN
     })
 }
 

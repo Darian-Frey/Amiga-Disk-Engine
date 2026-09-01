@@ -942,6 +942,40 @@ Protection is bootblock and trackloader, exactly the region no directory entry p
 | `rootblock` | 37 |
 | `bitmap` | 14 |
 
+## What can be carved back
+
+An orphaned header is a `T_HEADER` block with a valid checksum sitting in space
+no directory entry reaches. It is what a deleted file leaves behind — AmigaDOS
+unlinks the hash-table entry and does not erase the blocks — and what a damaged
+directory tree leaves behind for every file below the damage.
+
+**OFS data blocks are self-describing, and that is what makes carving
+checkable.** Each carries `T_DATA` (8) at offset 0, the block number of the
+file header that owns it at offset 4, its sequence number at 8, its payload
+length at 12, and its own checksum at 20. A carved file is therefore confirmed
+without reference to anything outside the disk: the header lists the chain, and
+every block in the chain names the header back.
+
+**FFS data blocks have no header.** The whole 512 bytes are payload. An FFS
+carve recovers the name, the size and the block list from the header and can
+confirm nothing about the contents.
+
+Corpus, all 4,652 images (2026-09-01), 8.5 seconds:
+
+| | count |
+|---|---|
+| images holding orphaned headers | 402 |
+| orphaned headers | 4,627 |
+| — files | 4,240 |
+| — directories | 387 |
+| file headers fully self-evidencing | 2,626 |
+| file headers partly confirmed | 695 |
+| file headers confirming nothing | 919 |
+| content recoverable with every byte confirmed | 16.2 MB |
+
+Directories are header-only by construction: a directory header has no data
+blocks to agree with it.
+
 ## Flux formats
 
 - **Extended-ADF** — see above.

@@ -11,6 +11,18 @@ Effort vocabulary: trivial | small | medium | large.
 
 ## Suggested
 
+### IMP-011 Three JSON documents are built in the CLI, where D-015's inventory cannot see them
+**Status:** suggested
+**Effort:** small
+
+**Where:** `cli/src/main.rs` — `unpack` (F-024), `surface` (F-029) and `specs` (F-028) assemble `json::Value` inline. Every other document is built by the API (`layout::to_json`, `find`, `scan`, `health`, `inspect`, …) and inventoried in `src/api/tests/schema.rs`.
+
+**Why it matters.** D-015's whole claim is that the JSON surface cannot change *quietly*: field names are inventoried, and altering the output fails a test that can only be silenced by editing the inventory and moving `json::SCHEMA` in the same commit. A document assembled in a front end is outside that mechanism entirely — its fields can be renamed with nothing failing. The three above were added without a schema bump, which is the visible symptom: the version says the surface did not grow, and it did.
+
+Found 2026-09-01 while adding `carve`, which was written the same way and moved into `ade_core::carve::to_json` before it shipped, with an inventory entry and a bump to 1.10. The fix for the other three is the same move, three times.
+
+**Trade-offs.** The pull is that a document with one caller looks like it belongs beside that caller, and moving it puts formatting concerns in the API crate. Against: the inventory is the only thing making F-015's stability promise real, and a mechanism with three exceptions is a mechanism people stop trusting. Moving them also changes no output, so it is verifiable by diffing the JSON before and after.
+
 ### IMP-010 Half of ADE's write paths refuse to overwrite and half do not
 **Status:** suggested
 **Effort:** small

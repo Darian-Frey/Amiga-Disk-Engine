@@ -25,6 +25,7 @@
 #include <QScreen>
 #include <QStyle>
 #include <QLabel>
+#include <QPushButton>
 #include <QIcon>
 #include <QMessageBox>
 #include <QMenuBar>
@@ -381,6 +382,16 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
         "Only an extended ADF or a flux capture records this; a plain ADF is "
         "already sectors and never knew."));
     connect(m_surface, &QAction::triggered, this, &MainWindow::showSurface);
+
+    // Recovery sits here rather than under File because it is a question
+    // about the disk — what is on it that nothing points at — and not a way of
+    // getting at files the tree already lists.
+    m_carve = disk->addAction(QStringLiteral("&Recover lost files..."));
+    m_carve->setEnabled(false);
+    m_carve->setToolTip(QStringLiteral(
+        "Files no directory entry reaches: what a deletion leaves behind.\n"
+        "Works on disks that do not mount, which are the ones worth carving."));
+    connect(m_carve, &QAction::triggered, this, &MainWindow::recoverLostFiles);
 
     // Help. The manual will join About here; nothing stands in for it in the
     // meantime, because a menu item that is greyed out or opens an apology is
@@ -1116,6 +1127,141 @@ void MainWindow::showSurface() {
     dialog.exec();
 }
 
+void MainWindow::recoverLostFiles() {
+    const Open *open = imageFor(m_selected);
+    if (!open) {
+        emit errorOccurred(QStringLiteral("Select a disk first."));
+        return;
+    }
+
+    const ade::Image::Carve carve = open->image.carve();
+    const size_t count = carve.count();
+    if (count == 0) {
+        // Not an error, and said as a result rather than as a shrug: nothing
+        // on this disk is outside its directory tree.
+        emit errorOccurred(
+            QStringLiteral("Nothing is lost on %1 — every block a file header "
+                           "claims is reachable from the directory tree.")
+                .arg(open->name));
+        return;
+    }
+
+    QDialog dialog(this);
+    dialog.setWindowTitle(QStringLiteral("Lost files — %1").arg(open->name));
+
+    auto *table = new QTreeWidget(&dialog);
+    table->setRootIsDecorated(false);
+    table->setUniformRowHeights(true);
+    table->setSelectionMode(QAbstractItemView::ExtendedSelection);
+    table->setHeaderLabels({QStringLiteral("Block"), QStringLiteral("Name"),
+                            QStringLiteral("Evidence"), QStringLiteral("Recoverable"),
+                            QStringLiteral("Claimed")});
+
+    size_t recoverable = 0;
+    for (size_t i = 0; i < count; ++i) {
+        const AdeEvidence how = carve.evidence(i);
+        auto *row = new QTreeWidgetItem(table);
+        row->setData(0, Qt::UserRole, static_cast<qulonglong>(i));
+        row->setText(0, QString::number(carve.block(i)));
+        row->setText(1, carve.name(i));
+        row->setText(2, how == ADE_EVIDENCE_SELF_EVIDENT ? QStringLiteral("self-evident")
+                        : how == ADE_EVIDENCE_PARTIAL    ? QStringLiteral("partial")
+                                                         : QStringLiteral("header only"));
+        row->setText(3, how == ADE_EVIDENCE_HEADER ? QStringLiteral("—")
+                                                   : QString::number(carve.confirmed(i)));
+        row->setText(4, QString::number(carve.size(i)));
+        for (int column : {0, 3, 4}) row->setTextAlignment(column, Qt::AlignRight);
+        // A header-only row is greyed, not hidden. It is real information —
+        // a file was here, with this name and this size — and it is also the
+        // one row nobody should treat as recovered content.
+        if (how == ADE_EVIDENCE_HEADER) {
+            for (int column = 0; column < table->columnCount(); ++column) {
+                row->setForeground(column, dialog.palette().brush(QPalette::Disabled,
+                                                                  QPalette::WindowText));
+            }
+        } else {
+            ++recoverable;
+        }
+    }
+    for (int column = 0; column < table->columnCount(); ++column) table->resizeColumnToContents(column);
+
+    // Said in the dialog every time, because the grading is the whole reason
+    // this feature could be built at all. Somebody reading the list has to
+    // know that one of these three words does not mean "recovered".
+    auto *legend = new QLabel(&dialog);
+    legend->setWordWrap(true);
+    legend->setTextFormat(Qt::RichText);
+    legend->setText(QStringLiteral(
+        "<b>self-evident</b> — every data block names this header back and checksums; "
+        "the disk confirms the contents, not ADE.<br>"
+        "<b>partial</b> — some blocks agree and some have been overwritten; what comes "
+        "back is short, and is saved with a <tt>.partial</tt> suffix.<br>"
+        "<b>header only</b> — the name and size are sound and <b>nothing confirms the "
+        "contents</b>. FFS data blocks carry no header, so an FFS file can never be "
+        "better than this. These are not written out."));
+
+    auto *buttons = new QDialogButtonBox(QDialogButtonBox::Close, &dialog);
+    QPushButton *recover = buttons->addButton(QStringLiteral("Recover to folder..."),
+                                              QDialogButtonBox::ActionRole);
+    recover->setEnabled(recoverable > 0);
+    connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+
+    connect(recover, &QPushButton::clicked, &dialog, [this, &dialog, &carve, open, table, count] {
+        const QString dir = QFileDialog::getExistingDirectory(
+            &dialog, QStringLiteral("Recover lost files into..."), QDir::homePath());
+        if (dir.isEmpty()) return;
+
+        // A selection means "these"; no selection means all of them. The same
+        // rule the extract items follow.
+        QVector<size_t> wanted;
+        const QList<QTreeWidgetItem *> chosen = table->selectedItems();
+        if (chosen.isEmpty()) {
+            for (size_t i = 0; i < count; ++i) wanted.append(i);
+        } else {
+            for (const QTreeWidgetItem *row : chosen) {
+                if (row->columnCount() > 0 && !wanted.contains(row->data(0, Qt::UserRole).toULongLong()))
+                    wanted.append(row->data(0, Qt::UserRole).toULongLong());
+            }
+        }
+
+        size_t written = 0;
+        size_t partial = 0;
+        size_t unconfirmed = 0;
+        size_t failed = 0;
+        for (size_t i : wanted) {
+            const AdeResult result = carve.write(open->image, i, dir);
+            if (result == ADE_OK) {
+                ++written;
+                if (carve.evidence(i) == ADE_EVIDENCE_PARTIAL) ++partial;
+            } else if (carve.evidence(i) == ADE_EVIDENCE_HEADER) {
+                ++unconfirmed;
+            } else {
+                ++failed;
+            }
+        }
+
+        QString message = QStringLiteral("Recovered %1 file%2 into %3")
+                              .arg(written)
+                              .arg(written == 1 ? QString() : QStringLiteral("s"), dir);
+        // Every qualification is stated. "Recovered 12 files" while three came
+        // back truncated is how somebody comes to trust a hole.
+        if (partial > 0)
+            message += QStringLiteral(", %1 incomplete and named .partial").arg(partial);
+        if (unconfirmed > 0)
+            message += QStringLiteral(", %1 not written because nothing confirms the contents")
+                           .arg(unconfirmed);
+        if (failed > 0) message += QStringLiteral(", %1 could not be written").arg(failed);
+        emit errorOccurred(message);
+    });
+
+    auto *layout = new QVBoxLayout(&dialog);
+    layout->addWidget(table, 1);
+    layout->addWidget(legend);
+    layout->addWidget(buttons);
+    dialog.resize(680, 460);
+    dialog.exec();
+}
+
 void MainWindow::showSpecs() {
     const Open *open = imageFor(m_selected);
     if (!open) {
@@ -1364,6 +1510,12 @@ void MainWindow::showEntry(QTreeWidgetItem *item) {
     // will do, because the whole disk is what it takes.
     if (m_extractAll) m_extractAll->setEnabled(imageFor(item) != nullptr);
     if (m_specs) m_specs->setEnabled(imageFor(item) != nullptr);
+    // Enabled for any image, unlike the surface view below. "Nothing was
+    // lost" is a result worth asking for and getting; the surface greys
+    // because most containers *cannot know*, which is a different thing. It
+    // is also not conditioned on the disk mounting: the disks worth carving
+    // are largely the ones that do not.
+    if (m_carve) m_carve->setEnabled(imageFor(item) != nullptr);
     // Offered only when the container actually recorded what came off the
     // medium. A greyed item on a plain ADF is the honest answer: most
     // containers cannot know, and a view of 160 whole tracks would be a

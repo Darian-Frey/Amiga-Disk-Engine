@@ -13,6 +13,7 @@
     clippy::unwrap_used,
     clippy::expect_used,
     clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
     reason = "tests over data they construct"
 )]
 
@@ -1246,4 +1247,131 @@ fn the_surface_comes_across_or_says_there_is_none() {
         unsafe { ade::ade_surface_read(std::ptr::null(), std::ptr::null_mut(), 0) },
         0
     );
+}
+
+/// A volume whose root hash table has been cleared: the files are still on the
+/// disk and nothing reaches them, which is what a deletion leaves behind.
+fn lost_disk() -> Vec<u8> {
+    let mut v = ade_fixtures::Volume::dd(0).named("Lost");
+    v.add_file(
+        "secret",
+        &(0..3000u32).map(|i| (i % 251) as u8).collect::<Vec<u8>>(),
+    );
+    let mut bytes = v.build();
+    let root = 880usize * 512;
+    for slot in 0..72usize {
+        put_u32(&mut bytes, root + 24 + slot * 4, 0).unwrap();
+    }
+    let block = &mut bytes[root..root + 512];
+    put_u32(block, 20, 0).unwrap();
+    let sum = ade_core::layers::block::checksum::normal_at(block, 20).unwrap();
+    put_u32(block, 20, sum).unwrap();
+    bytes
+}
+
+#[test]
+fn a_carve_comes_back_graded_and_writes_itself_out() {
+    let (path, c_path) = fixture("carve", &lost_disk());
+    let mut err = AdeResult::Internal;
+    // SAFETY: a real path, and every handle is freed below.
+    let image = unsafe { ade::ade_image_open(c_path.as_ptr(), std::ptr::null(), &raw mut err) };
+    assert!(!image.is_null());
+
+    // SAFETY: a live image handle.
+    let carve = unsafe { ade::ade_carve_open(image) };
+    assert!(!carve.is_null());
+    // SAFETY: a live carve handle.
+    let count = unsafe { ade::ade_carve_count(carve) };
+    assert!(count > 0, "the lost file is findable");
+
+    let mut wrote = 0usize;
+    let dir = path.with_extension("recovered");
+    let c_dir = CString::new(dir.to_str().unwrap()).unwrap();
+    for index in 0..count {
+        // SAFETY: a live carve handle and an index below its count.
+        let (name, file, evidence, size, confirmed) = unsafe {
+            (
+                ade::ade_carve_name(carve, index),
+                ade::ade_carve_filename(carve, index),
+                ade::ade_carve_evidence(carve, index),
+                ade::ade_carve_size(carve, index),
+                ade::ade_carve_confirmed(carve, index),
+            )
+        };
+        assert!(name.len > 0, "every carve has a name");
+        // SAFETY: borrows from the live carve handle.
+        let file = std::str::from_utf8(unsafe { std::slice::from_raw_parts(file.data, file.len) })
+            .unwrap();
+        // The block goes in the filename, because two lost files can share one.
+        assert!(file.len() > 6 && file[..5].chars().all(|c| c.is_ascii_digit()));
+
+        // SAFETY: live handles; the directory is created by the call.
+        let result = unsafe { ade::ade_carve_write(image, carve, index, c_dir.as_ptr()) };
+        if evidence == 2 {
+            // Header-only: nothing confirmed, so nothing written. A file with
+            // the right name and unconfirmed bytes is worse than no file.
+            assert_eq!(result, AdeResult::NotFound, "{file} is header-only");
+            assert_eq!(confirmed, 0);
+        } else {
+            assert_eq!(result, AdeResult::Ok, "{file}");
+            assert!(confirmed > 0 && confirmed <= size);
+            assert!(dir.join(file).exists());
+            wrote += 1;
+            // SAFETY: same call again, now that the file is there.
+            let again = unsafe { ade::ade_carve_write(image, carve, index, c_dir.as_ptr()) };
+            assert_eq!(again, AdeResult::AlreadyExists, "never overwrites");
+        }
+    }
+    assert!(wrote > 0, "something was recoverable");
+
+    // SAFETY: live handles, freed once.
+    unsafe {
+        ade::ade_carve_free(carve);
+        ade::ade_image_free(image);
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn the_evidence_codes_match_the_engine() {
+    // The header spells these three out as an enum; the engine has its own.
+    // A grading that means one thing in `--format=json` and another across the
+    // ABI is the exact failure this feature could not survive, because the
+    // grading *is* the feature.
+    use ade_core::carve::Evidence;
+    for (code, evidence) in [
+        (0u32, Evidence::SelfEvident),
+        (1, Evidence::Partial { good: 1, bad: 1 }),
+        (2, Evidence::HeaderOnly),
+    ] {
+        assert_eq!(
+            evidence.name(),
+            ["self-evident", "partial", "header only"][code as usize],
+            "code {code} and {evidence:?} must be the same answer"
+        );
+    }
+}
+
+#[test]
+fn carving_tolerates_null_like_everything_else() {
+    // SAFETY: passing null is explicitly allowed by every one of these.
+    unsafe {
+        assert!(ade::ade_carve_open(std::ptr::null()).is_null());
+        assert_eq!(ade::ade_carve_count(std::ptr::null()), 0);
+        assert_eq!(ade::ade_carve_name(std::ptr::null(), 0).len, 0);
+        assert_eq!(ade::ade_carve_filename(std::ptr::null(), 0).len, 0);
+        assert_eq!(ade::ade_carve_block(std::ptr::null(), 0), 0);
+        assert_eq!(ade::ade_carve_size(std::ptr::null(), 0), 0);
+        assert_eq!(ade::ade_carve_confirmed(std::ptr::null(), 0), 0);
+        // Unknown is the safe default: never report an unchecked carve as
+        // self-evident, which is the one answer that invites belief.
+        assert_eq!(ade::ade_carve_evidence(std::ptr::null(), 0), 2);
+        assert!(!ade::ade_carve_is_directory(std::ptr::null(), 0));
+        assert_eq!(
+            ade::ade_carve_write(std::ptr::null(), std::ptr::null(), 0, std::ptr::null()),
+            AdeResult::NullArgument
+        );
+        ade::ade_carve_free(std::ptr::null_mut());
+    }
 }

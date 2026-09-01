@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 
 pub mod assemble;
 pub mod batch;
+pub mod carve;
 pub mod consolidate;
 pub mod convert;
 pub mod create;

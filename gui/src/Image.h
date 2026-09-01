@@ -299,6 +299,43 @@ public:
         return out;
     }
 
+    /// Files nothing points at any more (F-030), with the grading that says
+    /// how far to believe each one.
+    ///
+    /// A handle rather than a snapshot, because writing one out needs the
+    /// engine to reassemble it from the disk — the front end must not decide
+    /// what an OFS data block's payload is.
+    class Carve {
+      public:
+        explicit Carve(AdeCarve *raw) : m_raw(raw) {}
+        ~Carve() { ade_carve_free(m_raw); }
+        Carve(const Carve &) = delete;
+        Carve &operator=(const Carve &) = delete;
+        Carve(Carve &&other) noexcept : m_raw(other.m_raw) { other.m_raw = nullptr; }
+        Carve &operator=(Carve &&) = delete;
+
+        size_t count() const { return ade_carve_count(m_raw); }
+        QString name(size_t i) const { return latin1(ade_carve_name(m_raw, i)); }
+        QString filename(size_t i) const { return latin1(ade_carve_filename(m_raw, i)); }
+        quint32 block(size_t i) const { return ade_carve_block(m_raw, i); }
+        quint32 size(size_t i) const { return ade_carve_size(m_raw, i); }
+        quint32 confirmed(size_t i) const { return ade_carve_confirmed(m_raw, i); }
+        AdeEvidence evidence(size_t i) const {
+            return static_cast<AdeEvidence>(ade_carve_evidence(m_raw, i));
+        }
+        bool isDirectory(size_t i) const { return ade_carve_is_directory(m_raw, i); }
+        AdeResult write(const Image &image, size_t i, const QString &dir) const {
+            // A nested class is a member, so the image's handle is reachable.
+            return ade_carve_write(image.m_raw, m_raw, i, dir.toUtf8().constData());
+        }
+
+      private:
+        AdeCarve *m_raw = nullptr;
+    };
+
+    /// Recover what the directory tree no longer reaches.
+    Carve carve() const { return Carve{ade_carve_open(m_raw)}; }
+
     /// Search the image's bytes for text or hex.
     Search find(const char *pattern, bool text = false, bool ignoreCase = false) const {
         return Search{ade_find_open(m_raw, pattern, text, ignoreCase)};

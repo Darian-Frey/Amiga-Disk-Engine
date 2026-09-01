@@ -11,6 +11,12 @@
 //! needs a Rigid Disk Block — a device holds no volume of its own, so it is a
 //! different shape rather than a bigger floppy.
 //!
+//! `--lost` writes an OFS disk whose root hash table has been cleared: the
+//! files are all still there and nothing points at them, which is what a
+//! deletion leaves behind. For anything testing recovery (F-030). OFS on
+//! purpose — an FFS data block carries no header, so nothing on an FFS disk
+//! can ever be confirmed.
+//!
 //! `--datfile <path>` also writes a one-entry TOSEC-style datfile naming the
 //! image it just generated. Anything testing identification needs a dataset
 //! that matches its fixture, and computing the CRC32 by hand in a test would
@@ -24,12 +30,16 @@
 
 use ade_fixtures::{Volume, device::Device};
 
+/// Where a double-density volume keeps its rootblock.
+const ROOT: usize = 880 * 512;
+
 fn main() -> std::process::ExitCode {
     let Some(path) = std::env::args().nth(1) else {
         eprintln!("usage: mkfixture <path.adf> [--device]");
         return std::process::ExitCode::from(2);
     };
     let device = std::env::args().any(|a| a == "--device");
+    let lost = std::env::args().any(|a| a == "--lost");
     let datfile = std::env::args()
         .skip_while(|a| a != "--datfile")
         .nth(1)
@@ -52,6 +62,45 @@ fn main() -> std::process::ExitCode {
             v.add_file("readme", b"this is DH1");
         });
         return match std::fs::write(&path, disk.build()) {
+            Ok(()) => std::process::ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("mkfixture: {path}: {e}");
+                std::process::ExitCode::from(1)
+            }
+        };
+    }
+
+    if lost {
+        // Files with nothing pointing at them, and a directory too: a
+        // directory header carries no data blocks, so it can only ever be
+        // header-only, which is the grading a front end must not show the
+        // same way as a confirmed file.
+        let mut volume = Volume::dd(0).named("Lost");
+        volume.add_file("notes", b"a file the directory no longer mentions");
+        volume.add_file(
+            "data.bin",
+            &(0..6000u32).map(|i| (i % 251) as u8).collect::<Vec<u8>>(),
+        );
+        volume.add_dir("Gone");
+        let mut bytes = volume.build();
+
+        // Clear the root's 72 hash slots and re-checksum, which is what
+        // unlinking every entry looks like from outside.
+        for slot in 0..72usize {
+            let at = ROOT
+                .saturating_add(24)
+                .saturating_add(slot.saturating_mul(4));
+            ade_fixtures::put_u32(&mut bytes, at, 0);
+        }
+        let Some(block) = bytes.get_mut(ROOT..ROOT.saturating_add(512)) else {
+            eprintln!("mkfixture: the generated disk is too small to hold a rootblock");
+            return std::process::ExitCode::from(1);
+        };
+        ade_fixtures::put_u32(block, 20, 0);
+        let sum = ade_fixtures::normal_checksum_at(block, 20);
+        ade_fixtures::put_u32(block, 20, sum);
+
+        return match std::fs::write(&path, bytes) {
             Ok(()) => std::process::ExitCode::SUCCESS,
             Err(e) => {
                 eprintln!("mkfixture: {path}: {e}");

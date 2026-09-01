@@ -101,6 +101,8 @@ private slots:
     void extractingEverythingIsOfferedOnlyWithADiskToExtract();
     void thereIsADiskMenuOfferedOnlyWithADiskOpen();
     void theSurfaceViewIsOfferedOnlyWhenTheContainerKnows();
+    void lostFilesComeBackGradedByWhatConfirmsThem();
+    void whatCannotBeConfirmedIsNeverWritten();
     void theSurfaceTellsItsFourStatesApart();
     void theMapColoursFilesAndKeepsEmptySpaceVisible();
     void theMapShowsTheDiskAndClickingACellGoesToIt();
@@ -122,6 +124,7 @@ private:
     QTemporaryDir m_dir;
     QString m_image;
     QString m_device;
+    QString m_lost;
 };
 
 // The fixture comes from the engine's own generator, built by CMake before
@@ -134,6 +137,8 @@ void TestMainWindow::initTestCase() {
     QVERIFY2(QFile::exists(m_image), qPrintable(m_image));
     m_device = QStringLiteral(ADE_TEST_DEVICE);
     QVERIFY2(QFile::exists(m_device), qPrintable(m_device));
+    m_lost = QStringLiteral(ADE_TEST_LOST);
+    QVERIFY2(QFile::exists(m_lost), qPrintable(m_lost));
 }
 
 void TestMainWindow::anImageIsARootWithItsEntriesBeneath() {
@@ -1626,6 +1631,83 @@ void TestMainWindow::theSurfaceTellsItsFourStatesApart() {
           QStringLiteral("nothing decoded"), QStringLiteral("not in the container")}) {
         QVERIFY2(legend.contains(word), qPrintable(word));
     }
+}
+
+void TestMainWindow::lostFilesComeBackGradedByWhatConfirmsThem() {
+    // The grading is the feature. A window that showed these three the same
+    // way would be handing over unconfirmed bytes under a real filename,
+    // which is the outcome the whole design is arranged to prevent.
+    MainWindow window;
+    QAction *carve = nullptr;
+    for (QAction *top : window.menuBar()->actions()) {
+        if (!top->text().contains(QStringLiteral("Disk"))) continue;
+        for (QAction *item : top->menu()->actions()) {
+            if (item->text().contains(QStringLiteral("Recover"))) carve = item;
+        }
+    }
+    QVERIFY2(carve, "Disk holds a Recover lost files... item");
+    QVERIFY2(!carve->isEnabled(), "nothing is selected yet");
+
+    window.openImage(m_lost);
+    auto *tree = browser(window);
+    tree->setCurrentItem(tree->topLevelItem(0), 0, QItemSelectionModel::ClearAndSelect);
+    QApplication::processEvents();
+    QVERIFY2(carve->isEnabled(),
+             "offered for any disk: 'nothing was lost' is a result, not an inability");
+
+    // The engine's answer, which the dialog renders. Two files whose data
+    // blocks name their headers back, and a directory that has no data blocks
+    // and therefore cannot be confirmed by anything.
+    const ade::Image image = ade::Image::open(m_lost);
+    const ade::Image::Carve found = image.carve();
+    QVERIFY(found.count() >= 3);
+
+    int selfEvident = 0;
+    int headerOnly = 0;
+    for (size_t i = 0; i < found.count(); ++i) {
+        if (found.evidence(i) == ADE_EVIDENCE_SELF_EVIDENT) {
+            ++selfEvident;
+            QCOMPARE(found.confirmed(i), found.size(i));
+        }
+        if (found.evidence(i) == ADE_EVIDENCE_HEADER) {
+            ++headerOnly;
+            QCOMPARE(found.confirmed(i), 0u);
+        }
+        // The block goes in the filename: two lost files routinely share a
+        // name, and the block is the only thing that separates them.
+        QVERIFY(found.filename(i).startsWith(QString::number(found.block(i)).rightJustified(5, u'0')));
+    }
+    QVERIFY2(selfEvident >= 2, "the OFS files confirm themselves");
+    QVERIFY2(headerOnly >= 1, "the directory cannot be confirmed by anything");
+}
+
+void TestMainWindow::whatCannotBeConfirmedIsNeverWritten() {
+    // A file on disk with the right name and unconfirmed bytes is worse than
+    // no file, because somebody will believe it.
+    const ade::Image image = ade::Image::open(m_lost);
+    const ade::Image::Carve found = image.carve();
+    QVERIFY(found.count() > 0);
+
+    QTemporaryDir out;
+    QVERIFY(out.isValid());
+    int written = 0;
+    for (size_t i = 0; i < found.count(); ++i) {
+        const AdeResult result = found.write(image, i, out.path());
+        if (found.evidence(i) == ADE_EVIDENCE_HEADER) {
+            QCOMPARE(result, ADE_NOT_FOUND);
+            QVERIFY2(!QFile::exists(QDir(out.path()).filePath(found.filename(i))),
+                     "nothing confirmed it, so nothing was written");
+        } else {
+            QCOMPARE(result, ADE_OK);
+            QFile file(QDir(out.path()).filePath(found.filename(i)));
+            QVERIFY(file.exists());
+            QCOMPARE(static_cast<quint32>(file.size()), found.confirmed(i));
+            ++written;
+            // And never over something already there.
+            QCOMPARE(found.write(image, i, out.path()), ADE_ALREADY_EXISTS);
+        }
+    }
+    QVERIFY(written > 0);
 }
 
 QTEST_MAIN(TestMainWindow)

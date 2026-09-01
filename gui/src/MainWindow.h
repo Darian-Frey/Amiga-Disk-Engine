@@ -72,6 +72,7 @@ public:
 
 private slots:
     void showSurface();
+    void recoverLostFiles();
     void showSpecs();
     void newDisk();
     void extractAll();
@@ -183,6 +184,7 @@ private:
     QLabel *m_summary = nullptr;
     QAction *m_extract = nullptr;
     QAction *m_extractAll = nullptr;
+    QAction *m_carve = nullptr;
     QAction *m_specs = nullptr;
     QAction *m_surface = nullptr;
 };

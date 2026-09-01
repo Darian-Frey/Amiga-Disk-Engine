@@ -88,6 +88,7 @@ typedef struct AdeLayout     AdeLayout;     /* a map of a whole disk */
 typedef struct AdeSearch     AdeSearch;     /* a content search      */
 typedef struct AdeSpecs      AdeSpecs;      /* what a disk needs     */
 typedef struct AdeCatalogue  AdeCatalogue;  /* a loaded dataset      */
+typedef struct AdeCarve      AdeCarve;      /* files nothing claims  */
 
 /* Pass as `partition` to mean "the image's own volume, not a partition".
  *
@@ -286,6 +287,60 @@ typedef enum {
  * never mentioned: "nothing was recovered here" and "nobody looked here" are
  * the same picture otherwise, and only one is a fact about the disk. */
 size_t ade_surface_read(const AdeImage *image, AdeTrack *out, size_t count);
+
+/* Files nothing points at any more, and how far to believe each one (F-030).
+ *
+ * An orphaned file header sitting in space no directory reaches: what a
+ * deletion leaves behind, and what a damaged directory tree leaves behind for
+ * everything below the damage.
+ *
+ * The grading is the point, not a decoration. An OFS data block carries the
+ * block of the header that owns it, its sequence number and its own checksum,
+ * so a carved file is confirmed by the disk rather than by ADE. An FFS data
+ * block carries none of that and can never be better than ADE_EVIDENCE_HEADER
+ * — the name and size are sound and nothing at all confirms the contents. A
+ * front end that shows those three the same way has thrown away the only
+ * reason this feature could be written honestly.
+ *
+ * Works on disks that do not mount, which are the ones worth carving.
+ *
+ * Free with ade_carve_free. */
+AdeCarve *ade_carve_open(const AdeImage *image);
+size_t    ade_carve_count(const AdeCarve *carve);
+void      ade_carve_free(AdeCarve *carve);
+
+/* How far the disk itself supports a carved file. */
+typedef enum {
+    ADE_EVIDENCE_SELF_EVIDENT = 0, /* every data block names this header back */
+    ADE_EVIDENCE_PARTIAL      = 1, /* some agree; the file is partly overwritten */
+    ADE_EVIDENCE_HEADER       = 2  /* nothing confirms the contents           */
+} AdeEvidence;
+
+/* One carved entry. `name` is Latin-1 and borrows from the AdeCarve; `size` is
+ * what the header claims, which for a partial recovery is more than comes
+ * back. Empty or zero past the end. */
+AdeBytes    ade_carve_name(const AdeCarve *carve, size_t index);
+uint32_t    ade_carve_block(const AdeCarve *carve, size_t index);
+uint32_t    ade_carve_size(const AdeCarve *carve, size_t index);
+uint32_t    ade_carve_confirmed(const AdeCarve *carve, size_t index); /* bytes */
+AdeEvidence ade_carve_evidence(const AdeCarve *carve, size_t index);
+bool        ade_carve_is_directory(const AdeCarve *carve, size_t index);
+
+/* The filename this should be written under: the header's block, then the
+ * Amiga name made safe for the host, then `.partial` if the recovery is
+ * incomplete. Two lost files routinely share a name — a deleted file and the
+ * one that replaced it usually do — and the block is what makes each answer
+ * unique. Borrows from the AdeCarve. */
+AdeBytes ade_carve_filename(const AdeCarve *carve, size_t index);
+
+/* Write one carved file into `dir`, under ade_carve_filename.
+ *
+ * ADE_NOT_FOUND for a header-only carve: there is nothing confirmed to write,
+ * and a file on disk with the right name and unconfirmed bytes is worse than
+ * no file, because somebody will believe it. ADE_ALREADY_EXISTS rather than
+ * overwriting. */
+AdeResult ade_carve_write(const AdeImage *image, const AdeCarve *carve,
+                          size_t index, const char *dir);
 
 /* What a disk says it needs, with the evidence for each claim (F-028).
  *
