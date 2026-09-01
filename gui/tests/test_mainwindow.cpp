@@ -12,6 +12,7 @@
 
 #include "../src/HexView.h"
 #include "../src/MapView.h"
+#include "../src/SurfaceView.h"
 #include "../src/ImageTree.h"
 #include "../src/MainWindow.h"
 
@@ -99,6 +100,8 @@ private slots:
     void theFollowStopsWhenAFileIsShown();
     void extractingEverythingIsOfferedOnlyWithADiskToExtract();
     void thereIsADiskMenuOfferedOnlyWithADiskOpen();
+    void theSurfaceViewIsOfferedOnlyWhenTheContainerKnows();
+    void theSurfaceTellsItsFourStatesApart();
     void theMapColoursFilesAndKeepsEmptySpaceVisible();
     void theMapShowsTheDiskAndClickingACellGoesToIt();
     void selectingAFilePicksOutItsBlocksOnTheMap();
@@ -1553,6 +1556,76 @@ void TestMainWindow::thereIsADiskMenuOfferedOnlyWithADiskOpen() {
 
     // And the engine has something to say about that disk, with evidence.
     QVERIFY(ade_specs_unknowable_count() >= 4);
+}
+
+void TestMainWindow::theSurfaceViewIsOfferedOnlyWhenTheContainerKnows() {
+    // Most containers cannot know. A plain ADF is already sectors and nothing
+    // recorded how they were read, so a view of 160 whole tracks would be a
+    // measurement nobody made — the item is greyed instead.
+    MainWindow window;
+    QAction *surface = nullptr;
+    for (QAction *top : window.menuBar()->actions()) {
+        if (!top->text().contains(QStringLiteral("Disk"))) continue;
+        for (QAction *item : top->menu()->actions()) {
+            if (item->text().contains(QStringLiteral("surface"))) surface = item;
+        }
+    }
+    QVERIFY2(surface, "Disk holds a Disk surface... item");
+    QVERIFY(!surface->isEnabled());
+
+    window.openImage(m_image);
+    auto *tree = browser(window);
+    tree->setCurrentItem(tree->topLevelItem(0), 0, QItemSelectionModel::ClearAndSelect);
+    QApplication::processEvents();
+    QVERIFY2(!surface->isEnabled(),
+             "the fixture is a plain ADF, which never recorded its tracks");
+
+    // Disk information is offered for the same disk, so the greying is about
+    // this view's data and not about having a disk at all.
+    QAction *info = nullptr;
+    for (QAction *top : window.menuBar()->actions()) {
+        if (!top->text().contains(QStringLiteral("Disk"))) continue;
+        for (QAction *item : top->menu()->actions()) {
+            if (item->text().contains(QStringLiteral("information"))) info = item;
+        }
+    }
+    QVERIFY(info && info->isEnabled());
+}
+
+void TestMainWindow::theSurfaceTellsItsFourStatesApart() {
+    // Four states, and the fourth is the one people forget: a track the
+    // container never mentioned is not the same as one that was read and gave
+    // nothing. One is missing information, the other is information.
+    QPalette palette;
+    palette.setColor(QPalette::Base, QColor(36, 36, 36));
+
+    AdeTrack whole{};
+    whole.sectors = 11;
+    whole.expected = 11;
+    whole.source = ADE_TRACK_RAW_MFM;
+    AdeTrack partial = whole;
+    partial.sectors = 5;
+    AdeTrack nothing = whole;
+    nothing.sectors = 0;
+    AdeTrack absent = whole;
+    absent.source = ADE_TRACK_ABSENT;
+
+    QList<QColor> seen;
+    for (const AdeTrack &track : {whole, partial, nothing, absent}) {
+        const QColor colour = SurfaceView::colourFor(palette, track);
+        QVERIFY(colour.isValid());
+        for (const QColor &other : seen) QVERIFY2(colour != other, "four distinct states");
+        seen << colour;
+    }
+
+    // And all four are named in the legend, including the absent one — the
+    // block map's legend first showed its faintest swatch as nothing at all.
+    const QString legend = SurfaceView::legend(palette);
+    for (const QString &word :
+         {QStringLiteral("whole"), QStringLiteral("some sectors"),
+          QStringLiteral("nothing decoded"), QStringLiteral("not in the container")}) {
+        QVERIFY2(legend.contains(word), qPrintable(word));
+    }
 }
 
 QTEST_MAIN(TestMainWindow)

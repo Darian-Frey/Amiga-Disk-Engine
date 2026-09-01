@@ -228,3 +228,53 @@ fn the_corpus_extended_adfs_mount_where_they_can() {
     assert!(examined >= 10);
     assert!(mounted >= 5, "expected around six to mount, got {mounted}");
 }
+
+#[test]
+fn every_track_has_a_state_including_the_ones_nobody_looked_at() {
+    // The surface view's data (F-029). A container that mentions 40 tracks
+    // still yields 160 states: "nothing was recovered here" and "nobody looked
+    // here" are the same picture on a surface view, and only one of them is a
+    // fact about the disk.
+    use ade_core::assemble::TrackSource;
+
+    let mut fixture = ade_fixtures::Volume::dd(1).named("Partial");
+    fixture.add_file("startup", b"half a disk");
+    let plain = fixture.build();
+    let extended = as_extended(&plain, 40);
+
+    let parsed = ExtendedAdf::parse(&extended).unwrap();
+    let assembly = assemble(&parsed, &extended);
+
+    assert_eq!(assembly.tracks.len(), 160, "one per track, always");
+    for (index, state) in assembly.tracks.iter().enumerate() {
+        assert_eq!(state.index, index);
+        assert_eq!(state.cylinder(), index / 2);
+        assert_eq!(state.head(), index % 2);
+        assert_eq!(state.expected, 11);
+        if index < 40 {
+            assert_eq!(state.source, TrackSource::Sectors, "track {index}");
+            assert_eq!(state.sectors, 11, "track {index}");
+        } else {
+            assert_eq!(state.source, TrackSource::Absent, "track {index}");
+            assert_eq!(state.sectors, 0, "track {index}");
+        }
+    }
+
+    // And the states agree with the total, which is the sum they came from.
+    let counted: usize = assembly.tracks.iter().map(|t| usize::from(t.sectors)).sum();
+    assert_eq!(counted, assembly.sectors_placed);
+}
+
+#[test]
+fn a_container_that_never_recorded_its_tracks_has_no_surface() {
+    // A plain ADF is already sectors: every one is present by construction and
+    // nothing recorded how it was read. Reporting 160 whole tracks would claim
+    // a measurement nobody made, so there is no answer rather than a full one.
+    let plain = ade_fixtures::Volume::dd(1).named("Plain").build();
+    assert!(ade_core::assemble::of_bytes(&plain).is_none());
+
+    // The same disk wrapped as raw tracks does have one.
+    let extended = as_extended(&plain, 160);
+    let surface = ade_core::assemble::of_bytes(&extended).expect("a raw-track container");
+    assert_eq!(surface.tracks.len(), 160);
+}

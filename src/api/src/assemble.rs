@@ -46,6 +46,63 @@ pub struct Assembly {
     pub from_sector_tracks: usize,
     /// Tracks contributed by decoding raw MFM.
     pub from_raw_tracks: usize,
+    /// What happened on each of the disk's 160 tracks, in order (F-029).
+    ///
+    /// Always the full length, so a track the container never mentioned is
+    /// present and empty rather than absent — "nothing was recovered here" and
+    /// "nobody looked here" are the same picture on a surface view, and only
+    /// one of them is a fact about the disk.
+    pub tracks: Vec<TrackState>,
+}
+
+/// What was recovered from one track, and where it came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TrackState {
+    /// 0–159: cylinder times two, plus the head.
+    pub index: usize,
+    /// Sectors actually placed from this track.
+    pub sectors: u8,
+    /// Sectors a whole track holds — the denominator.
+    pub expected: u8,
+    /// How the track reached the image.
+    pub source: TrackSource,
+}
+
+impl TrackState {
+    /// The cylinder this track is on.
+    #[must_use]
+    pub const fn cylinder(&self) -> usize {
+        self.index / 2
+    }
+
+    /// Which side of it.
+    #[must_use]
+    pub const fn head(&self) -> usize {
+        self.index % 2
+    }
+}
+
+/// Where a track's sectors came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TrackSource {
+    /// Stored already decoded, as ordinary sector data.
+    Sectors,
+    /// Decoded here, out of raw MFM.
+    RawMfm,
+    /// The container carried nothing for this track.
+    Absent,
+}
+
+impl TrackSource {
+    /// The name this source is reported by. Part of the JSON surface (F-015).
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Sectors => "sectors",
+            Self::RawMfm => "raw MFM",
+            Self::Absent => "absent",
+        }
+    }
 }
 
 impl Assembly {
@@ -75,6 +132,42 @@ impl Assembly {
     }
 }
 
+/// Reconstruct whatever raw-track container `bytes` is, if it is one.
+///
+/// `None` for a plain ADF, an ADZ, a hardfile — anything already stored as
+/// sectors. That is not a failure: those carry no record of what came off the
+/// medium, so there is nothing to say about their tracks, and inventing 160
+/// full ones would claim a measurement nobody made.
+#[must_use]
+pub fn of_bytes(bytes: &[u8]) -> Option<Assembly> {
+    use ade_container::sniff::{Kind, sniff};
+
+    let head = bytes.get(..bytes.len().min(4096)).unwrap_or(&[]);
+    match sniff(head, bytes.len() as u64).kind {
+        Kind::ExtendedAdf { .. } => {
+            let parsed = ExtendedAdf::parse(bytes).ok()?;
+            Some(assemble(&parsed, bytes))
+        }
+        Kind::Scp => {
+            let parsed = Scp::parse(bytes).ok()?;
+            Some(assemble_scp(&parsed, bytes))
+        }
+        _ => None,
+    }
+}
+
+/// One state per track, all absent, so a track nothing mentioned is still a row.
+fn blank_tracks() -> Vec<TrackState> {
+    (0..DD_TRACKS)
+        .map(|index| TrackState {
+            index,
+            sectors: 0,
+            expected: u8::try_from(DD_SECTORS).unwrap_or(11),
+            source: TrackSource::Absent,
+        })
+        .collect()
+}
+
 /// Assemble a plain double-density image from whatever a raw-track container
 /// can yield.
 ///
@@ -88,6 +181,7 @@ pub fn assemble(parsed: &ExtendedAdf, bytes: &[u8]) -> Assembly {
     let mut sectors_placed = 0usize;
     let mut from_sector_tracks = 0usize;
     let mut from_raw_tracks = 0usize;
+    let mut states = blank_tracks();
 
     for track in &parsed.tracks {
         if track.index >= DD_TRACKS {
@@ -109,10 +203,16 @@ pub fn assemble(parsed: &ExtendedAdf, bytes: &[u8]) -> Assembly {
                 };
                 slot.copy_from_slice(source);
                 from_sector_tracks = from_sector_tracks.saturating_add(1);
-                sectors_placed = sectors_placed.saturating_add(len / SECTOR_BYTES);
+                let here = len / SECTOR_BYTES;
+                sectors_placed = sectors_placed.saturating_add(here);
+                if let Some(state) = states.get_mut(track.index) {
+                    state.sectors = u8::try_from(here).unwrap_or(u8::MAX);
+                    state.source = TrackSource::Sectors;
+                }
             }
             TrackKind::RawMfm => {
                 let mut placed_here = false;
+                let mut here = 0usize;
                 for sector in decode_track(data).sectors.iter().filter(|s| s.is_sound()) {
                     let index = usize::from(sector.sector);
                     if index >= DD_SECTORS {
@@ -127,10 +227,18 @@ pub fn assemble(parsed: &ExtendedAdf, bytes: &[u8]) -> Assembly {
                     }
                     slot.copy_from_slice(&sector.data);
                     sectors_placed = sectors_placed.saturating_add(1);
+                    here = here.saturating_add(1);
                     placed_here = true;
                 }
                 if placed_here {
                     from_raw_tracks = from_raw_tracks.saturating_add(1);
+                }
+                // Recorded even when nothing decoded: a raw track that yielded
+                // no sectors is the single most interesting cell on a surface
+                // view, and treating it as absent would hide it.
+                if let Some(state) = states.get_mut(track.index) {
+                    state.sectors = u8::try_from(here).unwrap_or(u8::MAX);
+                    state.source = TrackSource::RawMfm;
                 }
             }
             TrackKind::Unknown(_) => {}
@@ -141,6 +249,7 @@ pub fn assemble(parsed: &ExtendedAdf, bytes: &[u8]) -> Assembly {
         bytes: out,
         sectors_placed,
         sectors_total: DD_TOTAL_SECTORS,
+        tracks: states,
         from_sector_tracks,
         from_raw_tracks,
     }
@@ -167,6 +276,7 @@ pub fn assemble_scp(parsed: &Scp, bytes: &[u8]) -> Assembly {
     let mut out = vec![0u8; DD_TRACKS.saturating_mul(STANDARD_TRACK_BYTES)];
     let mut sectors_placed = 0usize;
     let mut from_raw_tracks = 0usize;
+    let mut states = blank_tracks();
 
     for track in &parsed.tracks {
         if track.index >= DD_TRACKS {
@@ -213,12 +323,19 @@ pub fn assemble_scp(parsed: &Scp, bytes: &[u8]) -> Assembly {
         if placed_here {
             from_raw_tracks = from_raw_tracks.saturating_add(1);
         }
+        // `have` is the per-sector record this loop already keeps to stop
+        // later revolutions overwriting earlier ones, so the count is free.
+        if let Some(state) = states.get_mut(track.index) {
+            state.sectors = u8::try_from(have.iter().filter(|h| **h).count()).unwrap_or(u8::MAX);
+            state.source = TrackSource::RawMfm;
+        }
     }
 
     Assembly {
         bytes: out,
         sectors_placed,
         sectors_total: DD_TOTAL_SECTORS,
+        tracks: states,
         from_sector_tracks: 0,
         from_raw_tracks,
     }

@@ -277,6 +277,14 @@ public:
                ADE_OK;
     }
 
+    /// What came off each track, or empty for a container that does not know.
+    QVector<AdeTrack> surface() const {
+        const size_t count = ade_surface_read(m_raw, nullptr, 0);
+        QVector<AdeTrack> out(static_cast<int>(count));
+        if (count > 0) ade_surface_read(m_raw, out.data(), count);
+        return out;
+    }
+
     /// What the disk says it needs, as (claim, evidence) pairs.
     QVector<QPair<QString, QString>> specs() const {
         QVector<QPair<QString, QString>> out;

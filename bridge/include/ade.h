@@ -255,6 +255,38 @@ void       ade_layout_free(AdeLayout *layout);
 const char *ade_region_name(AdeRegion region);
 const char *ade_region_describes(AdeRegion region);
 
+/* What came off one track of the medium (F-029). */
+typedef struct {
+    uint32_t track;    /* 0-159: cylinder * 2 + head        */
+    uint32_t cylinder;
+    uint32_t head;
+    uint32_t sectors;  /* actually recovered                */
+    uint32_t expected; /* a whole track holds this many     */
+    uint32_t source;   /* AdeTrackSource                    */
+} AdeTrack;
+
+/* Where a track's sectors came from. */
+typedef enum {
+    ADE_TRACK_SECTORS = 0, /* stored already decoded            */
+    ADE_TRACK_RAW_MFM = 1, /* decoded here, out of raw MFM      */
+    ADE_TRACK_ABSENT  = 2  /* the container carried nothing     */
+} AdeTrackSource;
+
+/* Read what came off each track, for a surface view (F-029).
+ *
+ * Returns 0 for a container that carries no track-level information — a plain
+ * ADF, an ADZ, a hardfile. That is not a failure: those are already sectors,
+ * nothing recorded how they were read, and reporting 160 whole tracks would
+ * claim a measurement nobody made. Only an extended ADF or a flux capture
+ * knows.
+ *
+ * Fills up to `count` entries and returns how many the disk has, which is 160
+ * for a double-density floppy — so a caller can size a buffer by calling with
+ * `out` NULL first. Every track is present, including those the container
+ * never mentioned: "nothing was recovered here" and "nobody looked here" are
+ * the same picture otherwise, and only one is a fact about the disk. */
+size_t ade_surface_read(const AdeImage *image, AdeTrack *out, size_t count);
+
 /* What a disk says it needs, with the evidence for each claim (F-028).
  *
  * Facts, not a verdict. An ADF carries no manifest, so most of what somebody

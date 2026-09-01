@@ -913,6 +913,72 @@ pub unsafe extern "C" fn ade_layout_free(layout: *mut AdeLayout) {
     });
 }
 
+/// What came off one track. Mirrors `AdeTrack` in `ade.h`.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct AdeTrack {
+    /// 0–159: cylinder times two, plus the head.
+    pub track: u32,
+    /// The cylinder.
+    pub cylinder: u32,
+    /// Which side.
+    pub head: u32,
+    /// Sectors actually recovered.
+    pub sectors: u32,
+    /// Sectors a whole track holds.
+    pub expected: u32,
+    /// Where they came from, as `AdeTrackSource`.
+    pub source: u32,
+}
+
+/// Read what came off each track, for a surface view (F-029).
+///
+/// Zero for a container carrying no track-level information, which is most of
+/// them and is not a failure. Fills up to `count` and returns how many there
+/// are, so a caller can size a buffer with `out` null.
+///
+/// # Safety
+/// `image` must be a live handle or null, and `out` must point at `count`
+/// writable `AdeTrack`s or be null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ade_surface_read(
+    image: *const AdeImage,
+    out: *mut AdeTrack,
+    count: usize,
+) -> usize {
+    with_image(image, 0, |image| {
+        // Taken from the inspection rather than recomputed. What came off the
+        // medium is recorded in the container's raw tracks and is gone once
+        // they have been assembled into sectors — so it is kept from the
+        // assembly that already happened at open, rather than reading the file
+        // again to learn something already known.
+        let Some(assembly) = image.inspection.assembly.as_ref() else {
+            return 0;
+        };
+
+        if !out.is_null() {
+            for (index, state) in assembly.tracks.iter().take(count).enumerate() {
+                let entry = AdeTrack {
+                    track: u32::try_from(state.index).unwrap_or(0),
+                    cylinder: u32::try_from(state.cylinder()).unwrap_or(0),
+                    head: u32::try_from(state.head()).unwrap_or(0),
+                    sectors: u32::from(state.sectors),
+                    expected: u32::from(state.expected),
+                    source: match state.source {
+                        ade_core::assemble::TrackSource::Sectors => 0,
+                        ade_core::assemble::TrackSource::RawMfm => 1,
+                        ade_core::assemble::TrackSource::Absent => 2,
+                    },
+                };
+                // SAFETY: `index` is below `count`, and the caller promises
+                // that many writable entries.
+                unsafe { out.add(index).write(entry) };
+            }
+        }
+        assembly.tracks.len()
+    })
+}
+
 /// What a disk says it needs. Opaque to C.
 pub struct AdeSpecs {
     /// Owns the strings the accessors hand back.

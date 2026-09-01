@@ -333,6 +333,7 @@ fn main() -> ExitCode {
         ),
         ("layout", 1) => layout(Path::new(p(0)), args.format),
         ("specs", 1) => specs(Path::new(p(0)), args.format),
+        ("surface", 1) => surface(Path::new(p(0)), args.format),
         ("formats", 0) => formats(args.format),
         ("batch", n) if n >= 1 => batch(
             &args.positional,
@@ -385,6 +386,7 @@ fn usage() {
         "    ade layout <image>                 map what occupies each block (F-022)".to_owned(),
         "    ade specs <image>                  what the disk needs, and what it cannot say"
             .to_owned(),
+        "    ade surface <image>                what came off each track (F-029)".to_owned(),
         "    ade formats                        what converts to what, and what it costs"
             .to_owned(),
         "    ade batch <dir|image>...           verify a whole corpus (F-014)".to_owned(),
@@ -1570,6 +1572,110 @@ fn unpack(path: &Path, dest: &Path, format: Format, partition: Option<&str>) -> 
     } else {
         EXIT_FAULTS
     })
+}
+
+/// What was recovered from each track of the medium (F-029).
+fn surface(path: &Path, format: Format) -> ExitCode {
+    let bytes = match std::fs::read(path) {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("ade: {}: {e}", path.display());
+            return ExitCode::from(EXIT_UNREADABLE);
+        }
+    };
+    let Some(assembly) = ade_core::assemble::of_bytes(&bytes) else {
+        // Not a failure. A plain ADF is already sectors: every one is present
+        // by construction and nothing recorded how it was read, so there is no
+        // surface to show. Saying so beats drawing 160 full tracks and
+        // implying they were measured.
+        eprintln!(
+            "ade: {}: this container carries no track-level information",
+            path.display()
+        );
+        eprintln!("ade: only an extended ADF or a flux capture records what came off each track");
+        return ExitCode::from(EXIT_NO_VOLUME);
+    };
+
+    let mut out = std::io::stdout().lock();
+    if format == Format::Json {
+        use ade_core::json::Value;
+        emit_json(
+            &mut out,
+            Value::Obj(vec![
+                ("sectors_placed", Value::Num(assembly.sectors_placed as u64)),
+                ("sectors_total", Value::Num(assembly.sectors_total as u64)),
+                (
+                    "tracks",
+                    Value::Arr(
+                        assembly
+                            .tracks
+                            .iter()
+                            .map(|t| {
+                                Value::Obj(vec![
+                                    ("track", Value::Num(t.index as u64)),
+                                    ("cylinder", Value::Num(t.cylinder() as u64)),
+                                    ("head", Value::Num(t.head() as u64)),
+                                    ("sectors", Value::Num(u64::from(t.sectors))),
+                                    ("expected", Value::Num(u64::from(t.expected))),
+                                    ("source", Value::str(t.source.name())),
+                                ])
+                            })
+                            .collect(),
+                    ),
+                ),
+            ]),
+        );
+        return ExitCode::from(EXIT_CLEAN);
+    }
+
+    let mut lines = vec![
+        format!("{}", path.display()),
+        format!(
+            "  {} of {} sectors recovered ({}%)",
+            assembly.sectors_placed,
+            assembly.sectors_total,
+            assembly.percent_complete()
+        ),
+        String::new(),
+    ];
+    // A ruler exactly as wide as the disk. Written out by hand it was 100
+    // columns for 80 cylinders, which invites counting to the wrong track.
+    let mut tens = String::from("  cyl     ");
+    let mut units = String::from("          ");
+    for cylinder in 0..80usize {
+        let tens_digit = u32::try_from(cylinder / 10).unwrap_or(0);
+        let units_digit = u32::try_from(cylinder % 10).unwrap_or(0);
+        tens.push(if cylinder % 10 == 0 {
+            char::from_digit(tens_digit, 10).unwrap_or(' ')
+        } else {
+            ' '
+        });
+        units.push(char::from_digit(units_digit, 10).unwrap_or(' '));
+    }
+    lines.push(tens);
+    lines.push(units);
+    // Two rows, one per head, because that is the shape of the medium: the
+    // same cylinder on side 0 and side 1 are different tracks and fail
+    // independently.
+    for head in 0..2usize {
+        let mut row = format!("  head {head}   ");
+        for cylinder in 0..80usize {
+            let index = cylinder.saturating_mul(2).saturating_add(head);
+            let state = assembly.tracks.get(index);
+            row.push(match state {
+                None => ' ',
+                Some(t) if t.source == ade_core::assemble::TrackSource::Absent => '.',
+                Some(t) if t.sectors == 0 => 'x',
+                Some(t) if t.sectors >= t.expected => '#',
+                Some(_) => '-',
+            });
+        }
+        lines.push(row);
+    }
+    lines.push(String::new());
+    lines.push("  # whole   - partial   x nothing decoded   . not in the container".to_owned());
+    emit_lines(&mut out, &lines);
+    ExitCode::from(EXIT_CLEAN)
 }
 
 /// What a disk says it needs, with the evidence (F-028).

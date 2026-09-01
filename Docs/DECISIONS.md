@@ -95,7 +95,9 @@ Rationale, in short:
 **Recorded:** 2026-08-21
 **Status:** Accepted
 **Authors:** Claude (primary auditor)
-**Related:** F-001, F-010, ROADMAP.md
+**Related:** F-001, F-010, F-019, F-025, D-018, ROADMAP.md
+
+> **Discharged in two steps.** Creating a *new* disk was permitted on these terms by F-019 (2026-08-29) and widened by F-025. Writing *into* an existing one — the case this entry is actually about — is settled by **[D-018](#d-018-writes-into-an-existing-disk-are-buffered-saved-explicitly-and-never-over-the-file-they-came-from)** (2026-09-01), which keeps the safety property by never writing over the file an image was opened from.
 
 **Context.** Write/format paths are where a disk tool does irreversible damage. Reading is safe and validates understanding of a format.
 
@@ -526,3 +528,53 @@ Roughly 20% of corpus disks yield reportable text after filtering, and 91% of th
 **Consequences.** The register has no undecided entries. F-017's number stays allocated and its section records the cut, per the append-only convention — a reader who finds it referenced elsewhere lands on the reason rather than on nothing.
 
 **Reversal conditions.** A concrete need to reach ADE-only containers with ordinary tools — not a preference for mounting, a case where extraction genuinely will not serve. If that arrives, it is the candidate above and not this entry: the new feature's acceptance would name the containers the kernel cannot read, and would say what happens when a reconstruction's missing sectors are read.
+
+### D-018 Writes into an existing disk are buffered, saved explicitly, and never over the file they came from
+**Decided:** 2026-09-01
+**Recorded:** 2026-09-01
+**Status:** Accepted
+**Authors:** Darian-Frey (decision); Claude (analysis)
+**Related:** D-004, D-002, D-010, AV-002, C-006, F-019, F-025, IMP-010
+
+**Context.** D-004 defers write paths until their read paths are proven, and permits one once they are. For OFS and FFS that condition is met and measurable: 4,652 corpus images, 99.36% agreement with ADFlib on extracted bytes, 3,606 volumes mounting, and a health report that already validates every structure a write would have to maintain. `ade create` was permitted on those terms in F-019 and extended in F-025.
+
+But `create` is the easy case. It **makes a new file**, so the damage D-004 exists to prevent — writing into a disk somebody already owns and cannot get back — is structurally impossible. Saving a modified disk, creating a directory on one, injecting a file, deleting one: all of these write into an image that exists. That is the question this entry settles, and nothing in the suite may be built before it is.
+
+**The requirement is not "be careful". It is that a wrong edit must not be able to destroy the original.** ADE's users are preserving thirty-year-old media, frequently the only copy anybody has. A tool that is careful still loses a disk when the process is killed mid-write, when the wrong row was selected, or when the edit turns out to have been a mistake an hour later.
+
+**What ADE already does is not one thing, which is worth knowing before citing it as precedent.** Measured 2026-09-01: `ade create` refuses to overwrite, `ade extract --all` skips existing files, `ade batch --convert` skips existing outputs — but `ade convert` and single-file `ade extract` overwrite silently. Three refuse and two do not. That inconsistency is logged as **IMP-010** and is not settled here; what is settled is that the write suite follows the majority, because it is the majority that matches what this tool is for.
+
+**Options.**
+
+- **A. No writes into an existing image in v1.** The status quo. Rejected, but not because it is wrong — it is the safest possible answer and it costs the feature entirely. The whole point of options C and D is to find a way to keep A's safety property while allowing the work.
+
+- **B. Write through immediately, as a filesystem driver does.** Rejected. Every edit is irreversible the instant it is made, a crash between two related writes leaves a structurally invalid disk, and undo would have to be implemented as a second write that may itself fail. This is how a disk editor destroys a disk, and no amount of care in the implementation removes it.
+
+- **C. Buffer edits in memory; write only on an explicit save; never over the file that was opened.** **Chosen.**
+
+- **D. C, plus an automatic backup of the original before saving.** Rejected as unnecessary under C: if the original is never written, there is nothing to back up. A `.bak` beside every edited disk would be clutter that fills a preservation drive to guard against a risk C has already removed.
+
+**Decision.** Option C, in four parts.
+
+**1. Edits are buffered.** An edit changes an in-memory image and nothing else. Nothing on disk moves until a save. This is what turns "never-reversible in v1" from a reason to refuse the suite into a property the design already has: closing without saving costs nothing, and undo is a stack in memory rather than a promise about a file. Undo and redo are therefore ordinary and cheap, and are not a separate feature to be argued about.
+
+**2. A save never writes over the file the image was opened from.** The first save requires a destination — Save As, always. Subsequent saves may write to *that* destination, because ADE created it in this session and it is not somebody's original. This is the rule that makes a wrong edit unable to destroy anything: the disk that was opened is still on disk, byte for byte, whatever happened in the editor.
+
+**3. A save is atomic.** Write to a temporary file in the destination's own directory, flush it, then rename over the target. Writing in place risks a torn file if the process dies mid-write, which destroys the old contents *and* fails to produce the new — the worst of both, and the one failure mode a preservation tool must not have. The cost is free space equal to the image, which is 880 KB for a floppy and at most 50 MB for a hard disk ADE can make.
+
+**4. Every write must leave a disk ADE and ADFlib both accept.** A write operation is not finished when the bytes are placed; it is finished when the result passes `ade check` and mounts under the D-002 oracle. This is stricter than it sounds and is the point: creating a directory means allocating a block, writing a header, inserting into the parent's hash table with the *right* hash function (C-006 — a `DOS\2`–`DOS\5` volume hashes differently), marking the bitmap, moving the parent's datestamp, and on a dircache volume updating the parent's cache, or the health report will report the new block as orphaned. A write that produces a disk ADE itself calls damaged is a bug, not a partial success.
+
+**Consequences.**
+
+- The GUI needs a dirty-state model: a modified image says so, Save is offered only when there is something to save, and closing or replacing a modified image asks first.
+- The CLI's write commands take an explicit `--output`; there is no in-place form to get wrong.
+- **Creating a directory is the right first operation**, and this entry is written expecting it: one block, one hash-table insertion, one bitmap bit, everything already read and validated, and verifiable end to end because ADFlib can be asked whether the directory is there.
+- Bootblock writing stays declined. AV-002's defence is structural — no interpreter, no emulator, no execution path — and writing boot code is the one operation that would make ADE a vector rather than a reader. `ade create` leaves it zeroed exactly as AmigaDOS's own `format` does without `install`, and the write suite does not change that.
+- LNFS stays out (D-013). Writing a format checkable only against itself is what D-002 gave up ADFlib's knowledge to avoid, and adding a *write* path to it would be the same mistake with worse consequences.
+
+**Reversal conditions.**
+
+- **Part 2 loosens** if in-place saving is asked for by somebody who understands what it costs, and then only behind an explicit flag, never as a default. The measurement to bring is a case where saving to a new file genuinely will not serve — not a preference for fewer files.
+- **Part 3 changes** only if a target filesystem cannot rename atomically, in which case the honest answer is to refuse to save there rather than to fall back to writing in place.
+- **Part 4 weakens for nothing.** If a write cannot be verified by both ADE and the oracle, it is not ready; that is D-002's whole bargain and D-013 is the standing example of it being kept.
+- The whole entry is reconsidered if ADE ever writes to **real media** through a Greaseweazle (F-006), where there is no temporary file to rename and no original to preserve. That is a different problem and would need its own entry rather than an amendment to this one.

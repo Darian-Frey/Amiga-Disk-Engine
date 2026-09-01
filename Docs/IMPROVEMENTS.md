@@ -11,6 +11,28 @@ Effort vocabulary: trivial | small | medium | large.
 
 ## Suggested
 
+### IMP-010 Half of ADE's write paths refuse to overwrite and half do not
+**Status:** suggested
+**Effort:** small
+
+**Where:** `cli/src/main.rs` — `convert` and `extract`, against `create` and `unpack`.
+
+**What is inconsistent.** Measured 2026-09-01:
+
+| command | writing over an existing file |
+|---|---|
+| `ade create out.adf` | **refuses** — "already exists, refusing to overwrite" |
+| `ade extract img --all dir` | **skips** the file and reports it |
+| `ade batch --convert --output=dir` | **skips** existing outputs |
+| `ade convert in.adf out.adf` | **overwrites**, silently |
+| `ade extract img path dest` | **overwrites**, silently |
+
+The split is not random and there is a defensible rule inside it — a command that *generates* its target names should not clobber, and a command *given* a destination is being told where to write, as `cp` is. But `ade create out.adf` is given its destination too and refuses, so the rule as implemented does not hold.
+
+**Trade-offs.** Making the two refuse costs a flag (`--force`) for anybody scripting a repeated conversion, and breaks any existing script that relies on overwriting. Making `create` overwrite is the wrong direction for a tool whose users are preserving disks. The third option — leave it, and document the rule as "explicit destination overwrites, generated name does not", with `create` as a deliberate exception because a blank disk is cheap to re-make and a wrong overwrite is not — is defensible but is a rule with an exception in it, which is how inconsistencies get justified rather than fixed.
+
+**Why it matters now.** [[D-018]] settles the overwrite question for the write suite, and cites this entry: the suite's rule was chosen to be coherent with the *majority* of these paths rather than with all of them, because they do not agree with each other. Whatever is decided here should be decided for all five at once.
+
 ### IMP-009 Previewing a file builds a 64 KB hex dump nobody can see
 **Status:** suggested
 **Effort:** small

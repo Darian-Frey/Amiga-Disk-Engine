@@ -313,6 +313,7 @@ fn assemble_container(bytes: &[u8], kind: Kind) -> Option<(Vec<u8>, AssemblyInfo
         sectors_total: assembly.sectors_total,
         from_sector_tracks: assembly.from_sector_tracks,
         from_raw_tracks: assembly.from_raw_tracks,
+        tracks: assembly.tracks,
     };
     Some((assembly.bytes, info))
 }
@@ -527,6 +528,14 @@ pub struct AssemblyInfo {
     pub from_sector_tracks: usize,
     /// Tracks contributed by decoding raw MFM.
     pub from_raw_tracks: usize,
+    /// What came off each of the 160 tracks (F-029).
+    ///
+    /// Carried here rather than recomputed, because the record of what came
+    /// off the medium lives in the container's raw tracks and is gone the
+    /// moment they have been assembled into sectors. The assembly happens at
+    /// open; keeping its by-product costs four kilobytes and saves reading the
+    /// file a second time to learn something already known.
+    pub tracks: Vec<crate::assemble::TrackState>,
 }
 
 impl AssemblyInfo {

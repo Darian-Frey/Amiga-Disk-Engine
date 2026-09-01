@@ -71,6 +71,7 @@ public:
     static QString aboutDetail();
 
 private slots:
+    void showSurface();
     void showSpecs();
     void newDisk();
     void extractAll();
@@ -183,4 +184,5 @@ private:
     QAction *m_extract = nullptr;
     QAction *m_extractAll = nullptr;
     QAction *m_specs = nullptr;
+    QAction *m_surface = nullptr;
 };

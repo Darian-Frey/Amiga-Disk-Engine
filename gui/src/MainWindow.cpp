@@ -2,6 +2,7 @@
 
 #include "HexView.h"
 #include "MapView.h"
+#include "SurfaceView.h"
 #include "ImageTree.h"
 
 #include <QAction>
@@ -372,6 +373,14 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
     m_specs = disk->addAction(QStringLiteral("Disk &information..."));
     m_specs->setEnabled(false);
     connect(m_specs, &QAction::triggered, this, &MainWindow::showSpecs);
+
+    m_surface = disk->addAction(QStringLiteral("Disk &surface..."));
+    m_surface->setEnabled(false);
+    m_surface->setToolTip(QStringLiteral(
+        "What came off each track of the medium.\n"
+        "Only an extended ADF or a flux capture records this; a plain ADF is "
+        "already sectors and never knew."));
+    connect(m_surface, &QAction::triggered, this, &MainWindow::showSurface);
 
     // Help. The manual will join About here; nothing stands in for it in the
     // meantime, because a menu item that is greyed out or opens an apology is
@@ -1067,6 +1076,46 @@ void MainWindow::extractAll() {
     statusBar()->showMessage(message);
 }
 
+void MainWindow::showSurface() {
+    const Open *open = imageFor(m_selected);
+    if (!open) {
+        emit errorOccurred(QStringLiteral("Select a disk first."));
+        return;
+    }
+    const QVector<AdeTrack> tracks = open->image.surface();
+    if (tracks.isEmpty()) {
+        // Enabled only when there is something to show, so this is a guard
+        // rather than the ordinary path — but a plain ADF reaching here should
+        // say why rather than open an empty grid.
+        emit errorOccurred(
+            QStringLiteral("%1 carries no track-level information: it is already "
+                           "sectors, and nothing recorded how they were read.")
+                .arg(open->name));
+        return;
+    }
+
+    QDialog dialog(this);
+    dialog.setWindowTitle(QStringLiteral("Disk surface — %1").arg(open->name));
+    auto *view = new SurfaceView(&dialog);
+    view->setTracks(tracks);
+
+    auto *legend = new QLabel(&dialog);
+    legend->setTextFormat(Qt::RichText);
+    legend->setWordWrap(true);
+    legend->setText(SurfaceView::legend(view->palette()));
+
+    auto *buttons = new QDialogButtonBox(QDialogButtonBox::Close, &dialog);
+    connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+    connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+
+    auto *layout = new QVBoxLayout(&dialog);
+    layout->addWidget(view, 1);
+    layout->addWidget(legend);
+    layout->addWidget(buttons);
+    dialog.resize(760, 320);
+    dialog.exec();
+}
+
 void MainWindow::showSpecs() {
     const Open *open = imageFor(m_selected);
     if (!open) {
@@ -1315,6 +1364,14 @@ void MainWindow::showEntry(QTreeWidgetItem *item) {
     // will do, because the whole disk is what it takes.
     if (m_extractAll) m_extractAll->setEnabled(imageFor(item) != nullptr);
     if (m_specs) m_specs->setEnabled(imageFor(item) != nullptr);
+    // Offered only when the container actually recorded what came off the
+    // medium. A greyed item on a plain ADF is the honest answer: most
+    // containers cannot know, and a view of 160 whole tracks would be a
+    // measurement nobody made.
+    if (m_surface) {
+        const Open *open = imageFor(item);
+        m_surface->setEnabled(open != nullptr && !open->image.surface().isEmpty());
+    }
     // A content-search hit is an offset, not a file. Selecting one shows the
     // whole disk and scrolls to it — a list of offsets you cannot go to is
     // half a feature, and going there is where F-022's colouring pays off:

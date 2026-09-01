@@ -16,6 +16,9 @@
     reason = "tests over data they construct"
 )]
 
+// C-001 is a clippy tripwire, not a convention: raw `to_be_bytes` fails the
+// build outside `ade-endian`, tests included.
+use ade_core::layers::endian::{put_u16, put_u32};
 use std::ffi::{CStr, CString};
 
 use ade::{AdeEntry, AdeEntryKind, AdeResult};
@@ -1166,4 +1169,81 @@ fn the_specs_come_across_with_their_evidence() {
         assert_eq!(ade::ade_specs_because(std::ptr::null(), 0).len, 0);
         ade::ade_specs_free(std::ptr::null_mut());
     }
+}
+
+#[test]
+fn the_surface_comes_across_or_says_there_is_none() {
+    // A plain ADF has no surface, and that is the ordinary case rather than a
+    // failure: it is already sectors and nothing recorded how they were read.
+    let (plain_path, c_plain) = fixture("surfaceplain", &sound_disk());
+    let mut err = AdeResult::Ok;
+    // SAFETY: valid path, no catalogue, writable slot.
+    let plain = unsafe { ade::ade_image_open(c_plain.as_ptr(), std::ptr::null(), &raw mut err) };
+    assert!(!plain.is_null());
+    // SAFETY: a live handle, null buffer to ask for the count.
+    assert_eq!(
+        unsafe { ade::ade_surface_read(plain, std::ptr::null_mut(), 0) },
+        0,
+        "a plain ADF never knew what came off the medium"
+    );
+    // SAFETY: a live handle.
+    unsafe { ade::ade_image_free(plain) };
+    let _ = std::fs::remove_file(&plain_path);
+
+    // Wrapped as raw tracks, the same disk has one.
+    let mut extended = vec![0u8; 12];
+    extended[..8].copy_from_slice(b"UAE-1ADF");
+    put_u16(&mut extended, 10, 160).unwrap();
+    let disk = sound_disk();
+    for _ in 0..160 {
+        let at = extended.len();
+        extended.extend_from_slice(&[0u8; 12]);
+        put_u32(&mut extended, at + 4, 11 * 512).unwrap();
+        put_u32(&mut extended, at + 8, 11 * 512 * 8).unwrap();
+    }
+    extended.extend_from_slice(&disk);
+
+    let (path, c_path) = fixture("surfaceraw", &extended);
+    // SAFETY: valid path, no catalogue, writable slot.
+    let image = unsafe { ade::ade_image_open(c_path.as_ptr(), std::ptr::null(), &raw mut err) };
+    assert!(!image.is_null());
+
+    // Asked with a null buffer, it reports how many there are, so a caller can
+    // size one.
+    // SAFETY: a live handle, null buffer.
+    let count = unsafe { ade::ade_surface_read(image, std::ptr::null_mut(), 0) };
+    assert_eq!(count, 160, "one per track of a double-density floppy");
+
+    let mut tracks = vec![unsafe { std::mem::zeroed::<ade::AdeTrack>() }; count];
+    // SAFETY: a live handle and `count` writable entries.
+    let filled = unsafe { ade::ade_surface_read(image, tracks.as_mut_ptr(), count) };
+    assert_eq!(filled, count);
+    for (index, track) in tracks.iter().enumerate() {
+        assert_eq!(track.track as usize, index);
+        assert_eq!(track.cylinder as usize, index / 2);
+        assert_eq!(track.head as usize, index % 2);
+        assert_eq!(track.expected, 11);
+        assert_eq!(track.sectors, 11, "track {index}");
+        assert_eq!(track.source, 0, "stored as sectors");
+    }
+
+    // A short buffer fills what it can and still reports the true count, so a
+    // caller cannot mistake "I gave you room for ten" for "there are ten".
+    let mut few = vec![unsafe { std::mem::zeroed::<ade::AdeTrack>() }; 10];
+    // SAFETY: a live handle and ten writable entries.
+    assert_eq!(
+        unsafe { ade::ade_surface_read(image, few.as_mut_ptr(), 10) },
+        160
+    );
+    assert_eq!(few[9].track, 9);
+
+    // SAFETY: a live handle.
+    unsafe { ade::ade_image_free(image) };
+    let _ = std::fs::remove_file(&path);
+
+    // SAFETY: null is allowed at every entry point.
+    assert_eq!(
+        unsafe { ade::ade_surface_read(std::ptr::null(), std::ptr::null_mut(), 0) },
+        0
+    );
 }
