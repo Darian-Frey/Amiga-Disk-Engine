@@ -34,6 +34,7 @@
 #include <QSplitter>
 #include <QStatusBar>
 #include <QTabWidget>
+#include <QTextBrowser>
 #include <QLineEdit>
 #include <QTimer>
 #include <QTreeWidget>
@@ -363,6 +364,14 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
     auto *quit = file->addAction(QStringLiteral("&Quit"));
     quit->setShortcut(QKeySequence::Quit);
     connect(quit, &QAction::triggered, this, &QWidget::close);
+
+    // A menu of its own, because what a disk *is* and what it *needs* are the
+    // window's two standing questions about the thing on screen, and neither
+    // belongs under File.
+    auto *disk = menuBar()->addMenu(QStringLiteral("&Disk"));
+    m_specs = disk->addAction(QStringLiteral("Disk &information..."));
+    m_specs->setEnabled(false);
+    connect(m_specs, &QAction::triggered, this, &MainWindow::showSpecs);
 
     // Help. The manual will join About here; nothing stands in for it in the
     // meantime, because a menu item that is greyed out or opens an apology is
@@ -1058,6 +1067,54 @@ void MainWindow::extractAll() {
     statusBar()->showMessage(message);
 }
 
+void MainWindow::showSpecs() {
+    const Open *open = imageFor(m_selected);
+    if (!open) {
+        emit errorOccurred(QStringLiteral("Select a disk first."));
+        return;
+    }
+
+    QString body = QStringLiteral("<h3>%1</h3>").arg(open->name.toHtmlEscaped());
+    body += QStringLiteral("<p style='color:gray'>%1</p>").arg(describe(*open).toHtmlEscaped());
+
+    // Every claim carries its evidence. A report that says "needs Kickstart
+    // 2.0" without saying why is asking to be believed; one that names the
+    // library is asking to be checked.
+    body += QStringLiteral("<table cellpadding='3'>");
+    for (const auto &[what, because] : open->image.specs()) {
+        body += QStringLiteral("<tr><td valign='top'><b>%1</b></td>"
+                               "<td valign='top' style='color:gray'>%2</td></tr>")
+                    .arg(what.toHtmlEscaped(), because.toHtmlEscaped());
+    }
+    body += QStringLiteral("</table>");
+
+    // And the blind spots, named. Left out, the silence reads as "there is
+    // nothing more to know", and somebody concludes the disk runs on anything.
+    body += QStringLiteral("<p><b>Not on the disk, and not inferable from it</b></p><table "
+                           "cellpadding='3'>");
+    for (size_t i = 0; i < ade_specs_unknowable_count(); ++i) {
+        body += QStringLiteral("<tr><td valign='top'>%1</td>"
+                               "<td valign='top' style='color:gray'>%2</td></tr>")
+                    .arg(QString::fromUtf8(ade_specs_unknowable_what(i)).toHtmlEscaped(),
+                         QString::fromUtf8(ade_specs_unknowable_why(i)).toHtmlEscaped());
+    }
+    body += QStringLiteral("</table>");
+
+    QDialog dialog(this);
+    dialog.setWindowTitle(QStringLiteral("Disk information — %1").arg(open->name));
+    auto *text = new QTextBrowser(&dialog);
+    text->setHtml(body);
+    text->setOpenExternalLinks(false);
+    auto *buttons = new QDialogButtonBox(QDialogButtonBox::Close, &dialog);
+    connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+    connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+    auto *layout = new QVBoxLayout(&dialog);
+    layout->addWidget(text);
+    layout->addWidget(buttons);
+    dialog.resize(640, 460);
+    dialog.exec();
+}
+
 void MainWindow::showAbout() {
     QMessageBox about(this);
     about.setWindowTitle(QStringLiteral("About Amiga Disk Engine"));
@@ -1257,6 +1314,7 @@ void MainWindow::showEntry(QTreeWidgetItem *item) {
     // Extracting everything needs a disk, not a file: any row of any image
     // will do, because the whole disk is what it takes.
     if (m_extractAll) m_extractAll->setEnabled(imageFor(item) != nullptr);
+    if (m_specs) m_specs->setEnabled(imageFor(item) != nullptr);
     // A content-search hit is an offset, not a file. Selecting one shows the
     // whole disk and scrolls to it — a list of offsets you cannot go to is
     // half a feature, and going there is where F-022's colouring pays off:

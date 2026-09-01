@@ -332,6 +332,7 @@ fn main() -> ExitCode {
             args.ignore_case,
         ),
         ("layout", 1) => layout(Path::new(p(0)), args.format),
+        ("specs", 1) => specs(Path::new(p(0)), args.format),
         ("formats", 0) => formats(args.format),
         ("batch", n) if n >= 1 => batch(
             &args.positional,
@@ -382,6 +383,8 @@ fn usage() {
         "    ade find <image> <pattern>         search the image for text or hex (F-021)"
             .to_owned(),
         "    ade layout <image>                 map what occupies each block (F-022)".to_owned(),
+        "    ade specs <image>                  what the disk needs, and what it cannot say"
+            .to_owned(),
         "    ade formats                        what converts to what, and what it costs"
             .to_owned(),
         "    ade batch <dir|image>...           verify a whole corpus (F-014)".to_owned(),
@@ -1567,6 +1570,85 @@ fn unpack(path: &Path, dest: &Path, format: Format, partition: Option<&str>) -> 
     } else {
         EXIT_FAULTS
     })
+}
+
+/// What a disk says it needs, with the evidence (F-028).
+fn specs(path: &Path, format: Format) -> ExitCode {
+    let bytes = match std::fs::read(path) {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("ade: {}: {e}", path.display());
+            return ExitCode::from(EXIT_UNREADABLE);
+        }
+    };
+    let image = match Image::open(path) {
+        Ok(i) => i,
+        Err(e) => {
+            eprintln!("ade: {}: {e}", path.display());
+            return ExitCode::from(EXIT_UNREADABLE);
+        }
+    };
+    let specs = ade_core::specs::Specs::of(&image, &bytes);
+
+    let mut out = std::io::stdout().lock();
+    if format == Format::Json {
+        use ade_core::json::Value;
+        emit_json(
+            &mut out,
+            Value::Obj(vec![
+                (
+                    "facts",
+                    Value::Arr(
+                        specs
+                            .facts
+                            .iter()
+                            .map(|f| {
+                                Value::Obj(vec![
+                                    ("what", Value::str(&f.what)),
+                                    ("because", Value::str(&f.because)),
+                                ])
+                            })
+                            .collect(),
+                    ),
+                ),
+                (
+                    "libraries",
+                    Value::Arr(specs.libraries.iter().map(Value::str).collect()),
+                ),
+                (
+                    "unknowable",
+                    Value::Arr(
+                        ade_core::specs::UNKNOWABLE
+                            .iter()
+                            .map(|(what, why)| {
+                                Value::Obj(vec![
+                                    ("what", Value::str(*what)),
+                                    ("why", Value::str(*why)),
+                                ])
+                            })
+                            .collect(),
+                    ),
+                ),
+            ]),
+        );
+        return ExitCode::from(EXIT_CLEAN);
+    }
+
+    let mut lines = vec![format!("{}", path.display()), String::new()];
+    for fact in &specs.facts {
+        lines.push(format!("  {}", fact.what));
+        lines.push(format!("      because {}", fact.because));
+    }
+    // The blind spots are printed, not omitted. A report that simply stops is
+    // read as "there is nothing more to know", and somebody will infer from
+    // the silence that the disk runs on anything.
+    lines.push(String::new());
+    lines.push("  Not on the disk, and not inferable from it:".to_owned());
+    for (what, why) in ade_core::specs::UNKNOWABLE {
+        lines.push(format!("      {what:<16} {why}"));
+    }
+    emit_lines(&mut out, &lines);
+    ExitCode::from(EXIT_CLEAN)
 }
 
 /// Map what occupies each block of an image (F-022).

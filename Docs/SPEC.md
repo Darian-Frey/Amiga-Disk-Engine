@@ -860,6 +860,47 @@ Nine images carry it: three Cannon Fodder 2 disks, `Crystal Dragon_Disk1`, `Heim
 
 **The last one is already TOSEC-tagged `[b errdms]`** — bad, errdms — which is an independent confirmation of the detection from the people who catalogued the collection. The other eight carry no such tag, so the scan found damage the naming had missed. That is the case for scanning content rather than trusting names, made by the corpus itself.
 
+## What a disk says it needs
+
+*Measured across all 4,651 mappable corpus images on 2026-09-01 (F-028).*
+
+An ADF is a dump of magnetic media and carries no manifest, so most of what "the hardware this needs" means is **not in the bytes**. What is derivable is derivable from named evidence, and the rest has to be admitted to rather than omitted.
+
+| Derivable | From |
+|---|---|
+| The drive — 3.5" DD, 3.5" HD, 5.25" DD | the geometry; only HD needs a drive not every Amiga has |
+| Whether it starts through AmigaDOS | the bootblock's first three bytes |
+| The filesystem | the dostype |
+| A hard disk rather than a floppy | an `RDSK` in the reserved area |
+| **At least Kickstart 2.0** | a library Release 2 introduced |
+
+**Not derivable, and listed as such**: memory (no Amiga disk format records one), processor (68000 against 68020+ is decided by the instructions used), chipset (OCS/ECS/AGA is told apart by which chip registers a program writes — the `(AGA)` in a TOSEC name is the *catalogue's* claim, not the disk's), and video standard. All four need a disassembler ADE does not have, and AV-002 makes that structural rather than incidental.
+
+### Libraries that date a disk
+
+*Sourced 2026-09-01 from the Amiga ROM Kernel Reference Manual via [AMIGAWIKI]: several libraries introduced in Release 2 use version 36.*
+
+`asl.library`, `gadtools.library`, `iffparse.library`, `utility.library`, `commodities.library`, `rexxsyslib.library`. A disk that opens one of these cannot run on 1.3. **312 of 4,651 corpus images do**, the commonest evidence being `utility.library` (214), `asl.library` (206) and `gadtools.library` (166).
+
+The claim is always a **lower bound**. A disk needing `asl.library` may need far more than 2.0, and nothing on the disk would say so.
+
+**Two leads, deliberately unused.** `locale.library` (14 of 400 sampled) and `datatypes.library` (6) are believed later than Release 2, but no source consulted gives their introduction version — the AmigaOS wiki's own pages for them carry no version history. They are recorded here so the table can grow when somebody sources them, and are **not** used to make a claim. Same rule as F-020's signature table: an entry with nothing behind it is recorded as untested rather than quietly trusted.
+
+**A name needs a word boundary.** Scanning 400 images without one reported `udos.library`, `ugraphics.library` and `uintuition.library`, none of which exists — they were the real names with whatever byte preceded them. The byte before a match must not be a name character.
+
+### The corpus, by what it admits to
+
+| | images |
+|---|---|
+| 3.5" DD | 4646 |
+| non-standard size | 5 |
+| AmigaDOS bootblock | 4341 |
+| not an AmigaDOS bootblock | 213 |
+| no boot code at all | 97 |
+| needs at least Kickstart 2.0 | 312 |
+
+**A bootblock that is not AmigaDOS's is not "self-booting".** It is *either* a custom loader that takes the machine over *or* an AmigaDOS bootblock that has been damaged, and nothing short of running the code separates them — `Abandoned Places_Disk2` begins `\x00OS\x00`, which is the second. Both readings are reported and neither is chosen, which is C-008's rule applied to one field rather than two.
+
 ## Where a match lands
 
 *Measured across all 4,652 corpus images on 2026-08-29 (F-021).*

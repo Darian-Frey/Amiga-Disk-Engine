@@ -98,6 +98,7 @@ private slots:
     void aScrollQtDoesNotAnnounceIsStillFollowed();
     void theFollowStopsWhenAFileIsShown();
     void extractingEverythingIsOfferedOnlyWithADiskToExtract();
+    void thereIsADiskMenuOfferedOnlyWithADiskOpen();
     void theMapColoursFilesAndKeepsEmptySpaceVisible();
     void theMapShowsTheDiskAndClickingACellGoesToIt();
     void selectingAFilePicksOutItsBlocksOnTheMap();
@@ -1526,6 +1527,32 @@ void TestMainWindow::selectingAFilePicksOutItsBlocksOnTheMap() {
     const int sampled = (before.height() / 3) * (before.width() / 3);
     QVERIFY2(changed > 0 && changed < sampled / 2,
              qPrintable(QStringLiteral("%1 of %2 sampled pixels changed").arg(changed).arg(sampled)));
+}
+
+void TestMainWindow::thereIsADiskMenuOfferedOnlyWithADiskOpen() {
+    // What a disk *is* and what it *needs* are the window's two standing
+    // questions about the thing on screen, so they get a menu rather than
+    // living under File. The dialog itself is modal and cannot be driven
+    // headlessly; what it says is tested in the engine and across the ABI.
+    MainWindow window;
+    QMenu *menu = nullptr;
+    for (QAction *top : window.menuBar()->actions()) {
+        if (top->text().contains(QStringLiteral("Disk"))) menu = top->menu();
+    }
+    QVERIFY2(menu, "the menu bar has a Disk menu");
+    QVERIFY(!menu->actions().isEmpty());
+    QAction *info = menu->actions().first();
+    QVERIFY2(info->text().contains(QStringLiteral("information")), qPrintable(info->text()));
+    QVERIFY2(!info->isEnabled(), "with no disk open there is nothing to describe");
+
+    window.openImage(m_image);
+    auto *tree = browser(window);
+    tree->setCurrentItem(tree->topLevelItem(0), 0, QItemSelectionModel::ClearAndSelect);
+    QApplication::processEvents();
+    QVERIFY(info->isEnabled());
+
+    // And the engine has something to say about that disk, with evidence.
+    QVERIFY(ade_specs_unknowable_count() >= 4);
 }
 
 QTEST_MAIN(TestMainWindow)

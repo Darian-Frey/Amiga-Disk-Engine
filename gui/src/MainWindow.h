@@ -71,6 +71,7 @@ public:
     static QString aboutDetail();
 
 private slots:
+    void showSpecs();
     void newDisk();
     void extractAll();
     void showAbout();
@@ -181,4 +182,5 @@ private:
     QLabel *m_summary = nullptr;
     QAction *m_extract = nullptr;
     QAction *m_extractAll = nullptr;
+    QAction *m_specs = nullptr;
 };

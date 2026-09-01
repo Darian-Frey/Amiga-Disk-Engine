@@ -913,6 +913,152 @@ pub unsafe extern "C" fn ade_layout_free(layout: *mut AdeLayout) {
     });
 }
 
+/// What a disk says it needs. Opaque to C.
+pub struct AdeSpecs {
+    /// Owns the strings the accessors hand back.
+    facts: Vec<(Vec<u8>, Vec<u8>)>,
+}
+
+/// Read what a disk will admit to (F-028).
+///
+/// Release with [`ade_specs_free`].
+///
+/// # Safety
+/// `image` must be a live handle or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ade_specs_open(image: *const AdeImage) -> *mut AdeSpecs {
+    with_image(image, std::ptr::null_mut(), |image| {
+        let Some(handle) = image.image.as_ref() else {
+            return std::ptr::null_mut();
+        };
+        let bytes = handle.read_range(0, handle.geometry().total_bytes());
+        let specs = ade_core::specs::Specs::of(handle, &bytes);
+        Box::into_raw(Box::new(AdeSpecs {
+            facts: specs
+                .facts
+                .into_iter()
+                .map(|f| (f.what.into_bytes(), f.because.into_bytes()))
+                .collect(),
+        }))
+    })
+}
+
+/// How many facts there are.
+///
+/// # Safety
+/// `specs` must be a live handle or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ade_specs_count(specs: *const AdeSpecs) -> usize {
+    guard(0, || {
+        // SAFETY: the caller's contract; null is checked.
+        unsafe { specs.as_ref() }.map_or(0, |s| s.facts.len())
+    })
+}
+
+/// The claim at `index`, borrowed until the specs are freed.
+///
+/// # Safety
+/// `specs` must be a live handle or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ade_specs_what(specs: *const AdeSpecs, index: usize) -> AdeBytes {
+    guard(AdeBytes::empty(), || {
+        // SAFETY: the caller's contract; null is checked.
+        unsafe { specs.as_ref() }
+            .and_then(|s| s.facts.get(index))
+            .map_or_else(AdeBytes::empty, |f| AdeBytes::of(&f.0))
+    })
+}
+
+/// The evidence at `index`, borrowed until the specs are freed.
+///
+/// # Safety
+/// `specs` must be a live handle or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ade_specs_because(specs: *const AdeSpecs, index: usize) -> AdeBytes {
+    guard(AdeBytes::empty(), || {
+        // SAFETY: the caller's contract; null is checked.
+        unsafe { specs.as_ref() }
+            .and_then(|s| s.facts.get(index))
+            .map_or_else(AdeBytes::empty, |f| AdeBytes::of(&f.1))
+    })
+}
+
+/// Release a specs handle.
+///
+/// # Safety
+/// `specs` must have come from [`ade_specs_open`], or be null, and must not be
+/// used afterwards.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ade_specs_free(specs: *mut AdeSpecs) {
+    guard((), || {
+        if !specs.is_null() {
+            // SAFETY: the caller's contract.
+            drop(unsafe { Box::from_raw(specs) });
+        }
+    });
+}
+
+/// How many things a disk image cannot say.
+///
+/// # Safety
+/// None: takes nothing and returns a count.
+#[unsafe(no_mangle)]
+pub extern "C" fn ade_specs_unknowable_count() -> usize {
+    ade_core::specs::UNKNOWABLE.len()
+}
+
+/// What cannot be known at `index`. Static; never freed.
+///
+/// # Safety
+/// None: takes an integer and returns a pointer to static storage.
+#[unsafe(no_mangle)]
+pub extern "C" fn ade_specs_unknowable_what(index: usize) -> *const c_char {
+    unknowable_string(index, |pair| pair.0)
+}
+
+/// Why it cannot be known at `index`. Static; never freed.
+///
+/// # Safety
+/// None: takes an integer and returns a pointer to static storage.
+#[unsafe(no_mangle)]
+pub extern "C" fn ade_specs_unknowable_why(index: usize) -> *const c_char {
+    unknowable_string(index, |pair| pair.1)
+}
+
+/// The blind-spot strings, NUL-terminated, built once.
+static UNKNOWABLE_STRINGS: std::sync::OnceLock<Vec<(CString, CString)>> =
+    std::sync::OnceLock::new();
+
+/// One of the two strings, or empty past the end.
+fn unknowable_string(
+    index: usize,
+    pick: fn(&(&'static str, &'static str)) -> &'static str,
+) -> *const c_char {
+    guard(c"".as_ptr(), || {
+        let table = UNKNOWABLE_STRINGS.get_or_init(|| {
+            ade_core::specs::UNKNOWABLE
+                .iter()
+                .map(|(what, why)| {
+                    (
+                        CString::new(*what).unwrap_or_default(),
+                        CString::new(*why).unwrap_or_default(),
+                    )
+                })
+                .collect()
+        });
+        let (Some(entry), Some(source)) =
+            (table.get(index), ade_core::specs::UNKNOWABLE.get(index))
+        else {
+            return c"".as_ptr();
+        };
+        if pick(source) == source.0 {
+            entry.0.as_ptr()
+        } else {
+            entry.1.as_ptr()
+        }
+    })
+}
+
 /// Whether the container was recognised at all.
 ///
 /// False for a file that is no kind of disk image. Distinct from having no

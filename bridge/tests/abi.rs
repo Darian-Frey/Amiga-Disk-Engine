@@ -1095,3 +1095,75 @@ fn a_file_that_is_not_a_disk_image_says_so() {
     let _ = std::fs::remove_file(&path);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn the_specs_come_across_with_their_evidence() {
+    // A claim without its evidence is asking to be believed. Both halves must
+    // survive the boundary, and the blind spots must come with them.
+    let (path, c_path) = fixture("specs", &sound_disk());
+    let mut err = AdeResult::Ok;
+    // SAFETY: valid path, no catalogue, writable slot.
+    let image = unsafe { ade::ade_image_open(c_path.as_ptr(), std::ptr::null(), &raw mut err) };
+    assert!(!image.is_null());
+
+    // SAFETY: a live handle.
+    let specs = unsafe { ade::ade_specs_open(image) };
+    assert!(!specs.is_null());
+    // SAFETY: a live handle.
+    let count = unsafe { ade::ade_specs_count(specs) };
+    assert!(count > 0, "a formatted disk says something about itself");
+
+    for index in 0..count {
+        // SAFETY: a live handle, index in range.
+        let (what, because) = unsafe {
+            (
+                ade::ade_specs_what(specs, index),
+                ade::ade_specs_because(specs, index),
+            )
+        };
+        assert!(what.len > 0, "claim {index}");
+        assert!(because.len > 0, "evidence for claim {index}");
+    }
+
+    // Past the end is empty, not a crash and not the last one again.
+    // SAFETY: a live handle.
+    assert_eq!(unsafe { ade::ade_specs_what(specs, count) }.len, 0);
+    // SAFETY: a live handle.
+    assert_eq!(unsafe { ade::ade_specs_because(specs, 9999) }.len, 0);
+    // SAFETY: a live handle.
+    unsafe { ade::ade_specs_free(specs) };
+    // SAFETY: a live handle.
+    unsafe { ade::ade_image_free(image) };
+    let _ = std::fs::remove_file(&path);
+
+    // The blind spots, which are the point as much as the facts are.
+    let blind = ade::ade_specs_unknowable_count();
+    assert!(blind >= 4);
+    for index in 0..blind {
+        // SAFETY: both return static storage, never null.
+        let (what, why) = unsafe {
+            (
+                std::ffi::CStr::from_ptr(ade::ade_specs_unknowable_what(index)),
+                std::ffi::CStr::from_ptr(ade::ade_specs_unknowable_why(index)),
+            )
+        };
+        assert_eq!(what.to_str().unwrap(), ade_core::specs::UNKNOWABLE[index].0);
+        assert_eq!(why.to_str().unwrap(), ade_core::specs::UNKNOWABLE[index].1);
+    }
+    // SAFETY: tolerates any index.
+    unsafe {
+        assert_eq!(
+            std::ffi::CStr::from_ptr(ade::ade_specs_unknowable_what(blind)).to_bytes(),
+            b""
+        );
+    }
+
+    // SAFETY: null is allowed at every entry point.
+    unsafe {
+        assert!(ade::ade_specs_open(std::ptr::null()).is_null());
+        assert_eq!(ade::ade_specs_count(std::ptr::null()), 0);
+        assert_eq!(ade::ade_specs_what(std::ptr::null(), 0).len, 0);
+        assert_eq!(ade::ade_specs_because(std::ptr::null(), 0).len, 0);
+        ade::ade_specs_free(std::ptr::null_mut());
+    }
+}

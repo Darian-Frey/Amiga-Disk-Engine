@@ -277,6 +277,20 @@ public:
                ADE_OK;
     }
 
+    /// What the disk says it needs, as (claim, evidence) pairs.
+    QVector<QPair<QString, QString>> specs() const {
+        QVector<QPair<QString, QString>> out;
+        AdeSpecs *raw = ade_specs_open(m_raw);
+        if (raw == nullptr) return out;
+        const size_t count = ade_specs_count(raw);
+        out.reserve(static_cast<int>(count));
+        for (size_t i = 0; i < count; ++i) {
+            out.append({latin1(ade_specs_what(raw, i)), latin1(ade_specs_because(raw, i))});
+        }
+        ade_specs_free(raw);
+        return out;
+    }
+
     /// Search the image's bytes for text or hex.
     Search find(const char *pattern, bool text = false, bool ignoreCase = false) const {
         return Search{ade_find_open(m_raw, pattern, text, ignoreCase)};

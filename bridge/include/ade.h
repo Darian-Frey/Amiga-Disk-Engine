@@ -86,6 +86,7 @@ typedef struct AdeBuffer     AdeBuffer;     /* a file's contents    */
 typedef struct AdePartitions AdePartitions; /* a device's partitions */
 typedef struct AdeLayout     AdeLayout;     /* a map of a whole disk */
 typedef struct AdeSearch     AdeSearch;     /* a content search      */
+typedef struct AdeSpecs      AdeSpecs;      /* what a disk needs     */
 typedef struct AdeCatalogue  AdeCatalogue;  /* a loaded dataset      */
 
 /* Pass as `partition` to mean "the image's own volume, not a partition".
@@ -253,6 +254,31 @@ void       ade_layout_free(AdeLayout *layout);
  * never freed; empty for a code this build does not know. */
 const char *ade_region_name(AdeRegion region);
 const char *ade_region_describes(AdeRegion region);
+
+/* What a disk says it needs, with the evidence for each claim (F-028).
+ *
+ * Facts, not a verdict. An ADF carries no manifest, so most of what somebody
+ * means by "the hardware this needs" — memory, processor, OCS against AGA,
+ * PAL against NTSC — is not in the bytes and cannot be had without running or
+ * disassembling the code, which ADE does not do. Every claim here is a lower
+ * bound with its evidence named, and `ade_specs_unknowable_*` lists what is
+ * missing and why, because a report that simply stops reads as "there is
+ * nothing more to know".
+ *
+ * Free with ade_specs_free. */
+AdeSpecs *ade_specs_open(const AdeImage *image);
+size_t    ade_specs_count(const AdeSpecs *specs);
+/* The claim, and the evidence for it. Both borrow from the AdeSpecs and are
+ * valid until it is freed; empty past the end. */
+AdeBytes  ade_specs_what(const AdeSpecs *specs, size_t index);
+AdeBytes  ade_specs_because(const AdeSpecs *specs, size_t index);
+void      ade_specs_free(AdeSpecs *specs);
+
+/* What an Amiga disk image cannot tell anyone, and why not. Static; never
+ * freed; empty past the end. */
+size_t      ade_specs_unknowable_count(void);
+const char *ade_specs_unknowable_what(size_t index);
+const char *ade_specs_unknowable_why(size_t index);
 
 /* Whether the container was recognised at all.
  *
