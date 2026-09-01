@@ -45,6 +45,7 @@ constexpr int RoleOffset = Qt::UserRole + 6;
 }  // namespace tree
 
 class HexHighlighter;
+class MapView;
 class HexPane;
 class QPlainTextEdit;
 class QTabWidget;
@@ -128,6 +129,8 @@ private:
     void showHit(QTreeWidgetItem *item);
     void showWholeDisk(QTreeWidgetItem *item);
     void showLegend(const QVector<HexRegion> &regions);
+    void showMapLegend(const QVector<HexRegion> &regions);
+    void goToOffset(quint64 offset);
     void markWhatIsOnScreen();
     void markRow(quint32 block);
     QByteArray contentsOf(QTreeWidgetItem *item) const;
@@ -155,6 +158,9 @@ private:
     /// The Hex tab's page, so a search hit can bring it to the front.
     QWidget *m_hexTab = nullptr;
     QLabel *m_legend = nullptr;
+    MapView *m_map = nullptr;
+    QLabel *m_mapLegend = nullptr;
+    QWidget *m_mapTab = nullptr;
     /// The open disk's map, while the whole-disk view is showing it.
     QVector<HexRegion> m_diskRegions;
     /// Polls the scroll position while a whole disk is shown.

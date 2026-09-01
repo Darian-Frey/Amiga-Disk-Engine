@@ -11,6 +11,7 @@
 // Run under QT_QPA_PLATFORM=offscreen, which needs no X server.
 
 #include "../src/HexView.h"
+#include "../src/MapView.h"
 #include "../src/ImageTree.h"
 #include "../src/MainWindow.h"
 
@@ -27,6 +28,8 @@
 #include <QStatusBar>
 #include <QTreeWidgetItemIterator>
 #include <QDir>
+#include <QTabWidget>
+#include <cmath>
 #include <QLabel>
 #include <QMenu>
 #include <QMenuBar>
@@ -95,6 +98,9 @@ private slots:
     void aScrollQtDoesNotAnnounceIsStillFollowed();
     void theFollowStopsWhenAFileIsShown();
     void extractingEverythingIsOfferedOnlyWithADiskToExtract();
+    void theMapColoursFilesAndKeepsEmptySpaceVisible();
+    void theMapShowsTheDiskAndClickingACellGoesToIt();
+    void selectingAFilePicksOutItsBlocksOnTheMap();
     void newDiskIsOfferedAndItsTypesComeFromTheEngine();
     void aFileThatIsNotADiskImageIsDeclinedRatherThanShown();
     void thereIsAHelpMenuWithAnAboutBox();
@@ -1399,6 +1405,127 @@ void TestMainWindow::aFileThatIsNotADiskImageIsDeclinedRatherThanShown() {
     window.openImage(blank);
     QCOMPARE(tree->topLevelItemCount(), 2);
     QCOMPARE(errors.size(), 1);
+}
+
+// The block map (F-027): a picture of where the space went.
+namespace {
+
+/// Contrast ratio, so "visible" is measured rather than asserted by eye.
+double contrast(const QColor &a, const QColor &b) {
+    const auto channel = [](double c) {
+        return c <= 0.03928 ? c / 12.92 : std::pow((c + 0.055) / 1.055, 2.4);
+    };
+    const auto luminance = [&](const QColor &c) {
+        return 0.2126 * channel(c.redF()) + 0.7152 * channel(c.greenF()) +
+               0.0722 * channel(c.blueF());
+    };
+    const double x = luminance(a);
+    const double y = luminance(b);
+    return (std::max(x, y) + 0.05) / (std::min(x, y) + 0.05);
+}
+
+}  // namespace
+
+void TestMainWindow::theMapColoursFilesAndKeepsEmptySpaceVisible() {
+    // Two properties, both deliberate and both easy to get wrong.
+    for (const auto &[label, page] : {std::pair{"dark", QColor(36, 36, 36)},
+                                      std::pair{"light", QColor(255, 255, 255)}}) {
+        QPalette palette;
+        palette.setColor(QPalette::Base, page);
+
+        // Files are coloured *here*, unlike in the hex pane. There the tint
+        // sits under text being read, so colouring four fifths of a disk would
+        // distinguish nothing; here every cell is a block and leaving files
+        // blank would leave the map empty.
+        const QColor file = MapView::colourFor(palette, ADE_REGION_FILE);
+        QVERIFY2(file.isValid(), label);
+        QVERIFY2(!HexHighlighter::regionColour(palette, ADE_REGION_FILE).isValid(),
+                 "and the hex pane still leaves them alone");
+
+        // Empty space must recede without disappearing. At the first values it
+        // sat at 1.16 against the page, which made "empty" and "off the end of
+        // the disk" the same picture.
+        const QColor empty = MapView::colourFor(palette, ADE_REGION_UNCLAIMED);
+        QVERIFY2(contrast(empty, page) > 1.3,
+                 qPrintable(QStringLiteral("%1: unclaimed is invisible at %2")
+                                .arg(label)
+                                .arg(contrast(empty, page))));
+        QVERIFY2(contrast(file, page) > 1.8, label);
+        QVERIFY2(contrast(file, empty) > 1.45,
+                 qPrintable(QStringLiteral("%1: file and empty look alike at %2")
+                                .arg(label)
+                                .arg(contrast(file, empty))));
+
+        // And every structural region is distinct from every other.
+        QList<QColor> seen;
+        for (int region : {ADE_REGION_BOOTBLOCK, ADE_REGION_ROOTBLOCK, ADE_REGION_BITMAP,
+                           ADE_REGION_DIRECTORY, ADE_REGION_FILE, ADE_REGION_UNCLAIMED}) {
+            const QColor c = MapView::colourFor(palette, region);
+            for (const QColor &other : seen) QVERIFY2(c != other, label);
+            seen << c;
+        }
+    }
+}
+
+void TestMainWindow::theMapShowsTheDiskAndClickingACellGoesToIt() {
+    QScopedPointer<MainWindow> window(diskWindow(m_image));
+    auto *map = window->findChild<MapView *>(QStringLiteral("map"));
+    QVERIFY2(map, "there is a Map tab");
+    auto *legend = window->findChild<QLabel *>(QStringLiteral("mapLegend"));
+    QVERIFY(legend);
+    QVERIFY2(legend->text().contains(QStringLiteral("bootblock")), qPrintable(legend->text()));
+
+    // Clicking the first cell is asking what is in block 0, and the answer is
+    // the bytes: the whole-disk view, scrolled there.
+    map->resize(400, 400);
+    QMouseEvent press(QEvent::MouseButtonPress, QPointF(1, 1), map->mapToGlobal(QPointF(1, 1)),
+                      Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+    QApplication::sendEvent(map, &press);
+    QApplication::processEvents();
+
+    auto *hex = window->findChild<QPlainTextEdit *>(QStringLiteral("hex"));
+    QVERIFY(hex);
+    QCOMPARE(hex->verticalScrollBar()->value(), 0);
+    QVERIFY2(status(*window).contains(QStringLiteral("bootblock")), qPrintable(status(*window)));
+    // And it brought the hex view to the front, rather than scrolling a tab
+    // nobody is looking at.
+    auto *tabs = window->findChild<QTabWidget *>();
+    QVERIFY(tabs);
+    QCOMPARE(tabs->tabText(tabs->currentIndex()), QStringLiteral("Hex"));
+}
+
+void TestMainWindow::selectingAFilePicksOutItsBlocksOnTheMap() {
+    // The thing a listing cannot show: where a file actually lives. The map
+    // belongs to the disk, so selecting a file must not clear it — it picks
+    // that file's blocks out instead.
+    QScopedPointer<MainWindow> window(diskWindow(m_image));
+    auto *map = window->findChild<MapView *>(QStringLiteral("map"));
+    QVERIFY(map);
+    map->resize(400, 400);
+
+    const QImage before = map->grab().toImage();
+
+    auto *tree = browser(*window);
+    tree->expandItem(tree->topLevelItem(0));
+    QTreeWidgetItem *file = childNamed(tree->topLevelItem(0), QStringLiteral("data.bin"));
+    QVERIFY(file);
+    tree->setCurrentItem(file, 0, QItemSelectionModel::ClearAndSelect);
+    QApplication::processEvents();
+
+    const QImage after = map->grab().toImage();
+    QVERIFY2(before != after, "the file's blocks are picked out");
+
+    // Not by clearing the map: most of it is unchanged, because most of the
+    // disk is not that file.
+    int changed = 0;
+    for (int y = 0; y < qMin(before.height(), after.height()); y += 3) {
+        for (int x = 0; x < qMin(before.width(), after.width()); x += 3) {
+            if (before.pixel(x, y) != after.pixel(x, y)) ++changed;
+        }
+    }
+    const int sampled = (before.height() / 3) * (before.width() / 3);
+    QVERIFY2(changed > 0 && changed < sampled / 2,
+             qPrintable(QStringLiteral("%1 of %2 sampled pixels changed").arg(changed).arg(sampled)));
 }
 
 QTEST_MAIN(TestMainWindow)

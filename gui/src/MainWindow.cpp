@@ -1,6 +1,7 @@
 #include "MainWindow.h"
 
 #include "HexView.h"
+#include "MapView.h"
 #include "ImageTree.h"
 
 #include <QAction>
@@ -210,7 +211,30 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
     hexLayout->addWidget(m_legend);
 
     m_views = new QTabWidget(this);
+    // The map, with its own legend: its colours are not the hex pane's,
+    // because there files are left untinted and here they must not be.
+    m_map = new MapView(this);
+    m_map->setObjectName(QStringLiteral("map"));
+    connect(m_map, &MapView::blockChosen, this, [this](quint64 block) {
+        goToOffset(block * 512);
+    });
+
+    m_mapLegend = new QLabel(this);
+    m_mapLegend->setObjectName(QStringLiteral("mapLegend"));
+    m_mapLegend->setTextFormat(Qt::RichText);
+    m_mapLegend->setWordWrap(true);
+    m_mapLegend->setContentsMargins(4, 2, 4, 2);
+    m_mapLegend->hide();
+
+    m_mapTab = new QWidget(this);
+    auto *mapLayout = new QVBoxLayout(m_mapTab);
+    mapLayout->setContentsMargins(4, 4, 4, 0);
+    mapLayout->setSpacing(0);
+    mapLayout->addWidget(m_map);
+    mapLayout->addWidget(m_mapLegend);
+
     m_views->addTab(hexTab, QStringLiteral("Hex"));
+    m_views->addTab(m_mapTab, QStringLiteral("Map"));
     m_views->addTab(m_text, QStringLiteral("Text"));
     m_views->addTab(m_results, QStringLiteral("Search"));
 
@@ -1046,6 +1070,56 @@ void MainWindow::showAbout() {
     about.exec();
 }
 
+/// The map's own legend. Same shape as the hex pane's, different colours.
+void MainWindow::showMapLegend(const QVector<HexRegion> &regions) {
+    if (!m_mapLegend) return;
+    if (regions.isEmpty()) {
+        m_mapLegend->hide();
+        return;
+    }
+    QList<int> present;
+    for (const HexRegion &span : regions) {
+        if (!present.contains(span.region)) present.append(span.region);
+    }
+    std::sort(present.begin(), present.end());
+
+    QStringList parts;
+    QStringList tips;
+    for (int region : present) {
+        const QString name =
+            QString::fromUtf8(ade_region_name(static_cast<AdeRegion>(region))).toHtmlEscaped();
+        const QString describes =
+            QString::fromUtf8(ade_region_describes(static_cast<AdeRegion>(region)))
+                .toHtmlEscaped();
+        // Outlined, because the legend sits on the window background while
+        // the swatches are mixed against the map's page — and `unclaimed` is
+        // deliberately close to that page, so unoutlined it vanished here
+        // while being perfectly visible three inches above.
+        parts << QStringLiteral(
+                     "<span style='background:%1; border:1px solid %2'>"
+                     "&nbsp;&nbsp;&nbsp;</span>&nbsp;%3")
+                     .arg(MapView::colourFor(m_map->palette(), region).name(),
+                          m_mapLegend->palette().color(QPalette::Mid).name(), name);
+        tips << QStringLiteral("<b>%1</b> — %2").arg(name, describes);
+    }
+    m_mapLegend->setText(parts.join(QStringLiteral("&nbsp;&nbsp;&nbsp;&nbsp;")));
+    m_mapLegend->setToolTip(tips.join(QStringLiteral("<br>")));
+    m_mapLegend->show();
+}
+
+/// Show the whole disk in hex, scrolled to `offset`.
+void MainWindow::goToOffset(quint64 offset) {
+    // Clicking a cell on the map is asking "what is in there", and the answer
+    // is the bytes. The disk is already open, so this is the whole-disk view
+    // scrolled to the block rather than a new read.
+    if (m_diskRegions.isEmpty()) return;
+    const int line = static_cast<int>(offset / hexview::BytesPerLine);
+    m_views->setCurrentWidget(m_hexTab);
+    m_hex->verticalScrollBar()->setValue(line);
+    m_hex->selectBytesAt(offset);
+    markWhatIsOnScreen();
+}
+
 void MainWindow::showLegend(const QVector<HexRegion> &regions) {
     if (!m_legend) return;
     if (regions.isEmpty()) {
@@ -1143,6 +1217,8 @@ void MainWindow::showWholeDisk(QTreeWidgetItem *item) {
     // disk's regions. Cleared, then mapped, then filled — nothing is
     // highlighted twice, and nothing is ever highlighted wrongly.
     const QVector<HexRegion> regions = open->image.regions();
+    m_map->setMap(regions, open->image.size() / 512, 512);
+    showMapLegend(regions);
     m_hex->clear();
     if (m_paint) m_paint->setRegions(regions);
     m_diskRegions = regions;
@@ -1218,6 +1294,10 @@ void MainWindow::showEntry(QTreeWidgetItem *item) {
     if (m_follow) m_follow->stop();
     markRow(0);
     showLegend({});
+    // The map stays: it belongs to the disk, not to the row. Selecting a file
+    // picks its blocks out instead, which is the thing a listing cannot show —
+    // where the file actually lives, and how scattered it is.
+    m_map->highlightOwner(item->data(0, RoleBlock).toUInt());
 
     const QByteArray data = contentsOf(item);
     if (data.isEmpty()) {
