@@ -67,6 +67,13 @@ pub enum AdeResult {
     /// so: "already exists" is a thing the person can fix by choosing another
     /// name, and "could not write" is not.
     AlreadyExists = 7,
+    /// ADE declined: an edit it will not make, or a save it will not do.
+    ///
+    /// The calls that can return it also hand back a message saying why,
+    /// because the reasons are many — a full disk, a damaged directory, the
+    /// original file as a destination — and each is something a person can
+    /// act on only if told which.
+    Refused = 8,
 }
 
 /// A borrowed run of bytes, with no encoding claimed.
@@ -249,6 +256,15 @@ pub struct AdeImage {
     findings: usize,
     container: CString,
     absent: Option<CString>,
+    /// The file this was opened from: where an edit session reads its bytes,
+    /// and the one place a save may never write (D-018).
+    path: PathBuf,
+    /// Edits made through this handle, once there are any (D-018).
+    ///
+    /// Started on the first edit rather than at open, so a front end holding
+    /// four hundred images for browsing holds four hundred file handles and
+    /// not four hundred copies of the disk.
+    session: Option<ade_core::edit::Session>,
 }
 
 /// A directory listing or a whole-volume walk, owned by the caller until freed.
@@ -397,6 +413,8 @@ pub unsafe extern "C" fn ade_image_open(
             findings,
             container,
             absent,
+            path,
+            session: None,
         }))
     })
 }
@@ -1985,4 +2003,333 @@ pub unsafe extern "C" fn ade_buffer_free(buffer: *mut AdeBuffer) {
         // SAFETY: checked non-null; the caller promises provenance.
         drop(unsafe { Box::from_raw(buffer) });
     });
+}
+
+// ---------------------------------------------------------------------------
+// Writing into a disk (D-018)
+// ---------------------------------------------------------------------------
+
+/// Borrow an image handle mutably, or return `fallback` if it is null.
+fn with_image_mut<T>(
+    image: *mut AdeImage,
+    fallback: T,
+    body: impl FnOnce(&mut AdeImage) -> T,
+) -> T {
+    if image.is_null() {
+        return fallback;
+    }
+    // SAFETY: checked non-null; the caller promises a live handle that
+    // nothing else is using for the duration of the call.
+    let image = unsafe { &mut *image };
+    guard(fallback, || body(image))
+}
+
+/// Hand a reason back through `out_message`, if the caller asked for one.
+fn set_message(out_message: *mut *mut c_char, text: &str) {
+    if out_message.is_null() {
+        return;
+    }
+    let owned = CString::new(text.replace('\0', " ")).unwrap_or_default();
+    // SAFETY: checked non-null; the caller promises it is writable.
+    unsafe { *out_message = owned.into_raw() };
+}
+
+/// The code a refused edit or save reports.
+fn edit_code(e: &ade_core::edit::EditError) -> AdeResult {
+    use ade_core::edit::EditError;
+    use ade_core::layers::filesystem::edit::EditError as FsEditError;
+    match e {
+        EditError::Io(_) => AdeResult::Io,
+        EditError::Exists | EditError::Refused(FsEditError::Exists { .. }) => {
+            AdeResult::AlreadyExists
+        }
+        EditError::Lookup(_) | EditError::Refused(FsEditError::NotADirectory { .. }) => {
+            AdeResult::NotFound
+        }
+        // ADE undid its own edit because the result failed its health check:
+        // that is ADE's bug, not the disk's or the caller's.
+        EditError::WouldDamage(_) => AdeResult::Internal,
+        _ => AdeResult::Refused,
+    }
+}
+
+/// Mount the edited bytes in place of what was opened.
+///
+/// Everything the reading calls see is rebuilt from the session, so a
+/// listing taken after an edit shows it. Identification is dropped: the
+/// bytes are no longer the ones the dataset named.
+fn refresh(image: &mut AdeImage) {
+    let Some(session) = image.session.as_ref() else {
+        return;
+    };
+    let bytes = session.bytes().to_vec();
+    image.findings = examine(bytes.clone()).findings.len();
+    image.inspection = inspect_bytes(bytes.clone());
+    image.container = CString::new(image.inspection.detection.kind.to_string()).unwrap_or_default();
+    image.absent = image
+        .inspection
+        .volume_absent
+        .as_ref()
+        .and_then(|s| CString::new(s.as_str()).ok());
+    image.image = Image::from_bytes(bytes).ok();
+    image.identified = None;
+}
+
+/// Run an edit through the handle's session, starting one if needed.
+fn edit(
+    image: *mut AdeImage,
+    out_block: *mut u32,
+    out_message: *mut *mut c_char,
+    change: impl FnOnce(&mut ade_core::edit::Session) -> Result<u32, ade_core::edit::EditError>,
+) -> AdeResult {
+    with_image_mut(image, AdeResult::NullArgument, |image| {
+        if image.session.is_none() {
+            match ade_core::edit::Session::open(&image.path) {
+                Ok(s) => image.session = Some(s),
+                Err(e) => {
+                    set_message(out_message, &e.to_string());
+                    return edit_code(&e);
+                }
+            }
+        }
+        let Some(session) = image.session.as_mut() else {
+            return AdeResult::Internal;
+        };
+        match change(session) {
+            Ok(block) => {
+                if !out_block.is_null() {
+                    // SAFETY: checked non-null; the caller promises it is
+                    // writable.
+                    unsafe { *out_block = block };
+                }
+                refresh(image);
+                AdeResult::Ok
+            }
+            Err(e) => {
+                set_message(out_message, &e.to_string());
+                edit_code(&e)
+            }
+        }
+    })
+}
+
+/// Bytes from C, or `None` for a null pointer with a non-zero length.
+///
+/// # Safety
+/// `bytes.data` must point to `bytes.len` readable bytes, or be null with a
+/// length of zero.
+unsafe fn borrowed<'a>(bytes: AdeBytes) -> Option<&'a [u8]> {
+    if bytes.len == 0 {
+        return Some(&[]);
+    }
+    if bytes.data.is_null() {
+        return None;
+    }
+    // SAFETY: the caller's contract. The lifetime is the call's; nothing
+    // here keeps the slice past it.
+    Some(unsafe { std::slice::from_raw_parts(bytes.data, bytes.len) })
+}
+
+/// Make an empty directory called `name` in the directory at `parent`.
+///
+/// # Safety
+/// `image` must be a live handle or null; `name` must describe readable
+/// bytes; `out_block` must be writable or null; `out_message` must be
+/// writable or null, and a message written there is freed with
+/// [`ade_string_free`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ade_edit_mkdir(
+    image: *mut AdeImage,
+    parent: u32,
+    name: AdeBytes,
+    out_block: *mut u32,
+    out_message: *mut *mut c_char,
+) -> AdeResult {
+    // SAFETY: the caller's contract.
+    let Some(name) = (unsafe { borrowed(name) }) else {
+        return AdeResult::NullArgument;
+    };
+    edit(image, out_block, out_message, |s| s.make_dir(parent, name))
+}
+
+/// Add a file called `name`, holding `data`, to the directory at `parent`.
+///
+/// # Safety
+/// As [`ade_edit_mkdir`], and `data` must describe readable bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ade_edit_add_file(
+    image: *mut AdeImage,
+    parent: u32,
+    name: AdeBytes,
+    data: AdeBytes,
+    out_block: *mut u32,
+    out_message: *mut *mut c_char,
+) -> AdeResult {
+    // SAFETY: the caller's contract.
+    let (Some(name), Some(data)) = (unsafe { borrowed(name) }, unsafe { borrowed(data) }) else {
+        return AdeResult::NullArgument;
+    };
+    edit(image, out_block, out_message, |s| {
+        s.add_file(parent, name, data)
+    })
+}
+
+/// Whether the image has edits no save has captured.
+///
+/// # Safety
+/// `image` must be a live handle or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ade_image_is_modified(image: *const AdeImage) -> bool {
+    with_image(image, false, |i| {
+        i.session
+            .as_ref()
+            .is_some_and(ade_core::edit::Session::is_dirty)
+    })
+}
+
+/// Whether there is an edit to undo.
+///
+/// # Safety
+/// `image` must be a live handle or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ade_edit_can_undo(image: *const AdeImage) -> bool {
+    with_image(image, false, |i| {
+        i.session
+            .as_ref()
+            .is_some_and(ade_core::edit::Session::can_undo)
+    })
+}
+
+/// Whether there is an undone edit to redo.
+///
+/// # Safety
+/// `image` must be a live handle or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ade_edit_can_redo(image: *const AdeImage) -> bool {
+    with_image(image, false, |i| {
+        i.session
+            .as_ref()
+            .is_some_and(ade_core::edit::Session::can_redo)
+    })
+}
+
+/// Undo the last edit. [`AdeResult::NotFound`] when there is none.
+///
+/// # Safety
+/// `image` must be a live handle or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ade_edit_undo(image: *mut AdeImage) -> AdeResult {
+    with_image_mut(image, AdeResult::NullArgument, |i| {
+        if !i
+            .session
+            .as_mut()
+            .is_some_and(ade_core::edit::Session::undo)
+        {
+            return AdeResult::NotFound;
+        }
+        refresh(i);
+        AdeResult::Ok
+    })
+}
+
+/// Redo the last undone edit. [`AdeResult::NotFound`] when there is none.
+///
+/// # Safety
+/// `image` must be a live handle or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ade_edit_redo(image: *mut AdeImage) -> AdeResult {
+    with_image_mut(image, AdeResult::NullArgument, |i| {
+        if !i
+            .session
+            .as_mut()
+            .is_some_and(ade_core::edit::Session::redo)
+        {
+            return AdeResult::NotFound;
+        }
+        refresh(i);
+        AdeResult::Ok
+    })
+}
+
+/// Save the edited image to a new file, `path` (D-018).
+///
+/// Never the file the image was opened from, and never a file that already
+/// exists unless this handle saved it: [`AdeResult::Refused`] and
+/// [`AdeResult::AlreadyExists`] respectively, with a message. The write is
+/// atomic — a temporary file beside `path`, then a rename.
+///
+/// # Safety
+/// `image` must be a live handle or null; `path` a NUL-terminated UTF-8 path
+/// or null; `out_message` writable or null, freed with [`ade_string_free`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ade_image_save_as(
+    image: *mut AdeImage,
+    path: *const c_char,
+    out_message: *mut *mut c_char,
+) -> AdeResult {
+    if path.is_null() {
+        return AdeResult::NullArgument;
+    }
+    // SAFETY: checked non-null; the caller promises NUL termination.
+    let Ok(path) = (unsafe { CStr::from_ptr(path) }).to_str() else {
+        return AdeResult::BadEncoding;
+    };
+    let path = PathBuf::from(path);
+    with_image_mut(image, AdeResult::NullArgument, |i| {
+        let Some(session) = i.session.as_mut() else {
+            set_message(out_message, "there are no edits to save");
+            return AdeResult::NotFound;
+        };
+        match session.save_as(&path) {
+            Ok(()) => AdeResult::Ok,
+            Err(e) => {
+                set_message(out_message, &e.to_string());
+                edit_code(&e)
+            }
+        }
+    })
+}
+
+/// Save over the file the last [`ade_image_save_as`] made.
+///
+/// [`AdeResult::Refused`] before any Save As: the first save always names a
+/// new file.
+///
+/// # Safety
+/// As [`ade_image_save_as`], without `path`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ade_image_save(
+    image: *mut AdeImage,
+    out_message: *mut *mut c_char,
+) -> AdeResult {
+    with_image_mut(image, AdeResult::NullArgument, |i| {
+        let Some(session) = i.session.as_mut() else {
+            set_message(out_message, "there are no edits to save");
+            return AdeResult::NotFound;
+        };
+        match session.save() {
+            Ok(()) => AdeResult::Ok,
+            Err(e) => {
+                set_message(out_message, &e.to_string());
+                edit_code(&e)
+            }
+        }
+    })
+}
+
+/// Where [`ade_image_save`] would write: the last Save As destination, as a
+/// NUL-terminated UTF-8 path to free with [`ade_string_free`]. Null before
+/// any Save As.
+///
+/// # Safety
+/// `image` must be a live handle or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ade_image_save_destination(image: *const AdeImage) -> *mut c_char {
+    with_image(image, std::ptr::null_mut(), |i| {
+        i.session
+            .as_ref()
+            .and_then(|s| s.destination())
+            .and_then(|p| CString::new(p.to_string_lossy().into_owned()).ok())
+            .map_or(std::ptr::null_mut(), CString::into_raw)
+    })
 }

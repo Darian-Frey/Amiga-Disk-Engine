@@ -66,6 +66,15 @@ class TestMainWindow : public QObject {
 
 private slots:
     void initTestCase();
+    void filesDroppedOntoADiskAreCopiedOnInMemory();
+    void aRealDropOntoAFolderRowLandsInThatFolder();
+    void aDropOnEmptySpaceStillOpensTheImage();
+    void aDropThatStartedInTheTreeIsNotCopiedBackIn();
+    void savingNeverLandsOnTheOriginal();
+    void undoAndRedoRebuildTheTree();
+    void closingWithUnsavedEditsAsksFirst();
+    void aRefusedCopySaysWhyAndKeepsTheRest();
+    void aPartitionOfAHardDiskIsNotWrittenInto();
     void anImageIsARootWithItsEntriesBeneath();
     void aFileSelectionFillsTheHexView();
     void aDirectoryExpandsLazily();
@@ -1708,6 +1717,291 @@ void TestMainWindow::whatCannotBeConfirmedIsNeverWritten() {
         }
     }
     QVERIFY(written > 0);
+}
+
+// --- Writing into a disk (D-018) -------------------------------------------
+
+namespace {
+
+// A blank disk of ADE's own making in `dir`, so every edit test starts from a
+// disk ADE will edit — and none of them touches the shared fixture.
+QString blankDisk(const QTemporaryDir &dir, const QString &name) {
+    const QString path = dir.filePath(name);
+    QFile::remove(path);
+    const QByteArray utf8 = path.toUtf8();
+    if (ade_create(utf8.constData(), "ffs-intl", "Work", ADE_DISK_DD, 0) != ADE_OK) return {};
+    return path;
+}
+
+QByteArray readAll(const QString &path) {
+    QFile f(path);
+    return f.open(QIODevice::ReadOnly) ? f.readAll() : QByteArray{};
+}
+
+void writeFile(const QString &path, const QByteArray &data) {
+    QFile f(path);
+    QVERIFY(f.open(QIODevice::WriteOnly));
+    f.write(data);
+}
+
+// What a saved disk holds at `path` in its volume, read back through the
+// engine rather than through the window that wrote it.
+QByteArray fileOn(const QString &image, const QStringList &path) {
+    ade::Image disk = ade::Image::open(image);
+    if (!disk) return {};
+    quint32 block = disk.rootBlock();
+    for (int i = 0; i < path.size(); ++i) {
+        const ade::Listing listing = disk.list(ADE_WHOLE_IMAGE, block);
+        bool found = false;
+        for (size_t e = 0; e < listing.count(); ++e) {
+            AdeEntry entry{};
+            if (listing.entry(e, &entry) && ade::latin1(entry.name) == path[i]) {
+                block = entry.block;
+                found = true;
+            }
+        }
+        if (!found) return {};
+    }
+    return disk.read(ADE_WHOLE_IMAGE, block).data();
+}
+
+// Drive a drop through the event system, as a file manager would.
+void dropOnto(ImageTree *tree, const QPoint &at, const QStringList &paths) {
+    auto *mime = new QMimeData;
+    QList<QUrl> urls;
+    for (const QString &p : paths) urls << QUrl::fromLocalFile(p);
+    mime->setUrls(urls);
+    QDragEnterEvent enter(at, Qt::CopyAction, mime, Qt::LeftButton, Qt::NoModifier);
+    QApplication::sendEvent(tree->viewport(), &enter);
+    QDragMoveEvent move(at, Qt::CopyAction, mime, Qt::LeftButton, Qt::NoModifier);
+    QApplication::sendEvent(tree->viewport(), &move);
+    QDropEvent drop(QPointF(at), Qt::CopyAction, mime, Qt::LeftButton, Qt::NoModifier);
+    QApplication::sendEvent(tree->viewport(), &drop);
+    delete mime;
+}
+
+}  // namespace
+
+void TestMainWindow::filesDroppedOntoADiskAreCopiedOnInMemory() {
+    QTemporaryDir dir;
+    const QString disk = blankDisk(dir, QStringLiteral("blank.adf"));
+    QVERIFY(!disk.isEmpty());
+    const QByteArray pristine = readAll(disk);
+
+    // A file, and a folder holding a file and a folder of its own.
+    const QString notes = dir.filePath(QStringLiteral("notes.txt"));
+    writeFile(notes, "hello from the host\n");
+    QDir(dir.path()).mkpath(QStringLiteral("Drawer/Inner"));
+    writeFile(dir.filePath(QStringLiteral("Drawer/a.txt")), "a");
+    writeFile(dir.filePath(QStringLiteral("Drawer/Inner/b.txt")), "bb");
+
+    MainWindow window;
+    window.openImage(disk);
+    QTreeWidgetItem *root = browser(window)->topLevelItem(0);
+    QCOMPARE(root->childCount(), 0);
+
+    QCOMPARE(window.addFiles(root, {notes, dir.filePath(QStringLiteral("Drawer"))}), 5);
+    root = browser(window)->topLevelItem(0);
+    QVERIFY(childNamed(root, QStringLiteral("notes.txt")));
+    QTreeWidgetItem *drawer = childNamed(root, QStringLiteral("Drawer"));
+    QVERIFY(drawer);
+    drawer->setExpanded(true);
+    QVERIFY(childNamed(drawer, QStringLiteral("a.txt")));
+    QVERIFY(childNamed(drawer, QStringLiteral("Inner")));
+
+    // Said on the row, and nothing has reached the file.
+    QVERIFY2(root->text(0).contains(QStringLiteral("unsaved")), qPrintable(root->text(0)));
+    QVERIFY(window.windowTitle().startsWith(QLatin1Char('*')));
+    QCOMPARE(readAll(disk), pristine);
+}
+
+void TestMainWindow::aRealDropOntoAFolderRowLandsInThatFolder() {
+    QTemporaryDir dir;
+    const QString disk = blankDisk(dir, QStringLiteral("blank.adf"));
+    const QString host = dir.filePath(QStringLiteral("dropped.bin"));
+    writeFile(host, QByteArray(3000, 'x'));
+
+    MainWindow window;
+    window.resize(900, 600);
+    window.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&window));
+    window.openImage(disk);
+    auto *tree = browser(window);
+    QVERIFY(window.makeFolder(tree->topLevelItem(0), QStringLiteral("Target")));
+
+    QTreeWidgetItem *target = childNamed(tree->topLevelItem(0), QStringLiteral("Target"));
+    QVERIFY(target);
+    const QPoint at = tree->visualItemRect(target).center();
+    dropOnto(tree, at, {host});
+
+    target = childNamed(tree->topLevelItem(0), QStringLiteral("Target"));
+    QVERIFY(target);
+    target->setExpanded(true);
+    QVERIFY2(childNamed(target, QStringLiteral("dropped.bin")),
+             "a file dropped on a folder row goes into that folder");
+    QVERIFY(!childNamed(tree->topLevelItem(0), QStringLiteral("dropped.bin")));
+}
+
+void TestMainWindow::aDropOnEmptySpaceStillOpensTheImage() {
+    QTemporaryDir dir;
+    const QString disk = blankDisk(dir, QStringLiteral("blank.adf"));
+    MainWindow window;
+    window.resize(900, 600);
+    window.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&window));
+    auto *tree = browser(window);
+    // Well below the only row there will be.
+    dropOnto(tree, QPoint(20, tree->viewport()->height() - 5), {disk});
+    QCOMPARE(window.imageCount(), size_t(1));
+    dropOnto(tree, QPoint(20, tree->viewport()->height() - 5), {m_image});
+    QCOMPARE(window.imageCount(), size_t(2));
+    QVERIFY2(!tree->topLevelItem(0)->text(0).contains(QStringLiteral("unsaved")),
+             "opening a second disk edits nothing");
+}
+
+void TestMainWindow::aDropThatStartedInTheTreeIsNotCopiedBackIn() {
+    // Dragging a file out and letting go a pixel from where it started would
+    // otherwise copy the file onto its own disk — or fail with "already
+    // exists", which would read as a fault for doing nothing.
+    MainWindow window;
+    auto *tree = browser(window);
+    QMimeData mime;
+    mime.setUrls({QUrl::fromLocalFile(QStringLiteral("/tmp/anything"))});
+    QVERIFY2(tree->wouldAccept(nullptr, &mime), "a drag from outside the window is taken");
+    QVERIFY2(!tree->wouldAccept(tree, &mime), "a drag out of the tree is not taken back");
+    QMimeData text;
+    text.setText(QStringLiteral("not files"));
+    QVERIFY(!tree->wouldAccept(nullptr, &text));
+    // And the search results take no drops at all.
+    QVERIFY(!results(window)->wouldAccept(nullptr, &mime));
+}
+
+void TestMainWindow::savingNeverLandsOnTheOriginal() {
+    QTemporaryDir dir;
+    const QString disk = blankDisk(dir, QStringLiteral("blank.adf"));
+    const QByteArray pristine = readAll(disk);
+    MainWindow window;
+    QStringList errors;
+    QObject::connect(&window, &MainWindow::errorOccurred, &window,
+                     [&errors](const QString &message) { errors << message; });
+    window.openImage(disk);
+    QVERIFY(window.makeFolder(browser(window)->topLevelItem(0), QStringLiteral("Saved")));
+
+    QTreeWidgetItem *root = browser(window)->topLevelItem(0);
+    QVERIFY(!window.saveImageAs(root, disk));
+    QCOMPARE(errors.size(), 1);
+    QVERIFY2(errors.first().contains(QStringLiteral("opened from")), qPrintable(errors.first()));
+    QCOMPARE(readAll(disk), pristine);
+
+    const QString copy = dir.filePath(QStringLiteral("copy.adf"));
+    QVERIFY(window.saveImageAs(root, copy));
+    root = browser(window)->topLevelItem(0);
+    QVERIFY2(!root->text(0).contains(QStringLiteral("unsaved")), qPrintable(root->text(0)));
+    QVERIFY(!window.windowTitle().startsWith(QLatin1Char('*')));
+
+    // The saved disk holds the folder; the original does not.
+    ade::Image saved = ade::Image::open(copy);
+    QVERIFY(saved);
+    QCOMPARE(saved.list(ADE_WHOLE_IMAGE, saved.rootBlock()).count(), size_t(1));
+    QCOMPARE(saved.findingCount(), size_t(0));
+    QCOMPARE(readAll(disk), pristine);
+}
+
+void TestMainWindow::undoAndRedoRebuildTheTree() {
+    QTemporaryDir dir;
+    const QString disk = blankDisk(dir, QStringLiteral("blank.adf"));
+    MainWindow window;
+    window.openImage(disk);
+    QVERIFY(window.makeFolder(browser(window)->topLevelItem(0), QStringLiteral("One")));
+    QVERIFY(window.makeFolder(browser(window)->topLevelItem(0), QStringLiteral("Two")));
+    QCOMPARE(browser(window)->topLevelItem(0)->childCount(), 2);
+
+    // Select a row that the undo is about to remove: the window must let go
+    // of it rather than keep a pointer into a deleted row.
+    QTreeWidgetItem *two = childNamed(browser(window)->topLevelItem(0), QStringLiteral("Two"));
+    browser(window)->selectionModel()->select(browser(window)->indexFromItem(two),
+                                              QItemSelectionModel::ClearAndSelect);
+    QVERIFY(window.undoEdit());
+    QCOMPARE(browser(window)->topLevelItem(0)->childCount(), 1);
+    QVERIFY(!childNamed(browser(window)->topLevelItem(0), QStringLiteral("Two")));
+    QVERIFY(window.redoEdit());
+    QVERIFY(childNamed(browser(window)->topLevelItem(0), QStringLiteral("Two")));
+    QVERIFY(window.undoEdit());
+    QVERIFY(window.undoEdit());
+    QCOMPARE(browser(window)->topLevelItem(0)->childCount(), 0);
+    QVERIFY(!window.undoEdit());
+}
+
+void TestMainWindow::closingWithUnsavedEditsAsksFirst() {
+    QTemporaryDir dir;
+    const QString disk = blankDisk(dir, QStringLiteral("blank.adf"));
+    MainWindow window;
+    QStringList asked;
+    bool answer = false;
+    window.setDiscardConfirmation([&](const QString &question) {
+        asked << question;
+        return answer;
+    });
+    window.openImage(disk);
+    QVERIFY(window.closeAll());
+    QVERIFY2(asked.isEmpty(), "nothing edited, nothing to ask");
+
+    window.openImage(disk);
+    QVERIFY(window.makeFolder(browser(window)->topLevelItem(0), QStringLiteral("Edit")));
+    QVERIFY(!window.closeAll());
+    QCOMPARE(asked.size(), 1);
+    QVERIFY(asked.first().contains(QStringLiteral("blank.adf")));
+    QCOMPARE(window.imageCount(), size_t(1));
+
+    answer = true;
+    QVERIFY(window.closeAll());
+    QCOMPARE(window.imageCount(), size_t(0));
+}
+
+void TestMainWindow::aRefusedCopySaysWhyAndKeepsTheRest() {
+    QTemporaryDir dir;
+    const QString disk = blankDisk(dir, QStringLiteral("blank.adf"));
+    const QString good = dir.filePath(QStringLiteral("fine.txt"));
+    const QString clash = dir.filePath(QStringLiteral("FINE.TXT"));
+    const QString huge = dir.filePath(QStringLiteral("huge.bin"));
+    const QString foreign = dir.filePath(QStringLiteral("日本.txt"));
+    writeFile(good, "ok");
+    writeFile(huge, QByteArray(2'000'000, 'z'));
+    writeFile(foreign, "no");
+    QDir(dir.path()).mkpath(QStringLiteral("again"));
+    writeFile(clash, "same name to AmigaDOS");
+
+    MainWindow window;
+    QStringList errors;
+    QObject::connect(&window, &MainWindow::errorOccurred, &window,
+                     [&errors](const QString &message) { errors << message; });
+    window.openImage(disk);
+    const int made = window.addFiles(browser(window)->topLevelItem(0), {good, huge, foreign, clash});
+    QCOMPARE(made, 1);
+    QCOMPARE(errors.size(), 1);
+    const QString &why = errors.first();
+    QVERIFY2(why.contains(QStringLiteral("huge.bin")) && why.contains(QStringLiteral("space")),
+             qPrintable(why));
+    QVERIFY2(why.contains(QStringLiteral("Latin-1")), qPrintable(why));
+    QVERIFY2(why.contains(QStringLiteral("already exists")), qPrintable(why));
+    QVERIFY(childNamed(browser(window)->topLevelItem(0), QStringLiteral("fine.txt")));
+
+    const QString copy = dir.filePath(QStringLiteral("copy.adf"));
+    QVERIFY(window.saveImageAs(nullptr, copy));
+    QCOMPARE(fileOn(copy, {QStringLiteral("fine.txt")}), QByteArray("ok"));
+}
+
+void TestMainWindow::aPartitionOfAHardDiskIsNotWrittenInto() {
+    MainWindow window;
+    QStringList errors;
+    QObject::connect(&window, &MainWindow::errorOccurred, &window,
+                     [&errors](const QString &message) { errors << message; });
+    window.openImage(m_device);
+    QTreeWidgetItem *partition = browser(window)->topLevelItem(0)->child(0);
+    QVERIFY(partition);
+    QVERIFY(!window.makeFolder(partition, QStringLiteral("Nope")));
+    QCOMPARE(errors.size(), 1);
+    QVERIFY2(errors.first().contains(QStringLiteral("partition")), qPrintable(errors.first()));
 }
 
 QTEST_MAIN(TestMainWindow)

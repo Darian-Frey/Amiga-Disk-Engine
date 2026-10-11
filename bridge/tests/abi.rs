@@ -1375,3 +1375,188 @@ fn carving_tolerates_null_like_everything_else() {
         ade::ade_carve_free(std::ptr::null_mut());
     }
 }
+
+/// A blank disk ADE made itself, so it is one ADE will edit.
+fn blank_disk() -> Vec<u8> {
+    use ade_core::layers::block::Geometry;
+    use ade_core::layers::filesystem::{dostype::Dostype, format};
+    let dostype = Dostype::from_raw(0x444F_5303).unwrap();
+    let when = format::Stamp {
+        days: 17_000,
+        mins: 1,
+        ticks: 0,
+    };
+    format::blank(Geometry::DD_FLOPPY, dostype, "Editable", when).unwrap()
+}
+
+/// Take a message the bridge handed back, freeing it.
+fn take_message(message: *mut std::ffi::c_char) -> String {
+    if message.is_null() {
+        return String::new();
+    }
+    // SAFETY: the bridge wrote a NUL-terminated string it allocated.
+    let text = unsafe { CStr::from_ptr(message) }
+        .to_string_lossy()
+        .into_owned();
+    // SAFETY: allocated by the bridge, freed once.
+    unsafe { ade::ade_string_free(message) };
+    text
+}
+
+#[test]
+fn an_edit_shows_in_the_next_listing_and_saves_only_to_a_new_file() {
+    let (path, c_path) = fixture("edit", &blank_disk());
+    let pristine = std::fs::read(&path).unwrap();
+    let mut err = AdeResult::Internal;
+    // SAFETY: valid path, writable result.
+    let image = unsafe { ade::ade_image_open(c_path.as_ptr(), std::ptr::null(), &raw mut err) };
+    assert!(!image.is_null());
+    // SAFETY: live handle throughout.
+    unsafe {
+        let root = ade::ade_image_root_block(image);
+        assert!(!ade::ade_image_is_modified(image));
+
+        let name = b"Drawer";
+        let mut block = 0u32;
+        let mut message = std::ptr::null_mut();
+        let made = ade::ade_edit_mkdir(
+            image,
+            root,
+            ade::AdeBytes {
+                data: name.as_ptr(),
+                len: name.len(),
+            },
+            &raw mut block,
+            &raw mut message,
+        );
+        assert_eq!(made, AdeResult::Ok, "{}", take_message(message));
+        assert!(block != 0);
+        assert!(ade::ade_image_is_modified(image));
+
+        // The handle reads the edited disk now.
+        let listing = ade::ade_dir_open(image, ade::ADE_WHOLE_IMAGE, root);
+        assert_eq!(ade::ade_listing_count(listing), 1);
+        ade::ade_listing_free(listing);
+
+        // Into the new directory, a file with a Latin-1 name.
+        let file = b"f\xFCr";
+        let data = b"from C";
+        let added = ade::ade_edit_add_file(
+            image,
+            block,
+            ade::AdeBytes {
+                data: file.as_ptr(),
+                len: file.len(),
+            },
+            ade::AdeBytes {
+                data: data.as_ptr(),
+                len: data.len(),
+            },
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        );
+        assert_eq!(added, AdeResult::Ok);
+
+        // The same name again is ALREADY_EXISTS, with a reason.
+        let mut message = std::ptr::null_mut();
+        let again = ade::ade_edit_mkdir(
+            image,
+            root,
+            ade::AdeBytes {
+                data: b"DRAWER".as_ptr(),
+                len: 6,
+            },
+            std::ptr::null_mut(),
+            &raw mut message,
+        );
+        assert_eq!(again, AdeResult::AlreadyExists);
+        assert!(take_message(message).contains("already exists"));
+
+        // Undo and redo the file.
+        assert!(ade::ade_edit_can_undo(image));
+        assert_eq!(ade::ade_edit_undo(image), AdeResult::Ok);
+        assert!(ade::ade_edit_can_redo(image));
+        assert_eq!(ade::ade_edit_redo(image), AdeResult::Ok);
+
+        // Never over the original.
+        let mut message = std::ptr::null_mut();
+        assert_eq!(
+            ade::ade_image_save_as(image, c_path.as_ptr(), &raw mut message),
+            AdeResult::Refused
+        );
+        assert!(take_message(message).contains("opened from"));
+        assert_eq!(
+            ade::ade_image_save(image, std::ptr::null_mut()),
+            AdeResult::Refused,
+            "the first save is a Save As"
+        );
+        assert!(ade::ade_image_save_destination(image).is_null());
+
+        let out = path.with_extension("saved.adf");
+        let _ = std::fs::remove_file(&out);
+        let c_out = CString::new(out.display().to_string()).unwrap();
+        assert_eq!(
+            ade::ade_image_save_as(image, c_out.as_ptr(), std::ptr::null_mut()),
+            AdeResult::Ok
+        );
+        assert!(!ade::ade_image_is_modified(image));
+        assert_eq!(
+            take_message(ade::ade_image_save_destination(image)),
+            out.display().to_string()
+        );
+        ade::ade_image_free(image);
+
+        // The saved disk opens and holds the file; the original does not.
+        let saved = ade_core::Image::from_bytes(std::fs::read(&out).unwrap()).unwrap();
+        let volume = saved.volume().unwrap();
+        let entry = volume.lookup("Drawer").unwrap();
+        let listing = volume.list(entry.block).unwrap();
+        assert_eq!(listing.entries[0].name, file);
+        assert_eq!(std::fs::read(&path).unwrap(), pristine);
+        let _ = std::fs::remove_file(&out);
+    }
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn the_edit_calls_tolerate_null() {
+    let empty = ade::AdeBytes {
+        data: std::ptr::null(),
+        len: 0,
+    };
+    // SAFETY: null is explicitly allowed by every one of these.
+    unsafe {
+        let null = std::ptr::null_mut();
+        assert_eq!(
+            ade::ade_edit_mkdir(null, 880, empty, null.cast(), null.cast()),
+            AdeResult::NullArgument
+        );
+        assert_eq!(
+            ade::ade_edit_add_file(null, 880, empty, empty, null.cast(), null.cast()),
+            AdeResult::NullArgument
+        );
+        assert!(!ade::ade_image_is_modified(null));
+        assert!(!ade::ade_edit_can_undo(null));
+        assert!(!ade::ade_edit_can_redo(null));
+        assert_eq!(ade::ade_edit_undo(null), AdeResult::NullArgument);
+        assert_eq!(ade::ade_edit_redo(null), AdeResult::NullArgument);
+        assert_eq!(
+            ade::ade_image_save_as(null, std::ptr::null(), null.cast()),
+            AdeResult::NullArgument
+        );
+        assert_eq!(
+            ade::ade_image_save(null, null.cast()),
+            AdeResult::NullArgument
+        );
+        assert!(ade::ade_image_save_destination(null).is_null());
+        // A non-null image with a null-pointer name of non-zero length.
+        let bad = ade::AdeBytes {
+            data: std::ptr::null(),
+            len: 3,
+        };
+        assert_eq!(
+            ade::ade_edit_mkdir(null, 880, bad, null.cast(), null.cast()),
+            AdeResult::NullArgument
+        );
+    }
+}

@@ -534,7 +534,9 @@ Roughly 20% of corpus disks yield reportable text after filtering, and 91% of th
 **Recorded:** 2026-09-01
 **Status:** Accepted
 **Authors:** Darian-Frey (decision); Claude (analysis)
-**Related:** D-004, D-002, D-010, AV-002, C-006, F-019, F-025, IMP-010
+**Related:** D-004, D-002, D-010, AV-002, C-006, F-019, F-025, IMP-010, F-031
+
+> **Implemented 2026-10-11 as F-031** — making a directory and adding a file, from the CLI, the C ABI and the window. All four parts hold as written; part 4's "mounts under ADFlib" is enforced by the test suite, since D-002 keeps the oracle out of anything that ships, and at run time each edit is kept only if `ade check` finds nothing new.
 
 **Context.** D-004 defers write paths until their read paths are proven, and permits one once they are. For OFS and FFS that condition is met and measurable: 4,652 corpus images, 99.36% agreement with ADFlib on extracted bytes, 3,606 volumes mounting, and a health report that already validates every structure a write would have to maintain. `ade create` was permitted on those terms in F-019 and extended in F-025.
 

@@ -323,6 +323,7 @@ fn main() -> ExitCode {
             args.dd525,
             args.size,
         ),
+        ("mkdir" | "put", _) => edit_command(&args),
         ("scan", 1) => scan(Path::new(p(0)), args.format),
         ("find", 2) => find(
             Path::new(p(0)),
@@ -382,6 +383,10 @@ fn usage() {
             .to_owned(),
         "    ade convert <in> <out>             convert between containers (F-016)".to_owned(),
         "    ade create <out.adf>               make a blank formatted disk (F-019)".to_owned(),
+        "    ade mkdir <image> <path> --output=<new>     make a directory, saved as a new image"
+            .to_owned(),
+        "    ade put <image> <file> [path] --output=<new> add a file, saved as a new image"
+            .to_owned(),
         "    ade scan <image>                   find known content by its magic (F-020)".to_owned(),
         "    ade find <image> <pattern>         search the image for text or hex (F-021)"
             .to_owned(),
@@ -418,7 +423,8 @@ fn usage() {
         "    --convert=CODE  batch: convert every image to CODE (adf, hdf, extended-adf)"
             .to_owned(),
         "                    into --output=DIR; refusals are reported, never fatal".to_owned(),
-        "    --output=P      consolidate writes the merged image to P".to_owned(),
+        "    --output=P      consolidate writes the merged image to P; mkdir and put".to_owned(),
+        "                    save the edited disk to P, which must not exist (D-018)".to_owned(),
         "    --datfiles=D    directory of TOSEC .dat files, for identify".to_owned(),
         String::new(),
         "EXIT CODES:".to_owned(),
@@ -427,6 +433,142 @@ fn usage() {
         "`check` exits 1 on any warning, and 5 when an error would lose data.".to_owned(),
     ];
     emit_lines(&mut std::io::stdout().lock(), &lines);
+}
+
+/// Split `A/B/Name` into the directory part and the last component.
+fn split_last(path: &str) -> (&str, &str) {
+    let path = path.trim_end_matches('/');
+    path.rsplit_once('/').unwrap_or(("", path))
+}
+
+/// Report a refused edit and choose its exit code: an unreadable file is 3,
+/// anything ADE declined to do is a usage error, as `create` reports it.
+fn edit_failed(context: &str, e: &ade_core::edit::EditError) -> ExitCode {
+    eprintln!("ade: {context}: {e}");
+    ExitCode::from(match e {
+        ade_core::edit::EditError::Io(_) => EXIT_UNREADABLE,
+        _ => EXIT_USAGE,
+    })
+}
+
+/// Open `image` for editing, apply `change`, and save to `output` (D-018).
+///
+/// There is no in-place form: `--output` is required and must not exist, and
+/// is never the image itself. That is D-018's consequence for the CLI — a
+/// command that can overwrite its input is one typo from destroying it.
+fn edit_and_save(
+    image: &Path,
+    output: Option<&Path>,
+    change: impl FnOnce(&mut ade_core::edit::Session) -> Result<String, ade_core::edit::EditError>,
+) -> ExitCode {
+    let Some(output) = output else {
+        eprintln!(
+            "ade: --output=<new image> is required; ADE never writes into the image it \
+             opened (D-018)"
+        );
+        return ExitCode::from(EXIT_USAGE);
+    };
+    let mut session = match ade_core::edit::Session::open(image) {
+        Ok(s) => s,
+        Err(e) => return edit_failed(&image.display().to_string(), &e),
+    };
+    let done = match change(&mut session) {
+        Ok(done) => done,
+        Err(e) => return edit_failed(&image.display().to_string(), &e),
+    };
+    if let Err(e) = session.save_as(output) {
+        return edit_failed(&output.display().to_string(), &e);
+    }
+    emit_lines(
+        &mut std::io::stdout().lock(),
+        &[done, format!("  saved to {}", output.display())],
+    );
+    ExitCode::from(EXIT_CLEAN)
+}
+
+/// `mkdir` and `put`, the commands that write into a disk (D-018).
+fn edit_command(args: &Args) -> ExitCode {
+    // Refused rather than ignored: a script passing the flag must be able to
+    // tell an unsupported command from a successful one (BUG-007).
+    if args.format == Format::Json {
+        eprintln!(
+            "ade: {} has no JSON output; it reports in text only",
+            args.command
+        );
+        return ExitCode::from(EXIT_USAGE);
+    }
+    let p = |n: usize| args.positional.get(n).map_or("", String::as_str);
+    let output = args.output.as_deref();
+    match (args.command.as_str(), args.positional.len()) {
+        ("mkdir", 2) => make_dir(Path::new(p(0)), p(1), output),
+        ("put", 2 | 3) => put(
+            Path::new(p(0)),
+            Path::new(p(1)),
+            args.positional.get(2).map(String::as_str),
+            output,
+        ),
+        _ => {
+            usage();
+            ExitCode::from(EXIT_USAGE)
+        }
+    }
+}
+
+/// `ade mkdir`: make one directory, whose parent must already exist.
+fn make_dir(image: &Path, path: &str, output: Option<&Path>) -> ExitCode {
+    let (parent, name) = split_last(path);
+    let Ok(amiga) = ade_core::edit::amiga_name(name) else {
+        eprintln!("ade: {name:?}: an Amiga name is Latin-1, and this has a character outside it");
+        return ExitCode::from(EXIT_USAGE);
+    };
+    edit_and_save(image, output, |session| {
+        let dir = session.directory(parent)?;
+        let block = session.make_dir(dir, &amiga)?;
+        Ok(format!(
+            "made directory {} (block {block})",
+            path.trim_end_matches('/')
+        ))
+    })
+}
+
+/// `ade put`: add a host file to the disk.
+///
+/// `dest` is where it goes: an existing directory to put it in under its own
+/// name, or a path whose last component is the name to give it. Absent, it
+/// goes in the root under its own name.
+fn put(image: &Path, file: &Path, dest: Option<&str>, output: Option<&Path>) -> ExitCode {
+    let data = match std::fs::read(file) {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("ade: {}: {e}", file.display());
+            return ExitCode::from(EXIT_UNREADABLE);
+        }
+    };
+    let host_name = file
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    edit_and_save(image, output, |session| {
+        let dest = dest.unwrap_or("");
+        // An existing directory takes the file under its own name; otherwise
+        // the last component is the new name.
+        let (dir, name) = if let Ok(dir) = session.directory(dest) {
+            (dir, host_name.as_str())
+        } else {
+            let (parent, name) = split_last(dest);
+            (session.directory(parent)?, name)
+        };
+        let amiga = ade_core::edit::amiga_name(name).map_err(|c| {
+            ade_core::edit::EditError::NotEditable(format!(
+                "{name:?}: {c:?} has no Latin-1 byte, so it cannot be in an Amiga name"
+            ))
+        })?;
+        let block = session.add_file(dir, &amiga, &data)?;
+        Ok(format!(
+            "added {name} ({} bytes, block {block})",
+            data.len()
+        ))
+    })
 }
 
 /// Load the dataset a caller configured, if any (F-013).

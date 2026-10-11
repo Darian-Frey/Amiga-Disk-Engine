@@ -9,6 +9,9 @@
 
 #include <QTreeWidget>
 
+#include <QDropEvent>
+#include <QUrl>
+
 #include <functional>
 
 class ImageTree : public QTreeWidget {
@@ -27,6 +30,33 @@ public:
     // carry without having to stage a real one through the window system.
     QMimeData *mimeData(const QList<QTreeWidgetItem *> &items) const override;
 
+    // Accept files dropped *onto* the tree, and say which row they landed on.
+    // Off by default: the search results take no drops.
+    void setAcceptsFiles(bool accept);
+
+    // Whether a drag from `source` carrying `mime` would be taken: files,
+    // from somewhere other than this tree. A drag that began here is a file
+    // being dragged *out*; let go a pixel from where it started, it would
+    // otherwise copy itself back in. Public because a test cannot give a drop
+    // a source without starting a real drag through the window system.
+    bool wouldAccept(const QObject *source, const QMimeData *mime) const;
+
+signals:
+    // Host files dropped onto `target`, or onto empty space when it is null.
+    // The window decides what that means — copy them onto a disk, or open
+    // them as disks — because the tree knows nothing about images.
+    void filesDropped(QTreeWidgetItem *target, const QList<QUrl> &urls);
+
+protected:
+    void dragEnterEvent(QDragEnterEvent *event) override;
+    void dragMoveEvent(QDragMoveEvent *event) override;
+    void dropEvent(QDropEvent *event) override;
+
 private:
+    bool wants(const QDropEvent *event) const {
+        return wouldAccept(event->source(), event->mimeData());
+    }
+
+    bool m_acceptsFiles = false;
     Extractor m_extractor;
 };

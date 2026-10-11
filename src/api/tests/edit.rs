@@ -1,0 +1,698 @@
+//! Writing into an existing disk (D-018), checked the way `create` is.
+//!
+//! D-018 part 4 says a write is finished only when the result passes
+//! `ade check` **and** mounts under ADFlib. Both are asserted here for every
+//! filesystem ADE writes: ADE's health report must find nothing the disk did
+//! not already have, ADE must read back what it wrote, and ADFlib — an
+//! implementation nobody here wrote (D-002) — must extract the same bytes.
+//! A disk ADE wrote and ADE alone accepts proves only that the writer and the
+//! reader share their mistakes.
+
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    clippy::cast_possible_truncation,
+    clippy::panic,
+    clippy::manual_assert,
+    reason = "test scaffolding: a failure to set up is a test failure"
+)]
+
+use std::collections::BTreeMap;
+use std::os::unix::ffi::OsStrExt as _;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+
+use ade_core::edit::{EditError, Session};
+use ade_core::layers::block::Geometry;
+use ade_core::layers::filesystem::dostype::Dostype;
+use ade_core::layers::filesystem::edit::EditError as FsEditError;
+use ade_core::layers::filesystem::format::{self, Stamp};
+
+const WHEN: Stamp = Stamp {
+    days: 17_000,
+    mins: 600,
+    ticks: 25,
+};
+
+/// Every dostype ADE writes, `DOS\0` to `DOS\5`.
+const FLAGS: [u8; 6] = [0, 1, 2, 3, 4, 5];
+
+fn blank(flags: u8) -> Vec<u8> {
+    let dostype = Dostype::from_raw(0x444F_5300 | u32::from(flags)).unwrap();
+    format::blank(Geometry::DD_FLOPPY, dostype, "Edit", WHEN).unwrap()
+}
+
+fn session(flags: u8) -> Session {
+    let mut s = Session::from_bytes(blank(flags)).unwrap();
+    s.set_clock(Some(WHEN));
+    s
+}
+
+/// Bytes that are not all the same, so a block written in the wrong order or
+/// at the wrong offset cannot read back correctly by accident.
+fn pattern(len: usize, seed: u8) -> Vec<u8> {
+    (0..len)
+        .map(|i| (i as u8).wrapping_mul(31).wrapping_add(seed) ^ (i >> 8) as u8)
+        .collect()
+}
+
+/// ADE's own verdict: no warning or error at all.
+fn assert_clean(bytes: &[u8], what: &str) {
+    let health = ade_core::health::examine(bytes.to_vec());
+    let bad: Vec<_> = health
+        .findings
+        .iter()
+        .filter(|f| f.severity >= ade_core::Severity::Warning)
+        .map(|f| format!("{}: {}", f.code, f.message))
+        .collect();
+    assert!(
+        bad.is_empty(),
+        "{what}: ADE should accept its own write: {bad:?}"
+    );
+}
+
+/// Every file on the volume, by path, as ADE reads it.
+fn ade_files(bytes: &[u8]) -> BTreeMap<String, Vec<u8>> {
+    let image = ade_core::Image::from_bytes(bytes.to_vec()).unwrap();
+    let volume = image.volume().unwrap();
+    let walk = volume.walk(volume.root()).unwrap();
+    walk.entries
+        .into_iter()
+        .filter(|(_, e)| e.kind.is_file())
+        .map(|(path, e)| {
+            let contents = volume.read_file(&e).unwrap();
+            assert!(contents.is_complete(), "{path} read back short");
+            (path, contents.into_bytes())
+        })
+        .collect()
+}
+
+struct Scratch(PathBuf);
+
+impl Scratch {
+    fn new(tag: &str) -> Self {
+        let dir = std::env::temp_dir().join(format!(
+            "ade-edit-{tag}-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        Self(dir)
+    }
+}
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// Run ADFlib, capped: an uncapped run once took a whole session down.
+/// `None` when it is not installed.
+fn unadf(args: &[&str], image: &Path) -> Option<(bool, String)> {
+    let script = "ulimit -v 1048576; img=\"$1\"; shift; exec timeout 20 unadf \"$@\" \"$img\"";
+    let out = Command::new("sh")
+        .arg("-c")
+        .arg(script)
+        .arg("sh")
+        .arg(image)
+        .args(args)
+        .output()
+        .ok()?;
+    let text = String::from_utf8_lossy(&out.stdout).into_owned();
+    if text.is_empty() && !out.status.success() {
+        return None;
+    }
+    Some((out.status.success(), text))
+}
+
+/// Every file ADFlib extracts, by path. `None` when the oracle is absent.
+fn adflib_files(bytes: &[u8], tag: &str) -> Option<BTreeMap<String, Vec<u8>>> {
+    let scratch = Scratch::new(tag);
+    let image = scratch.0.join("disk.adf");
+    std::fs::write(&image, bytes).unwrap();
+    let out = scratch.0.join("out");
+    std::fs::create_dir_all(&out).unwrap();
+    let script = "ulimit -v 1048576; exec timeout 20 unadf \"$1\" -d \"$2\"";
+    let status = Command::new("sh")
+        .arg("-c")
+        .arg(script)
+        .arg("sh")
+        .arg(&image)
+        .arg(&out)
+        .output()
+        .ok()?;
+    if !status.status.success() && String::from_utf8_lossy(&status.stdout).is_empty() {
+        eprintln!("skipping: unadf not installed");
+        return None;
+    }
+    let mut files = BTreeMap::new();
+    let mut stack = vec![out.clone()];
+    while let Some(dir) = stack.pop() {
+        for entry in std::fs::read_dir(&dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                stack.push(path);
+            } else {
+                let rel = path
+                    .strip_prefix(&out)
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned();
+                files.insert(rel, std::fs::read(&path).unwrap());
+            }
+        }
+    }
+    Some(files)
+}
+
+/// The full check D-018 asks for: ADE accepts it, and ADE and ADFlib agree
+/// on every byte of every file.
+fn assert_both_agree(bytes: &[u8], want: &BTreeMap<String, Vec<u8>>, what: &str) {
+    assert_clean(bytes, what);
+    let mine = ade_files(bytes);
+    assert_eq!(
+        mine.keys().collect::<Vec<_>>(),
+        want.keys().collect::<Vec<_>>(),
+        "{what}: ADE's listing"
+    );
+    for (path, data) in want {
+        assert!(mine[path] == *data, "{what}: ADE read {path} back wrongly");
+    }
+    let tag = what.replace(|c: char| !c.is_ascii_alphanumeric(), "-");
+    let Some(theirs) = adflib_files(bytes, &tag) else {
+        return;
+    };
+    assert_eq!(
+        theirs.keys().collect::<Vec<_>>(),
+        want.keys().collect::<Vec<_>>(),
+        "{what}: ADFlib's listing"
+    );
+    for (path, data) in want {
+        assert!(
+            theirs[path] == *data,
+            "{what}: ADFlib extracted {path} differently ({} bytes, wanted {})",
+            theirs[path].len(),
+            data.len()
+        );
+    }
+}
+
+#[test]
+fn a_directory_appears_on_every_filesystem() {
+    for flags in FLAGS {
+        let mut s = session(flags);
+        let root = s.root();
+        let dir = s.make_dir(root, b"Drawer").unwrap();
+        assert!(s.is_dirty());
+        assert_clean(s.bytes(), &format!("DOS\\{flags} mkdir"));
+        assert_eq!(
+            s.directory("drawer").unwrap(),
+            dir,
+            "found case-insensitively"
+        );
+
+        let scratch = Scratch::new(&format!("mkdir{flags}"));
+        let path = scratch.0.join("d.adf");
+        std::fs::write(&path, s.bytes()).unwrap();
+        if let Some((ok, text)) = unadf(&["-r"], &path) {
+            assert!(ok, "DOS\\{flags}: ADFlib should list it: {text}");
+            assert!(text.contains("Drawer/"), "DOS\\{flags}: {text}");
+        }
+        // On a cached volume, list from the cache too: `-c` reads only the
+        // dircache, so this is the independent check on the record ADE wrote.
+        if flags >= 4
+            && let Some((ok, text)) = unadf(&["-l", "-c"], &path)
+        {
+            assert!(ok, "DOS\\{flags}: {text}");
+            assert!(
+                text.contains("Drawer/"),
+                "DOS\\{flags} from the cache: {text}"
+            );
+        }
+    }
+}
+
+#[test]
+fn files_of_every_awkward_size_read_back_through_both_readers() {
+    // Zero; one byte; exactly one OFS block and one past it; exactly one FFS
+    // block and one past it; the last size the header's 72 pointers cover on
+    // each filesystem and one past it, which needs an extension block; and
+    // one large enough to need two extension blocks on OFS.
+    let sizes = [
+        0usize,
+        1,
+        488,
+        489,
+        512,
+        513,
+        72 * 488,
+        72 * 488 + 1,
+        72 * 512,
+        72 * 512 + 1,
+        160_000,
+    ];
+    for flags in FLAGS {
+        let mut s = session(flags);
+        let root = s.root();
+        let mut want = BTreeMap::new();
+        for (i, &size) in sizes.iter().enumerate() {
+            let name = format!("file{size}");
+            let data = pattern(size, i as u8);
+            s.add_file(root, name.as_bytes(), &data).unwrap();
+            want.insert(name, data);
+        }
+        assert_both_agree(s.bytes(), &want, &format!("DOS\\{flags} sizes"));
+    }
+}
+
+#[test]
+fn files_go_into_subdirectories() {
+    for flags in FLAGS {
+        let mut s = session(flags);
+        let root = s.root();
+        let a = s.make_dir(root, b"A").unwrap();
+        let b = s.make_dir(a, b"B").unwrap();
+        let mut want = BTreeMap::new();
+        for (dir, prefix) in [(root, ""), (a, "A/"), (b, "A/B/")] {
+            let data = pattern(1000, prefix.len() as u8);
+            s.add_file(dir, b"readme", &data).unwrap();
+            want.insert(format!("{prefix}readme"), data);
+        }
+        assert_both_agree(s.bytes(), &want, &format!("DOS\\{flags} nested"));
+    }
+}
+
+#[test]
+fn a_crowded_directory_fills_hash_chains_and_cache_blocks() {
+    // 120 names into 72 slots forces collision chains, and 120 cache records
+    // of ~36 bytes cannot fit in one 488-byte cache block, so a DOS\4/5 volume
+    // has to grow its chain. Names are inserted in an order that is not block
+    // order, so the sorted chain insertion is exercised in the middle too.
+    for flags in FLAGS {
+        let mut s = session(flags);
+        let root = s.root();
+        let mut want = BTreeMap::new();
+        for i in 0..120u32 {
+            let name = format!("entry-{:03}", (i * 37) % 120);
+            let data = pattern(100, i as u8);
+            s.add_file(root, name.as_bytes(), &data).unwrap();
+            want.insert(name, data);
+        }
+        assert_both_agree(s.bytes(), &want, &format!("DOS\\{flags} crowded"));
+
+        let health = ade_core::health::examine(s.bytes().to_vec());
+        if flags >= 4 {
+            let cache = health.dircache.unwrap();
+            assert!(
+                cache.blocks > 1,
+                "DOS\\{flags}: the cache should have grown"
+            );
+            assert_eq!(cache.records, 120);
+            assert_eq!(cache.disagreements, 0);
+        }
+    }
+}
+
+/// The hash slot whose chain reaches `entry`, in the directory at `dir`.
+fn slot_of(bytes: &[u8], dir: u32, entry: u32) -> Option<usize> {
+    let long = |at: usize| ade_core::layers::endian::u32_at(bytes, at).unwrap();
+    let base = dir as usize * 512;
+    for slot in 0..72 {
+        let mut next = long(base + 24 + slot * 4);
+        let mut hops = 0;
+        while next != 0 && hops < 1000 {
+            if next == entry {
+                return Some(slot);
+            }
+            next = long(next as usize * 512 + 512 - 16);
+            hops += 1;
+        }
+    }
+    None
+}
+
+#[test]
+fn international_names_hash_the_way_the_volume_does() {
+    // C-006: on DOS\2 and above `ü` folds to `Ü` before hashing; on DOS\0/1 it
+    // does not. ASCII names hash the same either way, so only accented ones
+    // can tell — and ADE's listing walks every slot, so a wrong one is
+    // invisible to it. This test reads the slot itself, and asks ADFlib to
+    // find each file **by name**, which goes through the hash.
+    use ade_core::layers::filesystem::hash::hash_name;
+    let names: [&[u8]; 4] = [b"f\xFCr", b"\xE9t\xE9", b"Gr\xF6\xDFe", b"na\xEFve-caf\xE9"];
+    for flags in FLAGS {
+        let international = flags >= 2;
+        // The two hashes must actually differ for at least one name, or this
+        // test proves nothing.
+        assert!(
+            names
+                .iter()
+                .any(|n| hash_name(n, 72, true) != hash_name(n, 72, false))
+        );
+
+        let mut s = session(flags);
+        let root = s.root();
+        let scratch = Scratch::new(&format!("intl{flags}"));
+        let image = scratch.0.join("i.adf");
+        for (i, name) in names.iter().enumerate() {
+            let data = pattern(300, i as u8);
+            let block = s.add_file(root, name, &data).unwrap();
+            assert_eq!(
+                slot_of(s.bytes(), root, block),
+                Some(hash_name(name, 72, international) as usize),
+                "DOS\\{flags}: {name:?} is in the wrong slot"
+            );
+            std::fs::write(&image, s.bytes()).unwrap();
+            let script = "ulimit -v 1048576; exec timeout 20 unadf -p \"$1\" \"$2\"";
+            let out = Command::new("sh")
+                .arg("-c")
+                .arg(script)
+                .arg("sh")
+                .arg(&image)
+                .arg(std::ffi::OsStr::from_bytes(name))
+                .output();
+            if let Ok(out) = out
+                && (!out.stdout.is_empty() || out.status.success())
+            {
+                assert!(
+                    out.stdout == data,
+                    "DOS\\{flags}: ADFlib could not find {name:?} by name"
+                );
+            }
+        }
+        assert_clean(s.bytes(), &format!("DOS\\{flags} latin-1"));
+    }
+}
+
+#[test]
+fn a_refused_edit_changes_nothing() {
+    let mut s = session(3);
+    let root = s.root();
+    s.add_file(root, b"Taken", b"one").unwrap();
+    let before = s.bytes().to_vec();
+
+    // Names compare as AmigaDOS compares them.
+    assert!(matches!(
+        s.add_file(root, b"TAKEN", b"two"),
+        Err(EditError::Refused(FsEditError::Exists { .. }))
+    ));
+    assert!(matches!(
+        s.make_dir(root, b"taken"),
+        Err(EditError::Refused(FsEditError::Exists { .. }))
+    ));
+    for bad in [&b""[..], b"a/b", b"dev:", &[b'n'; 31]] {
+        assert!(
+            matches!(s.make_dir(root, bad), Err(EditError::Refused(_))),
+            "{bad:?} should be refused"
+        );
+    }
+    // A file is not a directory.
+    let file = s.directory("").unwrap();
+    assert_eq!(file, root);
+    let taken = {
+        let image = ade_core::Image::from_bytes(s.bytes().to_vec()).unwrap();
+        image.volume().unwrap().lookup("Taken").unwrap().block
+    };
+    assert!(matches!(
+        s.make_dir(taken, b"inside"),
+        Err(EditError::Refused(FsEditError::NotADirectory { .. }))
+    ));
+    // Larger than the disk: refused before a single block is written.
+    assert!(matches!(
+        s.add_file(root, b"huge", &vec![0u8; 1_000_000]),
+        Err(EditError::Refused(FsEditError::DiskFull { .. }))
+    ));
+    assert!(
+        s.bytes() == before,
+        "every refusal must leave the image alone"
+    );
+}
+
+#[test]
+fn a_disk_can_be_filled_exactly() {
+    // The last free block is usable and the one after it is not, on both
+    // filesystems: the free count, the allocator and the bitmap must agree.
+    for flags in [0u8, 1] {
+        let mut s = session(flags);
+        let root = s.root();
+        let free = ade_core::health::examine(s.bytes().to_vec())
+            .bitmap
+            .map(|b| b.covered as usize - b.marked_used)
+            .unwrap();
+        let payload = if flags == 0 { 488 } else { 512 };
+        // One header, `n` data blocks, and `ceil(n / 72) - 1` extensions.
+        let mut n = free - 1;
+        while 1 + n + n.div_ceil(72) - 1 > free {
+            n -= 1;
+        }
+        let data = pattern(n * payload, 7);
+        s.add_file(root, b"all", &data).unwrap();
+        assert_eq!(
+            ade_core::health::examine(s.bytes().to_vec())
+                .bitmap
+                .map(|b| b.covered as usize - b.marked_used),
+            Some(free - (n + n.div_ceil(72))),
+        );
+        let err = s.make_dir(root, b"more");
+        if free - (n + n.div_ceil(72)) == 0 {
+            assert!(matches!(
+                err,
+                Err(EditError::Refused(FsEditError::DiskFull { .. }))
+            ));
+        }
+        let mut want = BTreeMap::new();
+        want.insert("all".to_owned(), data);
+        if err.is_ok() {
+            // A block was left over, so the directory fitted.
+            let image = ade_core::Image::from_bytes(s.bytes().to_vec()).unwrap();
+            assert!(image.volume().unwrap().lookup("more").is_ok());
+        }
+        assert_both_agree(s.bytes(), &want, &format!("DOS\\{flags} full"));
+    }
+}
+
+#[test]
+fn undo_and_redo_move_through_whole_edits() {
+    let mut s = session(5);
+    let root = s.root();
+    let blank = s.bytes().to_vec();
+    s.make_dir(root, b"one").unwrap();
+    let after_one = s.bytes().to_vec();
+    s.add_file(root, b"two", b"2").unwrap();
+    assert!(s.undo());
+    assert_eq!(s.bytes(), &after_one[..]);
+    assert!(s.undo());
+    assert_eq!(s.bytes(), &blank[..]);
+    assert!(!s.undo(), "nothing left to undo");
+    assert!(s.redo());
+    assert_eq!(s.bytes(), &after_one[..]);
+    // A new edit discards what could have been redone.
+    s.make_dir(root, b"three").unwrap();
+    assert!(!s.can_redo());
+    assert_clean(s.bytes(), "after undo and redo");
+}
+
+#[test]
+fn a_save_never_lands_on_the_original() {
+    let scratch = Scratch::new("save");
+    let original = scratch.0.join("original.adf");
+    std::fs::write(&original, blank(3)).unwrap();
+    let pristine = std::fs::read(&original).unwrap();
+
+    let mut s = Session::open(&original).unwrap();
+    let root = s.root();
+    s.make_dir(root, b"New").unwrap();
+
+    assert!(matches!(s.save(), Err(EditError::NoDestination)));
+    assert!(matches!(
+        s.save_as(&original),
+        Err(EditError::WouldOverwriteOriginal)
+    ));
+    // Not even through another name for the same file.
+    let alias = scratch.0.join("alias.adf");
+    std::fs::hard_link(&original, &alias).unwrap();
+    assert!(matches!(
+        s.save_as(&alias),
+        Err(EditError::WouldOverwriteOriginal)
+    ));
+    let other = scratch.0.join("somebody-elses.adf");
+    std::fs::write(&other, b"not ours").unwrap();
+    assert!(matches!(s.save_as(&other), Err(EditError::Exists)));
+    assert_eq!(std::fs::read(&other).unwrap(), b"not ours");
+
+    let copy = scratch.0.join("copy.adf");
+    s.save_as(&copy).unwrap();
+    assert!(!s.is_dirty());
+    assert_eq!(std::fs::read(&copy).unwrap(), s.bytes());
+
+    // The destination ADE made may be saved over again.
+    s.add_file(root, b"later", b"x").unwrap();
+    s.save().unwrap();
+    assert_eq!(std::fs::read(&copy).unwrap(), s.bytes());
+
+    assert_eq!(std::fs::read(&original).unwrap(), pristine);
+    let leftovers: Vec<_> = std::fs::read_dir(&scratch.0)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|n| {
+            std::path::Path::new(n)
+                .extension()
+                .is_some_and(|e| e == "tmp")
+        })
+        .collect();
+    assert!(leftovers.is_empty(), "temporary files left: {leftovers:?}");
+}
+
+#[test]
+fn only_plain_images_open_for_editing() {
+    // An image that is not a disk at all.
+    assert!(matches!(
+        Session::from_bytes(b"not a disk".to_vec()),
+        Err(EditError::NotEditable(_))
+    ));
+    // A floppy-sized image with no volume on it.
+    assert!(matches!(
+        Session::from_bytes(vec![0u8; 901_120]),
+        Err(EditError::NotEditable(_))
+    ));
+}
+
+#[test]
+fn a_disk_whose_bitmap_hides_live_blocks_is_refused() {
+    // Put a file on, then mark its data block free behind ADE's back: the
+    // state where the next allocation lands on somebody's data.
+    let mut s = session(1);
+    let root = s.root();
+    let header = s.add_file(root, b"victim", &pattern(100, 1)).unwrap();
+    let mut bytes = s.bytes().to_vec();
+    let data = {
+        let image = ade_core::Image::from_bytes(bytes.clone()).unwrap();
+        let volume = image.volume().unwrap();
+        let entry = volume.entry_at(header).unwrap();
+        volume.file_blocks(&entry).unwrap()[1]
+    };
+    // Bitmap block 881, bit (data - 2); set means free.
+    let index = (data - 2) as usize;
+    let at = 881 * 512 + 4 + (index / 32) * 4;
+    let word = ade_core::layers::endian::u32_at(&bytes, at).unwrap() | 1 << (index % 32);
+    ade_core::layers::endian::put_u32(&mut bytes, at, word).unwrap();
+    let sum =
+        ade_core::layers::block::checksum::normal_at(&bytes[881 * 512..882 * 512], 0).unwrap();
+    ade_core::layers::endian::put_u32(&mut bytes, 881 * 512, sum).unwrap();
+
+    assert!(matches!(
+        Session::from_bytes(bytes),
+        Err(EditError::Unsound(_))
+    ));
+}
+
+/// Real disks, not just ones ADE made: add a directory and a file to every
+/// corpus image ADE will edit, and require that nothing new is wrong and that
+/// ADFlib extracts what was added. Local only; skips without the corpus.
+///
+/// Set `ADE_EDIT_CORPUS=all` for the whole corpus; by default every 25th
+/// image, which keeps an ordinary test run quick.
+#[test]
+fn corpus_disks_take_an_edit_and_stay_sound() {
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../disks");
+    let Ok(read) = std::fs::read_dir(&dir) else {
+        eprintln!("skipping: no corpus");
+        return;
+    };
+    let step = if std::env::var("ADE_EDIT_CORPUS").as_deref() == Ok("all") {
+        1
+    } else {
+        25
+    };
+    let mut paths: Vec<PathBuf> = read.map(|e| e.unwrap().path()).collect();
+    paths.sort();
+
+    let (mut edited, mut refused, mut checked) = (0usize, BTreeMap::new(), 0usize);
+    for path in paths.iter().step_by(step) {
+        let mut s = match Session::open(path) {
+            Ok(s) => s,
+            Err(e) => {
+                let key = match e {
+                    EditError::NotEditable(_) => "not editable".to_owned(),
+                    EditError::Unsound(_) => "unsound".to_owned(),
+                    other => format!("{other}"),
+                };
+                *refused.entry(key).or_insert(0usize) += 1;
+                continue;
+            }
+        };
+        let root = s.root();
+        let data = pattern(3000, 9);
+        let dir = match s.make_dir(root, b"ADE-edit") {
+            Ok(d) => d,
+            Err(EditError::Refused(e)) => {
+                *refused.entry(refusal_kind(&e)).or_insert(0) += 1;
+                continue;
+            }
+            Err(e) => panic!("{}: {e}", path.display()),
+        };
+        match s.add_file(dir, b"added", &data) {
+            Ok(_) => {}
+            Err(EditError::Refused(e)) => {
+                *refused.entry(refusal_kind(&e)).or_insert(0) += 1;
+                continue;
+            }
+            Err(e) => panic!("{}: {e}", path.display()),
+        }
+        edited += 1;
+
+        // ADE reads the addition back.
+        let image = ade_core::Image::from_bytes(s.bytes().to_vec()).unwrap();
+        let volume = image.volume().unwrap();
+        let entry = volume.lookup("ADE-edit/added").unwrap();
+        assert!(
+            volume.read_file(&entry).unwrap().into_bytes() == data,
+            "{}: ADE read the new file back wrongly",
+            path.display()
+        );
+
+        // ADFlib extracts it. Only from disks ADFlib could already read in
+        // full, so a disk it chokes on for its own reasons is not blamed on
+        // the edit.
+        let scratch = Scratch::new("corpus");
+        let edited_path = scratch.0.join("e.adf");
+        std::fs::write(&edited_path, s.bytes()).unwrap();
+        let script = "ulimit -v 1048576; exec timeout 20 unadf -p \"$1\" \"$2\"";
+        let Ok(out) = Command::new("sh")
+            .arg("-c")
+            .arg(script)
+            .arg("sh")
+            .arg(&edited_path)
+            .arg("ADE-edit/added")
+            .output()
+        else {
+            continue;
+        };
+        if out.stdout.is_empty() && !out.status.success() {
+            continue;
+        }
+        checked += 1;
+        assert!(
+            out.stdout == data,
+            "{}: ADFlib extracted {} bytes, wanted {}",
+            path.display(),
+            out.stdout.len(),
+            data.len()
+        );
+    }
+    eprintln!("edited {edited}, ADFlib confirmed {checked}, refused {refused:?}");
+}
+
+fn refusal_kind(e: &FsEditError) -> String {
+    match e {
+        FsEditError::Unsupported(_) => "unsupported volume".to_owned(),
+        FsEditError::BitmapUntrusted(_) => "bitmap untrusted".to_owned(),
+        FsEditError::Damaged(_) => "damaged directory".to_owned(),
+        FsEditError::DiskFull { .. } => "disk full".to_owned(),
+        other => format!("{other}"),
+    }
+}

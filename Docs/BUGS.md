@@ -10,7 +10,30 @@ Severity vocabulary: low | medium | high.
 
 ## Open
 
-_None._
+### BUG-012 `create`, `convert` and single-file `extract` accept `--format=json` and ignore it
+**Severity:** low
+**Status:** open
+**Found:** 2026-10-11, adding `mkdir` and `put` and checking them against BUG-007.
+**Where:** [cli/src/main.rs](../cli/src/main.rs), the `create`, `convert` and two-argument `extract` arms.
+
+**What is wrong.** BUG-007's shape, again: `ade create out.adf --format=json` prints the human summary and exits 0. A script cannot tell the flag was ignored. BUG-007's own entry predicted it — "each command added since simply did not wire it up" — and the three commands here all produce a file rather than a report, which is presumably why nobody thought of their output as a surface.
+
+**Correct behaviour.** BUG-007's honest interim: refuse the flag with exit 2 and say the command reports in text only, which is what `mkdir` and `put` do from the start. Or emit a small document (`{"written": path, "bytes": n}`), with an inventory entry under D-015.
+
+**Not fixed here** because it is outside the change that found it (Maintenance Rule 8). `cli/tests/json_flag.rs` is the place for the test.
+
+### BUG-011 A path with an accented name cannot be looked up: `ade extract disk.adf für.txt` finds nothing
+**Severity:** medium
+**Status:** open
+**Found:** 2026-10-11, writing `ade put`, which had to avoid it.
+**Where:** [src/filesystem/src/volume.rs](../src/filesystem/src/volume.rs), `Volume::lookup`, and every command that resolves a path through it — `extract`, `ls <path>`, the CLI's `--partition` paths.
+
+**What is wrong.** `lookup` takes a `&str` and compares each component's **UTF-8 bytes** against the entry's name, which is **Latin-1**. `ü` is `C3 BC` in one and `FC` in the other, so they never match. Reproduced: a disk holding `für.txt` lists it under `ade ls`, and `ade extract disk.adf für.txt out` says `no such entry: für.txt`.
+
+**Why nothing caught it.** The corpus is overwhelmingly ASCII, and every lookup test uses ASCII names; `ls` without a path and `extract --all` go through the walk, which never compares names.
+
+**Correct behaviour.** Convert each component to Latin-1 before comparing, refusing a character with no Latin-1 byte — what `ade_core::edit::amiga_name` and `Session::directory` already do. That is the fix to lift into `lookup`, or into a byte-taking variant beside it.
+
 
 ## Fixed
 

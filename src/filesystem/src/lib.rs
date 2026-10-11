@@ -8,6 +8,7 @@
 //! read-only [`bootblock`] and [`rootblock`] inspection. Mounting, traversal and
 //! extraction are still to come.
 
+pub mod edit;
 pub mod format;
 
 pub mod bitmap;

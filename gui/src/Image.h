@@ -33,6 +33,28 @@ inline QByteArray bytes(AdeBytes b) {
 }
 
 // A directory listing. Move-only: two owners would free it twice.
+/// A host name as an Amiga one: Latin-1 bytes, which is what AmigaDOS stores.
+///
+/// False when a character has no Latin-1 byte. `QString::toLatin1` would
+/// quietly put a `?` there instead, and a file renamed on its way onto a disk
+/// is one nobody finds again.
+inline bool amigaName(const QString &name, QByteArray *out) {
+    out->clear();
+    for (const QChar c : name) {
+        if (c.unicode() > 0xFF) return false;
+        out->append(static_cast<char>(c.unicode()));
+    }
+    return true;
+}
+
+/// How an edit or a save turned out (D-018), with ADE's reason when it did not.
+struct EditResult {
+    AdeResult code = ADE_INTERNAL;
+    QString message;
+    quint32 block = 0;
+    bool ok() const { return code == ADE_OK; }
+};
+
 class Listing {
 public:
     Listing() = default;
@@ -366,7 +388,59 @@ public:
         return out;
     }
 
+    // Writing into the disk (D-018). Every edit changes the open image in
+    // memory; nothing reaches a file until saveAs, which never writes over the
+    // file it was opened from. An edit invalidates strings borrowed from the
+    // image — volumeName() and the rest are re-read, never cached.
+    EditResult makeDir(quint32 parent, const QByteArray &name) {
+        EditResult r;
+        char *why = nullptr;
+        r.code = ade_edit_mkdir(m_raw, parent, view(name), &r.block, &why);
+        r.message = take(why);
+        return r;
+    }
+    EditResult addFile(quint32 parent, const QByteArray &name, const QByteArray &data) {
+        EditResult r;
+        char *why = nullptr;
+        r.code = ade_edit_add_file(m_raw, parent, view(name), view(data), &r.block, &why);
+        r.message = take(why);
+        return r;
+    }
+    bool isModified() const { return ade_image_is_modified(m_raw); }
+    bool canUndo() const { return ade_edit_can_undo(m_raw); }
+    bool canRedo() const { return ade_edit_can_redo(m_raw); }
+    bool undo() { return ade_edit_undo(m_raw) == ADE_OK; }
+    bool redo() { return ade_edit_redo(m_raw) == ADE_OK; }
+    EditResult saveAs(const QString &path) {
+        EditResult r;
+        char *why = nullptr;
+        r.code = ade_image_save_as(m_raw, path.toUtf8().constData(), &why);
+        r.message = take(why);
+        return r;
+    }
+    EditResult save() {
+        EditResult r;
+        char *why = nullptr;
+        r.code = ade_image_save(m_raw, &why);
+        r.message = take(why);
+        return r;
+    }
+    /// Where save() would write, or empty before any Save As.
+    QString saveDestination() const { return take(ade_image_save_destination(m_raw)); }
+
 private:
+    static AdeBytes view(const QByteArray &b) {
+        return AdeBytes{reinterpret_cast<const uint8_t *>(b.constData()),
+                        static_cast<size_t>(b.size())};
+    }
+    /// A string ADE allocated, copied and freed.
+    static QString take(char *text) {
+        if (!text) return {};
+        const QString out = QString::fromUtf8(text);
+        ade_string_free(text);
+        return out;
+    }
+
     AdeImage *m_raw = nullptr;
     AdeResult m_error = ADE_OK;
 };

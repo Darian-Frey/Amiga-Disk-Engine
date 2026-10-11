@@ -1,6 +1,9 @@
 #include "ImageTree.h"
 
 #include <QDir>
+#include <QDragEnterEvent>
+#include <QDragMoveEvent>
+#include <QDropEvent>
 #include <QFile>
 #include <QMimeData>
 #include <QTemporaryDir>
@@ -46,4 +49,45 @@ QMimeData *ImageTree::mimeData(const QList<QTreeWidgetItem *> &items) const {
     auto *mime = new QMimeData;
     mime->setUrls(urls);
     return mime;
+}
+
+void ImageTree::setAcceptsFiles(bool accept) {
+    m_acceptsFiles = accept;
+    setAcceptDrops(accept);
+    viewport()->setAcceptDrops(accept);
+    setDragDropMode(accept ? QAbstractItemView::DragDrop : QAbstractItemView::DragOnly);
+    setDropIndicatorShown(accept);
+}
+
+bool ImageTree::wouldAccept(const QObject *source, const QMimeData *mime) const {
+    return m_acceptsFiles && source != this && mime && mime->hasUrls();
+}
+
+void ImageTree::dragEnterEvent(QDragEnterEvent *event) {
+    if (!wants(event)) {
+        event->ignore();
+        return;
+    }
+    event->setDropAction(Qt::CopyAction);
+    event->accept();
+}
+
+void ImageTree::dragMoveEvent(QDragMoveEvent *event) {
+    if (!wants(event)) {
+        event->ignore();
+        return;
+    }
+    event->setDropAction(Qt::CopyAction);
+    event->accept();
+}
+
+void ImageTree::dropEvent(QDropEvent *event) {
+    if (!wants(event)) {
+        event->ignore();
+        return;
+    }
+    // Copy, never move: a move would ask the source to delete its file.
+    event->setDropAction(Qt::CopyAction);
+    event->accept();
+    emit filesDropped(itemAt(event->position().toPoint()), event->mimeData()->urls());
 }

@@ -31,6 +31,7 @@ cargo run -p ade-cli -- batch   disks/       # a whole corpus in one pass
 cargo run -p ade-cli -- identify --datfiles=D disk.adf   # name it from TOSEC
 cargo run -p ade-cli -- diff a.adf b.adf     # where two dumps differ
 cargo run -p ade-cli -- convert in.adz out.adf
+cargo run -p ade-cli -- put disk.adf notes.txt Docs --output=edited.adf   # never over disk.adf
 ```
 
 The GUI needs Qt6 and CMake, which invokes Cargo for the bridge itself:
@@ -48,7 +49,7 @@ ADE never writes to an image: no image-write path exists in the codebase, and D-
 
 **Phases 0 and 1 are complete; Phases 2 to 5 are each partly delivered** (registers audited 2026-08-28). ADE reads OFS and FFS on DD, HD and extra-cylinder floppies, on unpartitioned hardfiles, and on RDB-partitioned hard disks — plain or gzip-wrapped, since an ADZ mounts exactly as the ADF inside it. All eight dostypes are identified and hashed correctly, including the international variants, and directory caches (`DOS\4`/`DOS\5`) are read and cross-checked against the directories they describe. It lists, extracts, resolves hard links, and reports volume health including a bitmap cross-check.
 
-On top of that: extended ADFs read *and* write, with raw MFM decoded and the reconstruction always declared; `batch` verifies a 4652-image corpus in 5.5 seconds at 9 MB; `identify` names 98% of it from TOSEC datfiles; `diff` and `consolidate` compare and merge repeated dumps; `convert` moves between containers and refuses lossy pairs outright; and a Qt6 GUI browses several images at once, previews them, extracts by drag, and searches every one of them.
+On top of that: extended ADFs read *and* write, with raw MFM decoded and the reconstruction always declared; `batch` verifies a 4652-image corpus in 5.5 seconds at 9 MB; `identify` names 98% of it from TOSEC datfiles; `diff` and `consolidate` compare and merge repeated dumps; `convert` moves between containers and refuses lossy pairs outright; and a Qt6 GUI browses several images at once, previews them, extracts by drag, and searches every one of them. Files and folders dropped onto a disk in the window are copied onto it, in memory until saved — and a save is always to a new file, never over the disk that was opened (D-018).
 
 Measured rather than asserted:
 

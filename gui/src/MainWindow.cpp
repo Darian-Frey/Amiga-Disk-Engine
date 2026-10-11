@@ -6,6 +6,9 @@
 #include "ImageTree.h"
 
 #include <QAction>
+#include <QCloseEvent>
+#include <QInputDialog>
+#include <set>
 #include <QDragEnterEvent>
 #include <QDropEvent>
 #include <QFile>
@@ -115,6 +118,10 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
 
     m_tree = new ImageTree(this);
     m_tree->setObjectName(QStringLiteral("tree"));
+    // Host files dropped onto a disk's row, or a folder on it, are copied
+    // onto that disk (D-018); dropped on empty space they are opened as disks.
+    m_tree->setAcceptsFiles(true);
+    connect(m_tree, &ImageTree::filesDropped, this, &MainWindow::filesDropped);
     m_tree->setColumnCount(4);
     m_tree->setHeaderLabels({QStringLiteral("Name"), QStringLiteral("Size"),
                              QStringLiteral("Modified"), QStringLiteral("Protection")});
@@ -343,6 +350,17 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
     open->setShortcut(QKeySequence::Open);
     connect(open, &QAction::triggered, this, &MainWindow::chooseImage);
 
+    // Saving (D-018). The first save of an edited disk is always a Save As:
+    // ADE never writes over the file a disk was opened from.
+    m_save = file->addAction(QStringLiteral("&Save"));
+    m_save->setShortcut(QKeySequence::Save);
+    m_save->setEnabled(false);
+    connect(m_save, &QAction::triggered, this, &MainWindow::save);
+    m_saveAs = file->addAction(QStringLiteral("Save &as..."));
+    m_saveAs->setShortcut(QKeySequence::SaveAs);
+    m_saveAs->setEnabled(false);
+    connect(m_saveAs, &QAction::triggered, this, &MainWindow::saveAs);
+
     m_extractAll = file->addAction(QStringLiteral("Extract &all files..."));
     m_extractAll->setEnabled(false);
     connect(m_extractAll, &QAction::triggered, this, &MainWindow::extractAll);
@@ -366,6 +384,32 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
     auto *quit = file->addAction(QStringLiteral("&Quit"));
     quit->setShortcut(QKeySequence::Quit);
     connect(quit, &QAction::triggered, this, &QWidget::close);
+
+    // Edits are in memory until saved, so undo is a step back through copies
+    // of the disk rather than a second write that might fail (D-018).
+    auto *edit = menuBar()->addMenu(QStringLiteral("&Edit"));
+    m_undo = edit->addAction(QStringLiteral("&Undo"));
+    m_undo->setShortcut(QKeySequence::Undo);
+    m_undo->setEnabled(false);
+    connect(m_undo, &QAction::triggered, this, &MainWindow::undoEdit);
+    m_redo = edit->addAction(QStringLiteral("&Redo"));
+    m_redo->setShortcut(QKeySequence::Redo);
+    m_redo->setEnabled(false);
+    connect(m_redo, &QAction::triggered, this, &MainWindow::redoEdit);
+    edit->addSeparator();
+    m_newFolder = edit->addAction(QStringLiteral("New &folder..."));
+    m_newFolder->setShortcut(QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_N));
+    m_newFolder->setEnabled(false);
+    m_newFolder->setToolTip(QStringLiteral(
+        "Make a folder in the selected folder, or on the selected disk.\n"
+        "To copy files on, drop them onto the disk or a folder in the tree."));
+    connect(m_newFolder, &QAction::triggered, this, &MainWindow::newFolder);
+
+    m_confirmDiscard = [this](const QString &question) {
+        return QMessageBox::question(this, QStringLiteral("Unsaved changes"), question,
+                                     QMessageBox::Discard | QMessageBox::Cancel,
+                                     QMessageBox::Cancel) == QMessageBox::Discard;
+    };
 
     // A menu of its own, because what a disk *is* and what it *needs* are the
     // window's two standing questions about the thing on screen, and neither
@@ -414,6 +458,7 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
             m_syncing = false;
         }
         showEntry(selected.isEmpty() ? nullptr : selected.first());
+        updateEditActions();
     };
     connect(m_tree, &QTreeWidget::itemSelectionChanged, this,
             [this, takeSelection] { takeSelection(m_tree, m_results); });
@@ -468,7 +513,10 @@ void MainWindow::openImage(const QString &path) {
     // the window, which opened two Amiga executables and a level file as
     // damaged hard disks (BUG-010).
     if (!image.recognised()) {
-        emit errorOccurred(QStringLiteral("%1 is not a disk image.")
+        // Said with the way to do what was probably meant: a file dropped on
+        // empty space is opened, and one dropped onto a disk is copied onto it.
+        emit errorOccurred(QStringLiteral("%1 is not a disk image. To copy it onto a disk, "
+                                          "drop it onto the disk or one of its folders.")
                                .arg(QFileInfo(path).fileName()));
         return;
     }
@@ -485,7 +533,8 @@ void MainWindow::openImage(const QString &path) {
     statusBar()->showMessage(QStringLiteral("Opened %1").arg(m_images.back()->name));
 }
 
-void MainWindow::closeAll() {
+bool MainWindow::closeAll() {
+    if (!mayDiscardEdits()) return false;
     // The trees first: their items hold indices into `m_images`, and an item
     // outliving the image it points at is the one way this can dangle.
     m_tree->clear();
@@ -495,7 +544,10 @@ void MainWindow::closeAll() {
     clearViews();
     setWindowTitle(QStringLiteral("Amiga Disk Engine"));
     m_summary->clear();
+    m_lastEdited = static_cast<size_t>(-1);
+    updateEditActions();
     statusBar()->showMessage(QStringLiteral("Open a disk image, or drop one here"));
+    return true;
 }
 
 void MainWindow::addImageRoot(Open &open) {
@@ -587,6 +639,9 @@ QString MainWindow::describe(const Open &open) {
     if (findings > 0) {
         parts << QStringLiteral("%1 finding%2").arg(findings).arg(findings == 1 ? "" : "s");
     }
+    // Said in words on the row as well as with the title's asterisk: with
+    // several disks open, the title cannot say which one.
+    if (open.image.isModified()) parts << QStringLiteral("unsaved changes");
     return parts.join(QStringLiteral("   "));
 }
 
@@ -637,7 +692,8 @@ void MainWindow::showSummary() {
     }
     const Open &only = *m_images.front();
     m_summary->setText(describe(only));
-    setWindowTitle(QStringLiteral("%1 — Amiga Disk Engine").arg(only.name));
+    setWindowTitle(QStringLiteral("%1%2 — Amiga Disk Engine")
+                       .arg(only.image.isModified() ? QStringLiteral("*") : QString{}, only.name));
 }
 
 std::vector<std::pair<quint32, QString>> MainWindow::volumesOf(const Open &open) {
@@ -655,6 +711,10 @@ std::vector<std::pair<quint32, QString>> MainWindow::volumesOf(const Open &open)
     }
     if (open.image.hasVolume()) out.emplace_back(ADE_WHOLE_IMAGE, open.name);
     return out;
+}
+
+MainWindow::Open *MainWindow::imageFor(const QTreeWidgetItem *item) {
+    return const_cast<Open *>(std::as_const(*this).imageFor(item));
 }
 
 const MainWindow::Open *MainWindow::imageFor(const QTreeWidgetItem *item) const {
@@ -1634,4 +1694,337 @@ void MainWindow::dropEvent(QDropEvent *event) {
         const QString path = url.toLocalFile();
         if (!path.isEmpty()) openImage(path);
     }
+}
+
+// ---------------------------------------------------------------------------
+// Writing into a disk (D-018)
+// ---------------------------------------------------------------------------
+
+namespace {
+// How deep a dropped folder is followed. A real tree is far shallower; the
+// bound is for a link loop the host's own listing did not catch.
+constexpr int MaxDropDepth = 32;
+}  // namespace
+
+MainWindow::Open *MainWindow::editTarget() {
+    if (Open *open = imageFor(m_selected)) return open;
+    if (m_lastEdited < m_images.size()) return m_images[m_lastEdited].get();
+    if (m_images.size() == 1) return m_images.front().get();
+    return nullptr;
+}
+
+quint32 MainWindow::directoryFor(const QTreeWidgetItem *item, const Open &open) const {
+    if (!item) return 0;
+    // A partition of a hard disk is not something ADE writes into: it edits
+    // plain ADFs and hardfiles, whose file *is* the volume.
+    if (item->data(0, RolePartition).toUInt() != ADE_WHOLE_IMAGE) return 0;
+    if (!item->data(0, RoleIsDir).toBool()) return directoryFor(item->parent(), open);
+    // The disk's own row carries no block; its directory is the root.
+    if (!item->parent()) return open.image.rootBlock();
+    return item->data(0, RoleBlock).toUInt();
+}
+
+void MainWindow::addPath(Open &open, quint32 dir, const QString &path, int depth, int *made,
+                         QStringList *refused) {
+    const QFileInfo info(path);
+    const QString name = info.fileName();
+    QByteArray amiga;
+    if (!ade::amigaName(name, &amiga)) {
+        refused->append(QStringLiteral("%1: an Amiga name is Latin-1, and this has a "
+                                       "character outside it")
+                            .arg(name));
+        return;
+    }
+    // A link is not followed: it may lead out of what was dropped, or back
+    // into it, and copying a disk's worth of somebody's home folder onto a
+    // floppy because of one symlink is not what a drop means.
+    if (info.isSymLink()) {
+        refused->append(QStringLiteral("%1: a link, not copied").arg(name));
+        return;
+    }
+    if (info.isDir()) {
+        if (depth >= MaxDropDepth) {
+            refused->append(QStringLiteral("%1: folders nested too deeply").arg(name));
+            return;
+        }
+        const ade::EditResult r = open.image.makeDir(dir, amiga);
+        if (!r.ok()) {
+            refused->append(QStringLiteral("%1: %2").arg(name, r.message));
+            return;
+        }
+        ++*made;
+        const QFileInfoList children = QDir(path).entryInfoList(
+            QDir::AllEntries | QDir::NoDotAndDotDot | QDir::Hidden | QDir::System,
+            QDir::Name);
+        for (const QFileInfo &child : children) {
+            addPath(open, r.block, child.filePath(), depth + 1, made, refused);
+        }
+        return;
+    }
+    QFile file(path);
+    if (!file.open(QIODevice::ReadOnly)) {
+        refused->append(QStringLiteral("%1: %2").arg(name, file.errorString()));
+        return;
+    }
+    const ade::EditResult r = open.image.addFile(dir, amiga, file.readAll());
+    if (!r.ok()) {
+        refused->append(QStringLiteral("%1: %2").arg(name, r.message));
+        return;
+    }
+    ++*made;
+}
+
+int MainWindow::addFiles(QTreeWidgetItem *target, const QStringList &paths) {
+    Open *open = imageFor(target);
+    if (!open) return 0;
+    const quint32 dir = directoryFor(target, *open);
+    if (dir == 0) {
+        emit errorOccurred(QStringLiteral(
+            "ADE copies files onto plain ADF and hardfile images only, not into a "
+            "partition of a hard disk."));
+        return 0;
+    }
+    int made = 0;
+    QStringList refused;
+    for (const QString &path : paths) addPath(*open, dir, path, 0, &made, &refused);
+    m_lastEdited = open->index;
+    if (made > 0) reloadImage(*open);
+    if (!refused.isEmpty()) {
+        emit errorOccurred(QStringLiteral("Not everything could be copied onto %1:\n\n%2")
+                               .arg(open->name, refused.join(QLatin1Char('\n'))));
+    }
+    if (made > 0) {
+        statusBar()->showMessage(
+            QStringLiteral("Copied %1 item%2 onto %3 — not saved yet; File ▸ Save as… keeps it")
+                .arg(made)
+                .arg(made == 1 ? "" : "s")
+                .arg(open->name));
+    }
+    return made;
+}
+
+bool MainWindow::makeFolder(QTreeWidgetItem *target, const QString &name) {
+    Open *open = imageFor(target);
+    if (!open) return false;
+    const quint32 dir = directoryFor(target, *open);
+    if (dir == 0) {
+        emit errorOccurred(QStringLiteral(
+            "ADE makes folders on plain ADF and hardfile images only, not in a partition "
+            "of a hard disk."));
+        return false;
+    }
+    QByteArray amiga;
+    if (!ade::amigaName(name, &amiga)) {
+        emit errorOccurred(QStringLiteral("%1: an Amiga name is Latin-1, and this has a "
+                                          "character outside it.")
+                               .arg(name));
+        return false;
+    }
+    const ade::EditResult r = open->image.makeDir(dir, amiga);
+    m_lastEdited = open->index;
+    if (!r.ok()) {
+        emit errorOccurred(QStringLiteral("Could not make %1: %2").arg(name, r.message));
+        return false;
+    }
+    reloadImage(*open);
+    statusBar()->showMessage(
+        QStringLiteral("Made %1 on %2 — not saved yet").arg(name, open->name));
+    return true;
+}
+
+bool MainWindow::saveImageAs(QTreeWidgetItem *item, const QString &path) {
+    Open *open = item ? imageFor(item) : editTarget();
+    if (!open || path.isEmpty()) return false;
+    const ade::EditResult r = open->image.saveAs(path);
+    if (!r.ok()) {
+        emit errorOccurred(QStringLiteral("Could not save %1: %2").arg(path, r.message));
+        return false;
+    }
+    reloadImage(*open);
+    statusBar()->showMessage(QStringLiteral("Saved %1").arg(path));
+    return true;
+}
+
+void MainWindow::save() {
+    Open *open = editTarget();
+    if (!open) return;
+    // The first save is always a Save As: there is no file yet that ADE made.
+    if (open->image.saveDestination().isEmpty()) {
+        saveAs();
+        return;
+    }
+    const ade::EditResult r = open->image.save();
+    if (!r.ok()) {
+        emit errorOccurred(QStringLiteral("Could not save: %1").arg(r.message));
+        return;
+    }
+    reloadImage(*open);
+    statusBar()->showMessage(QStringLiteral("Saved %1").arg(open->image.saveDestination()));
+}
+
+void MainWindow::saveAs() {
+    Open *open = editTarget();
+    if (!open) return;
+    const QFileInfo from(open->path);
+    const QString suggested =
+        open->image.saveDestination().isEmpty()
+            ? from.dir().filePath(
+                  QStringLiteral("%1-edited.%2").arg(from.completeBaseName(), from.suffix()))
+            : open->image.saveDestination();
+    // No overwrite prompt from the dialog: ADE declines to overwrite anyway,
+    // and a "Replace?" it then refuses would be the dialog promising something
+    // the engine will not do.
+    const QString path = QFileDialog::getSaveFileName(
+        this, QStringLiteral("Save %1 as a new image").arg(open->name), suggested,
+        QStringLiteral("Disk images (*.adf *.hdf);;All files (*)"), nullptr,
+        QFileDialog::DontConfirmOverwrite);
+    if (path.isEmpty()) return;
+    saveImageAs(nullptr, path);
+}
+
+void MainWindow::newFolder() {
+    QTreeWidgetItem *target = m_selected;
+    if (!imageFor(target) && m_tree->topLevelItemCount() == 1) target = m_tree->topLevelItem(0);
+    if (!imageFor(target)) return;
+    bool ok = false;
+    const QString name = QInputDialog::getText(this, QStringLiteral("New folder"),
+                                               QStringLiteral("Name"), QLineEdit::Normal,
+                                               QStringLiteral("New folder"), &ok);
+    if (!ok || name.isEmpty()) return;
+    makeFolder(target, name);
+}
+
+bool MainWindow::undoEdit() {
+    Open *open = editTarget();
+    if (!open || !open->image.undo()) return false;
+    m_lastEdited = open->index;
+    reloadImage(*open);
+    statusBar()->showMessage(QStringLiteral("Undone on %1").arg(open->name));
+    return true;
+}
+
+bool MainWindow::redoEdit() {
+    Open *open = editTarget();
+    if (!open || !open->image.redo()) return false;
+    m_lastEdited = open->index;
+    reloadImage(*open);
+    statusBar()->showMessage(QStringLiteral("Redone on %1").arg(open->name));
+    return true;
+}
+
+void MainWindow::reloadImage(Open &open) {
+    QTreeWidgetItem *root = nullptr;
+    for (int i = 0; i < m_tree->topLevelItemCount(); ++i) {
+        QTreeWidgetItem *item = m_tree->topLevelItem(i);
+        if (item->data(0, RoleImage).toULongLong() == open.index) root = item;
+    }
+    if (!root) return;
+
+    // Which folders were open, by block, so the tree comes back as it was.
+    // Blocks rather than names: a name can be added twice in two folders, a
+    // block is one place.
+    std::set<quint32> expanded;
+    for (QTreeWidgetItemIterator it(root); *it; ++it) {
+        if ((*it)->isExpanded() && (*it)->data(0, RoleIsDir).toBool()) {
+            expanded.insert((*it)->data(0, RoleBlock).toUInt());
+        }
+    }
+
+    // Everything that points into the rows about to go, let go first. The
+    // views, the marked row and the search results all hold item pointers or
+    // block numbers that an undo can make mean nothing.
+    // A search result is about to be deleted whichever disk it belongs to,
+    // so a selected one is let go as well as a row of this disk.
+    const bool ownsSelection =
+        imageFor(m_selected) == &open || (m_selected && m_selected->treeWidget() == m_results);
+    if (ownsSelection) {
+        m_syncing = true;
+        m_tree->clearSelection();
+        m_results->clearSelection();
+        m_syncing = false;
+        m_selected = nullptr;
+        clearViews();
+    }
+    m_results->clear();
+    qDeleteAll(root->takeChildren());
+
+    root->setText(ColName, QStringLiteral("%1   %2").arg(open.name, describe(open)));
+    const QString destination = open.image.saveDestination();
+    root->setToolTip(ColName, destination.isEmpty()
+                                  ? QStringLiteral("%1\n%2").arg(open.path, describe(open))
+                                  : QStringLiteral("%1\nsaved as %2\n%3")
+                                        .arg(open.path, destination, describe(open)));
+    if (open.image.hasVolume()) {
+        populate(root, open, ADE_WHOLE_IMAGE, open.image.rootBlock());
+        root->setExpanded(true);
+        // Breadth first: expanding a row populates it, and only then are its
+        // own children there to be expanded.
+        QList<QTreeWidgetItem *> pending{root};
+        while (!pending.isEmpty()) {
+            QTreeWidgetItem *item = pending.takeFirst();
+            for (int i = 0; i < item->childCount(); ++i) {
+                QTreeWidgetItem *child = item->child(i);
+                if (child->data(0, RoleIsDir).toBool() &&
+                    expanded.count(child->data(0, RoleBlock).toUInt()) > 0) {
+                    child->setExpanded(true);
+                    pending.append(child);
+                }
+            }
+        }
+    }
+    showSummary();
+    updateEditActions();
+}
+
+void MainWindow::updateEditActions() {
+    Open *open = editTarget();
+    const bool plain = open && open->image.hasVolume() &&
+                       (!m_selected || m_selected->data(0, RolePartition).toUInt() ==
+                                           ADE_WHOLE_IMAGE);
+    if (m_newFolder) m_newFolder->setEnabled(plain);
+    if (m_undo) m_undo->setEnabled(open && open->image.canUndo());
+    if (m_redo) m_redo->setEnabled(open && open->image.canRedo());
+    if (m_save) m_save->setEnabled(open && open->image.isModified());
+    // Save As stays offered after a save, for a second copy — but only for a
+    // disk that has been edited, since there is nothing else to save.
+    if (m_saveAs) {
+        m_saveAs->setEnabled(open && (open->image.isModified() ||
+                                      !open->image.saveDestination().isEmpty()));
+    }
+}
+
+bool MainWindow::mayDiscardEdits() {
+    QStringList unsaved;
+    for (const auto &open : m_images) {
+        if (open->image.isModified()) unsaved << open->name;
+    }
+    if (unsaved.isEmpty()) return true;
+    if (!m_confirmDiscard) return false;
+    return m_confirmDiscard(
+        QStringLiteral("%1 unsaved changes. Close anyway and lose them?\n\n%2")
+            .arg(unsaved.size() == 1 ? QStringLiteral("One disk has")
+                                     : QStringLiteral("%1 disks have").arg(unsaved.size()),
+                 unsaved.join(QLatin1Char('\n'))));
+}
+
+void MainWindow::closeEvent(QCloseEvent *event) {
+    if (mayDiscardEdits()) {
+        event->accept();
+    } else {
+        event->ignore();
+    }
+}
+
+void MainWindow::filesDropped(QTreeWidgetItem *target, const QList<QUrl> &urls) {
+    QStringList paths;
+    for (const QUrl &url : urls) {
+        if (url.isLocalFile()) paths << url.toLocalFile();
+    }
+    // Onto a disk: copy onto it. Onto empty space: open as disks, which is
+    // what dropping onto the window has always meant.
+    if (target && imageFor(target)) {
+        addFiles(target, paths);
+        return;
+    }
+    for (const QString &path : paths) openImage(path);
 }

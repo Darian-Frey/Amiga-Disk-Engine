@@ -550,6 +550,24 @@ Cache blocks are marked used in the bitmap. A reader that does not follow the ch
 
 Note also that **`DOS\4` occurs nowhere in the corpus** and `DOS\6`/`DOS\7` do not either (§Open questions). Only `DOS\5` has real material, so OFS-with-dircache rests on generated fixtures and the oracle — `unadf -c` lists from the cache rather than the hash chains, which is what makes it an independent check on a cache ADE wrote.
 
+## Writing into a volume
+
+*What ADE does when it adds an entry (F-031), and why each choice is the one it is. Measured 2026-10-11.*
+
+A new directory or file changes more blocks than the one it occupies. For one entry: its own header; for a file, its data blocks and any extension blocks; the parent's hash slot **or** the entry before it in the collision chain; the parent's datestamp; the rootblock's volume datestamp (`v_days`, which on the root is the same block as the parent); one bitmap block per page touched; and on `DOS\4`/`DOS\5`, the parent's cache chain and — if the parent had none — the parent's `extension` field. A real edit on `1000cc Turbo.adf` changed exactly six blocks: the rootblock, the root entry sharing the new directory's slot, the bitmap, the directory, the file header and its one data block.
+
+**Allocation** searches from the rootblock outward, to the end of the volume and then from the first block after the reserved area back to the rootblock, which is the order SPEC §Deletion gives for AmigaDOS. Free means: set in the bitmap, not a bitmap block, not the rootblock.
+
+**Collision chains are kept in block order**, as FFS keeps them (§Collision chains). Readers do not depend on it, but a chain ADE wrote should look like one AmigaDOS wrote.
+
+**The `data_blocks[]` table is written backwards**, first block in the last slot, in the header and in every extension block. `high_seq` is the count stored in that block, not in the file. An empty file has no data blocks, `high_seq == 0` and `first_data == 0`, on both filesystems. OFS data blocks carry `seq_num` from **1**.
+
+**The dircache is laid out again, not patched.** The parent's existing records are kept byte for byte (they are AmigaDOS's description, not ADE's), the new record is appended, and the whole is packed into the existing chain's blocks in order, taking a new block only when one fills. A record never spans two blocks. A new directory gets no cache block of its own: an empty directory needs none, which ADFlib accepts, as it does on a blank volume.
+
+**What makes an edit refuse.** No dostype in the bootblock (how names hash is unknown), LNFS (D-013), a bitmap flagged invalid or failing its checksum or not covering the volume, a parent whose listing or cache is damaged, and — checked by the layer above — a disk on which the bitmap already marks referenced blocks free. Over the corpus, of 4,652 images: 3,023 edited, 1,052 not plain images, 288 full, 255 bitmap flagged invalid, 15 hiding live blocks, 10 without a usable dostype, 9 with a damaged directory.
+
+**The check that matters most cannot be made by walking.** An entry in the wrong hash slot is still listed by every reader that visits every slot — ADE, `ade check`, `unadf -r` — and found by none that looks a name up. Only accented names hash differently between the international and plain functions (C-006), so a test with ASCII names cannot tell them apart either. ADE's writer is tested by reading the slot directly and by asking ADFlib for files by name; IMP-012 records that `ade check` should do the first of those for every disk.
+
 ## Links
 
 Hard links are FFS-only and chain through `next_link`. Soft links were broken and support was removed in AmigaDOS 3.0. [FAQ §4.6]

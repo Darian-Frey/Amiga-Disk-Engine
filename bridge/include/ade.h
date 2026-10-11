@@ -42,7 +42,8 @@ typedef enum {
     ADE_BAD_ENCODING  = 4,
     ADE_NOT_FOUND     = 5,
     ADE_INTERNAL      = 6,
-    ADE_ALREADY_EXISTS = 7
+    ADE_ALREADY_EXISTS = 7,
+    ADE_REFUSED       = 8  /* an edit or save ADE declined; a message says why */
 } AdeResult;
 
 /* A borrowed run of bytes with no encoding claimed. `data` is NULL when
@@ -494,6 +495,64 @@ AdeBuffer *ade_file_read(const AdeImage *image, uint32_t partition, uint32_t blo
 /* Borrowed from the buffer; valid until it is freed. */
 AdeBytes   ade_buffer_bytes(const AdeBuffer *buffer);
 void       ade_buffer_free(AdeBuffer *buffer);
+
+/* --- Writing into a disk (D-018) -----------------------------------------
+ *
+ * Edits change the open image **in memory** and nothing else. Nothing reaches
+ * a file until ade_image_save_as, which never writes over the file the image
+ * was opened from, nor over any existing file this handle did not save. A
+ * save is atomic: a temporary file beside the destination, then a rename.
+ *
+ * Only plain ADF and unpartitioned hardfile images can be edited. Anything
+ * else is ADE_REFUSED with the reason.
+ *
+ * Every edit is checked with ADE's health report before it is kept. If the
+ * result has a problem the disk did not already have, the edit is undone and
+ * the call returns ADE_INTERNAL — a bug in ADE, not in the disk.
+ *
+ * An edit **invalidates every pointer borrowed from the image**: its volume
+ * name, container string and the like are rebuilt from the edited disk.
+ * Listings, buffers and layouts already taken are the caller's own and stay
+ * valid, but describe the disk as it was.
+ *
+ * `out_message` may be NULL. When it is not and the call fails, it receives a
+ * NUL-terminated UTF-8 reason to free with ade_string_free. It is left alone
+ * on success. */
+
+/* Make an empty directory, or add a file holding `data`, in the directory at
+ * `parent` — ade_image_root_block for the top level, or an entry's block.
+ * `name` is Latin-1, 1–30 bytes, without ':' or '/'. On success `*out_block`
+ * (if not NULL) is the new entry's block.
+ *
+ * ADE_ALREADY_EXISTS when the name is taken (compared as AmigaDOS compares
+ * names), ADE_NOT_FOUND when `parent` is not a directory, ADE_REFUSED for
+ * everything else ADE will not do — a full disk, a damaged directory, a
+ * bitmap it cannot trust. */
+AdeResult ade_edit_mkdir(AdeImage *image, uint32_t parent, AdeBytes name,
+                         uint32_t *out_block, char **out_message);
+AdeResult ade_edit_add_file(AdeImage *image, uint32_t parent, AdeBytes name,
+                            AdeBytes data, uint32_t *out_block, char **out_message);
+
+/* Whether there are edits no save has captured. */
+bool      ade_image_is_modified(const AdeImage *image);
+
+/* Step through the edits. ADE_NOT_FOUND when there is nothing to undo or
+ * redo; a new edit discards what could have been redone. */
+bool      ade_edit_can_undo(const AdeImage *image);
+bool      ade_edit_can_redo(const AdeImage *image);
+AdeResult ade_edit_undo(AdeImage *image);
+AdeResult ade_edit_redo(AdeImage *image);
+
+/* Save to a new file. ADE_REFUSED for the file the image was opened from;
+ * ADE_ALREADY_EXISTS for any other file that exists and this handle did not
+ * save; ADE_NOT_FOUND when nothing has been edited. */
+AdeResult ade_image_save_as(AdeImage *image, const char *path, char **out_message);
+/* Save over the file the last ade_image_save_as made. ADE_REFUSED before any
+ * Save As: the first save always names a new file. */
+AdeResult ade_image_save(AdeImage *image, char **out_message);
+/* Where ade_image_save would write, or NULL before any Save As. UTF-8; free
+ * with ade_string_free. */
+char     *ade_image_save_destination(const AdeImage *image);
 
 #ifdef __cplusplus
 } /* extern "C" */

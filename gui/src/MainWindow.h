@@ -6,6 +6,7 @@
 
 #include <QMainWindow>
 
+#include <functional>
 #include <memory>
 #include <utility>
 #include <vector>
@@ -82,8 +83,36 @@ private slots:
 
 public:
 
-    // Close every open image.
-    void closeAll();
+    // Close every open image. Asks first if any has unsaved edits, and returns
+    // false — closing nothing — if the answer is no.
+    bool closeAll();
+
+    // --- Writing into a disk (D-018) --------------------------------------
+    //
+    // Public, and free of dialogs, so the tests can drive them: the menu
+    // actions and the drop handler only ask for names and paths, then call
+    // these.
+
+    /// Copy host files and folders onto the disk `target` belongs to: into
+    /// `target` itself when it is a directory or the disk's own row, beside it
+    /// when it is a file. Folders are copied with everything in them. Returns
+    /// how many entries were made; anything refused is reported through
+    /// `errorOccurred`, all of it in one message.
+    int addFiles(QTreeWidgetItem *target, const QStringList &paths);
+    /// Make a directory, placed as `addFiles` places things.
+    bool makeFolder(QTreeWidgetItem *target, const QString &name);
+    /// Save the disk `item` belongs to as a new file. Never the file it was
+    /// opened from; never over another existing file.
+    bool saveImageAs(QTreeWidgetItem *item, const QString &path);
+    /// Undo or redo the last edit to the disk the actions act on.
+    bool undoEdit();
+    bool redoEdit();
+
+    /// How the window asks whether unsaved edits may be thrown away.
+    /// Defaults to a message box; a test replaces it, because a modal dialog
+    /// blocks until somebody clicks it.
+    using Confirm = std::function<bool(const QString &question)>;
+    void setDiscardConfirmation(Confirm confirm) { m_confirmDiscard = std::move(confirm); }
 
     // How many images are open. Several can be, which is what makes
     // cross-image search meaningful.
@@ -100,11 +129,16 @@ signals:
     void errorOccurred(const QString &message);
 
 protected:
+    void closeEvent(QCloseEvent *event) override;
     void dragEnterEvent(QDragEnterEvent *event) override;
     void dropEvent(QDropEvent *event) override;
 
 private slots:
     void chooseImage();
+    void save();
+    void saveAs();
+    void newFolder();
+    void filesDropped(QTreeWidgetItem *target, const QList<QUrl> &urls);
     void extractSelected();
     void search();
 
@@ -128,6 +162,23 @@ private:
     // Show an entry in the hex and text views, from either tree.
     void showEntry(QTreeWidgetItem *item);
     const Open *imageFor(const QTreeWidgetItem *item) const;
+    Open *imageFor(const QTreeWidgetItem *item);
+    // The disk Save, Undo and the rest act on: the selection's, else the one
+    // last edited, else the only one open.
+    Open *editTarget();
+    // The directory block `item` stands for, as a place to put things: itself
+    // if a directory, its parent if a file, the root for a disk's own row.
+    // Zero when it is not on a disk ADE can write into.
+    quint32 directoryFor(const QTreeWidgetItem *item, const Open &open) const;
+    // One host path onto the disk, folders recursively, counting what was
+    // made and collecting what was refused.
+    void addPath(Open &open, quint32 dir, const QString &path, int depth, int *made,
+                 QStringList *refused);
+    // Rebuild a disk's rows after it changed, keeping open what was open.
+    void reloadImage(Open &open);
+    void updateEditActions();
+    // Whether unsaved edits may be thrown away: true when there are none.
+    bool mayDiscardEdits();
     // A file entry's bytes, or empty for a directory or an unreadable one.
     void showHit(QTreeWidgetItem *item);
     void showWholeDisk(QTreeWidgetItem *item);
@@ -187,4 +238,13 @@ private:
     QAction *m_carve = nullptr;
     QAction *m_specs = nullptr;
     QAction *m_surface = nullptr;
+    QAction *m_save = nullptr;
+    QAction *m_saveAs = nullptr;
+    QAction *m_undo = nullptr;
+    QAction *m_redo = nullptr;
+    QAction *m_newFolder = nullptr;
+    /// The disk most recently edited, which Save and Undo fall back to when
+    /// nothing is selected.
+    size_t m_lastEdited = static_cast<size_t>(-1);
+    Confirm m_confirmDiscard;
 };

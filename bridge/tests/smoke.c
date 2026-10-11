@@ -288,7 +288,48 @@ int main(int argc, char **argv) {
               "LNFS is refused");
         AdeImage *fresh = ade_image_open(argv[3], NULL, NULL);
         check(fresh != NULL && ade_image_has_volume(fresh), "and it holds a volume");
+
+        /* Writing into it (D-018): in memory, then only ever to a new file. */
+        uint32_t root = ade_image_root_block(fresh);
+        const uint8_t dir_name[] = "FromC";
+        AdeBytes dir = { dir_name, sizeof dir_name - 1 };
+        uint32_t made_dir = 0;
+        char *why = NULL;
+        check(ade_edit_mkdir(fresh, root, dir, &made_dir, &why) == ADE_OK && made_dir != 0,
+              "a directory is made");
+        ade_string_free(why);
+        const uint8_t file_name[] = "f\xfcr";
+        const uint8_t contents[] = "written through the C ABI";
+        AdeBytes file = { file_name, sizeof file_name - 1 };
+        AdeBytes data = { contents, sizeof contents - 1 };
+        check(ade_edit_add_file(fresh, made_dir, file, data, NULL, NULL) == ADE_OK,
+              "a file with a Latin-1 name is added inside it");
+        check(ade_image_is_modified(fresh), "the image says it is modified");
+        AdeListing *listing = ade_dir_open(fresh, ADE_WHOLE_IMAGE, made_dir);
+        check(listing && ade_listing_count(listing) == 1, "and lists the edit at once");
+        ade_listing_free(listing);
+
+        why = NULL;
+        check(ade_image_save_as(fresh, argv[3], &why) == ADE_REFUSED && why != NULL,
+              "saving over the original is refused, with a reason");
+        if (why) printf("        (%s)\n", why);
+        ade_string_free(why);
+
+        char saved[4096];
+        snprintf(saved, sizeof saved, "%s.edited", argv[3]);
+        remove(saved);
+        check(ade_image_save_as(fresh, saved, NULL) == ADE_OK, "Save As writes a new file");
+        check(!ade_image_is_modified(fresh), "and the image is no longer modified");
+        char *where = ade_image_save_destination(fresh);
+        check(where && strcmp(where, saved) == 0, "and remembers where it saved");
+        ade_string_free(where);
         ade_image_free(fresh);
+
+        AdeImage *reopened = ade_image_open(saved, NULL, NULL);
+        check(reopened && ade_image_finding_count(reopened) == 0,
+              "the saved disk opens with no findings");
+        ade_image_free(reopened);
+        remove(saved);
     }
 
     ade_image_free(image);

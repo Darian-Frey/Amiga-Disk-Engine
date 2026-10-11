@@ -11,6 +11,42 @@ Effort vocabulary: trivial | small | medium | large.
 
 ## Suggested
 
+### IMP-014 A drop of twenty files is twenty undo steps
+**Status:** suggested
+**Effort:** small
+
+**Where:** `gui/src/MainWindow.cpp`, `addFiles`, over `ade_core::edit::Session`.
+
+**What it does.** Each file or folder a drop copies is its own edit, so undoing a drop of twenty files takes twenty presses of Undo — and a drop that partly failed leaves the successful part as that many separate steps. Found 2026-10-11 writing F-031.
+
+**What would be better.** A session-level group: `begin_group` / `end_group`, collapsing the snapshots taken in between into one undo step, exposed through the ABI. The window wraps each drop in one.
+
+**Trade-offs.** One more piece of state in the session and two more calls in the ABI, for something a person meets only on multi-file drops. Against: a person who drops a folder by mistake expects one Undo to take it back, and twenty is how a tool teaches people not to trust its undo.
+
+### IMP-013 `cargo doc --workspace` writes two crates called `ade` into the same place
+**Status:** suggested
+**Effort:** trivial
+
+**Where:** `cli/Cargo.toml` (binary `ade`) and `bridge/Cargo.toml` (library `ade`).
+
+**What happens.** `cargo doc --workspace --no-deps` warns `output filename collision at target/doc/ade/index.html`; one crate's documentation overwrites the other's, and under `RUSTDOCFLAGS="-D warnings"`, or a parallel build, it fails outright with a missing-file race. Present on `main` before F-031 — measured 2026-10-11 by documenting a clean checkout. CI does not deny doc warnings, which is why it passes.
+
+**What would be better.** `doc = false` on the CLI's `[[bin]]` — a binary's rustdoc is never read, and the bridge's is the one that documents an API.
+
+**Trade-offs.** None worth the name; the CLI's internal docs remain in its source.
+
+### IMP-012 The health report does not check that each entry sits in the hash slot its name hashes to
+**Status:** suggested
+**Effort:** small
+
+**Where:** [src/api/src/health.rs](../src/api/src/health.rs).
+
+**What is missing.** An entry filed under the wrong slot is invisible to every reader that *walks* a directory — ADE's listing, `ade check`, and `unadf -r` all visit every slot — and unreachable by every reader that *looks a name up*, which is AmigaDOS itself. Found 2026-10-11 by mutation: F-031's writer with its hash function inverted passed every test, including the health report, until the test learned to read the slot directly and to ask ADFlib for files by name.
+
+**What would be better.** For each entry reached in a listing, check that `hash_name(name, ht, mode)` is the slot it was found under, and report `entry-wrong-slot` (warning) where it is not. It is the same check C-006 is about, applied to what is on the disk rather than to how ADE reads it.
+
+**Trade-offs.** A new finding code is a JSON surface change (F-015) and a schema bump. It is also a finding that real disks may carry — written by tools with the dircache trap (C-006) — so the corpus should be measured before deciding its severity, and a non-zero count is an interesting result rather than noise.
+
 ### IMP-011 Three JSON documents are built in the CLI, where D-015's inventory cannot see them
 **Status:** suggested
 **Effort:** small

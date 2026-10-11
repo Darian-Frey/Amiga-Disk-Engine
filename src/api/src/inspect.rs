@@ -1223,6 +1223,24 @@ pub fn entry_to_json_hashed(entry: &Entry, path: &[Vec<u8>], sha1: Option<&str>)
     Value::Obj(fields)
 }
 
+/// The volume geometry of an image whose file *is* its blocks: a plain ADF or
+/// an unpartitioned hardfile.
+///
+/// `None` for anything else — a compressed or flux container, whose blocks
+/// are ADE's reconstruction rather than the file, or a partitioned device,
+/// whose volumes are windows onto it. The write suite (D-018) uses this to
+/// decide what it can edit and save back in the same form.
+pub(crate) fn plain_volume_geometry(bytes: &[u8]) -> Option<(Kind, Geometry)> {
+    let size = bytes.len() as u64;
+    let head = bytes.get(..HEAD_BYTES.min(bytes.len())).unwrap_or(&[]);
+    let kind = sniff(head, size).kind;
+    if !matches!(kind, Kind::Adf { .. } | Kind::Hardfile) {
+        return None;
+    }
+    let geometry = geometry_for(kind, size)?.ok()?;
+    Some((kind, volume_geometry(bytes, geometry)))
+}
+
 /// The geometry to mount a detected container with, if ADE can mount it.
 ///
 /// A raw volume — a hardfile — carries no geometry of its own. Heads and
