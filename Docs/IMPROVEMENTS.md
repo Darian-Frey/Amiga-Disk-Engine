@@ -23,18 +23,6 @@ Effort vocabulary: trivial | small | medium | large.
 
 **Trade-offs.** One more piece of state in the session and two more calls in the ABI, for something a person meets only on multi-file drops. Against: a person who drops a folder by mistake expects one Undo to take it back, and twenty is how a tool teaches people not to trust its undo.
 
-### IMP-013 `cargo doc --workspace` writes two crates called `ade` into the same place
-**Status:** suggested
-**Effort:** trivial
-
-**Where:** `cli/Cargo.toml` (binary `ade`) and `bridge/Cargo.toml` (library `ade`).
-
-**What happens.** `cargo doc --workspace --no-deps` warns `output filename collision at target/doc/ade/index.html`; one crate's documentation overwrites the other's, and under `RUSTDOCFLAGS="-D warnings"`, or a parallel build, it fails outright with a missing-file race. Present on `main` before F-031 — measured 2026-10-11 by documenting a clean checkout. CI does not deny doc warnings, which is why it passes.
-
-**What would be better.** `doc = false` on the CLI's `[[bin]]` — a binary's rustdoc is never read, and the bridge's is the one that documents an API.
-
-**Trade-offs.** None worth the name; the CLI's internal docs remain in its source.
-
 ### IMP-012 The health report does not check that each entry sits in the hash slot its name hashes to
 **Status:** suggested
 **Effort:** small
@@ -98,6 +86,21 @@ Two cheap halves suggest themselves before anything ambitious: fill only the vis
 **Not urgent, and the number is misleading on its own.** 3.6 ms is a click, not a corpus: it took selecting 1,478 files in a loop to make it visible at all. Unlike [[imp-008]], which compounded into 35 seconds because it was quadratic in the whole tree, this is linear and bounded by what one person can click. It is recorded because it was measured, not because it hurts.
 
 ## Applied
+
+### IMP-013 `cargo doc --workspace` writes two crates called `ade` into the same place
+**Status:** applied
+**Effort:** trivial
+
+**Where:** `cli/Cargo.toml` (binary `ade`) and `bridge/Cargo.toml` (library `ade`).
+
+**What happens.** `cargo doc --workspace --no-deps` warns `output filename collision at target/doc/ade/index.html`; one crate's documentation overwrites the other's, and under `RUSTDOCFLAGS="-D warnings"`, or a parallel build, it fails outright with a missing-file race. Present on `main` before F-031 — measured 2026-10-11 by documenting a clean checkout. CI does not deny doc warnings, which is why it passes.
+
+**What would be better.** `doc = false` on the CLI's `[[bin]]` — a binary's rustdoc is never read, and the bridge's is the one that documents an API.
+
+**Trade-offs.** None worth the name; the CLI's internal docs remain in its source.
+
+**Applied 2026-10-22, after it broke CI.** The race fired on GitHub Actions for `f97aa6c`: `cargo doc` failed with `failed to remove directory target/doc/ade`. It had been passing by luck of timing, which is why the warning sat unlogged until this register entry and then sat suggested. `doc = false` on the CLI's `[[bin]]`; six cold runs of the CI doc step pass with no collision warning, and `target/doc/ade` is the bridge's API. **A warning that names a race is a failure that has not happened yet** — this one was printed on every CI run since the bridge was added.
+
 
 ### IMP-008 A directory expansion costs 9 ms, and it is not the bytes
 **Status:** applied

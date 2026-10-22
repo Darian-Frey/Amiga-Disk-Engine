@@ -19,3 +19,8 @@ workspace = true
 [[bin]]
 name = "ade"
 path = "src/main.rs"
+# Not documented by `cargo doc` (IMP-013). This binary and the C bridge's
+# library are both named `ade`, so both wrote target/doc/ade/ in parallel and
+# one deleted the directory under the other — cargo#6313, and a CI failure on
+# 2026-10-22. A binary's rustdoc is never read; the bridge's is the API.
+doc = false
