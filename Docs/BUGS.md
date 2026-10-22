@@ -22,9 +22,11 @@ Severity vocabulary: low | medium | high.
 
 **Not fixed here** because it is outside the change that found it (Maintenance Rule 8). `cli/tests/json_flag.rs` is the place for the test.
 
+## Fixed
+
 ### BUG-011 A path with an accented name cannot be looked up: `ade extract disk.adf für.txt` finds nothing
 **Severity:** medium
-**Status:** open
+**Status:** fixed
 **Found:** 2026-10-11, writing `ade put`, which had to avoid it.
 **Where:** [src/filesystem/src/volume.rs](../src/filesystem/src/volume.rs), `Volume::lookup`, and every command that resolves a path through it — `extract`, `ls <path>`, the CLI's `--partition` paths.
 
@@ -34,8 +36,8 @@ Severity vocabulary: low | medium | high.
 
 **Correct behaviour.** Convert each component to Latin-1 before comparing, refusing a character with no Latin-1 byte — what `ade_core::edit::amiga_name` and `Session::directory` already do. That is the fix to lift into `lookup`, or into a byte-taking variant beside it.
 
+**Fixed 2026-10-22.** `lookup` converts each component to Latin-1 before comparing, and a component with no Latin-1 form is not found rather than matched against something. `Session::directory`'s component-by-component workaround from F-031 is gone; it calls `lookup` again. Two regression tests, both shown to fail on the old code: `an_accented_path_is_found_by_name` across all six dostypes — including that accented letters fold case only on an international volume (C-006) — and `a_file_put_under_an_accented_name_extracts_by_that_name` from the command line.
 
-## Fixed
 
 ### BUG-010 Any file that was not a floppy was called a hardfile
 

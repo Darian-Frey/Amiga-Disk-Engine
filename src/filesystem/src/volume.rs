@@ -400,20 +400,33 @@ impl<'a> Volume<'a> {
     /// Comparison is case-insensitive and uses the volume's hashing mode, so
     /// it matches what AmigaDOS would find.
     ///
+    /// The path is UTF-8 and the names on the disk are Latin-1, so each
+    /// component is converted before it is compared. Comparing the UTF-8
+    /// bytes directly never matched an accented name — `ü` is `C3 BC` in one
+    /// and `FC` in the other — so `extract` could not reach a file that `ls`
+    /// listed (BUG-011). A component holding a character with no Latin-1 byte
+    /// cannot name anything on an Amiga disk, and is simply not found.
+    ///
     /// # Errors
     /// [`FsError::NotFound`] or [`FsError::NotADirectory`] for a bad path.
     pub fn lookup(&self, path: &str) -> Result<Entry, FsError> {
         let mut current = self.root;
         let mut last: Option<Entry> = None;
         for component in path.split('/').filter(|c| !c.is_empty() && *c != ".") {
+            let not_found = || FsError::NotFound {
+                name: component.to_owned(),
+            };
+            let wanted: Vec<u8> = component
+                .chars()
+                .map(|c| u8::try_from(u32::from(c)))
+                .collect::<Result<_, _>>()
+                .map_err(|_| not_found())?;
             let listing = self.list(current)?;
             let found = listing
                 .entries
                 .into_iter()
-                .find(|e| self.names_match(&e.name, component.as_bytes()))
-                .ok_or_else(|| FsError::NotFound {
-                    name: component.to_owned(),
-                })?;
+                .find(|e| self.names_match(&e.name, &wanted))
+                .ok_or_else(not_found)?;
             current = if found.kind.is_directory() {
                 found.block
             } else {

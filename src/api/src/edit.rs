@@ -220,31 +220,13 @@ impl Session {
         let image = crate::Image::from_bytes(self.bytes.clone())
             .map_err(|e| EditError::NotEditable(e.to_string()))?;
         let volume = image.volume().map_err(EditError::Lookup)?;
-        // Component by component, comparing Latin-1 bytes. `Volume::lookup`
-        // takes UTF-8 and compares its bytes, which never matches an accented
-        // Amiga name.
-        let mut current = volume.root();
-        for component in path.split('/').filter(|c| !c.is_empty() && *c != ".") {
-            let not_found = || {
-                EditError::Lookup(FsError::NotFound {
-                    name: component.to_owned(),
-                })
-            };
-            let wanted = amiga_name(component).map_err(|_| not_found())?;
-            let listing = volume.list(current).map_err(EditError::Lookup)?;
-            let entry = listing
-                .entries
-                .iter()
-                .find(|e| volume.names_match(&e.name, &wanted))
-                .ok_or_else(not_found)?;
-            if !entry.kind.is_directory() {
-                return Err(EditError::Lookup(FsError::NotADirectory {
-                    name: entry.name_lossy(),
-                }));
-            }
-            current = entry.block;
+        let entry = volume.lookup(path).map_err(EditError::Lookup)?;
+        if !entry.kind.is_directory() {
+            return Err(EditError::Lookup(FsError::NotADirectory {
+                name: entry.name_lossy(),
+            }));
         }
-        Ok(current)
+        Ok(entry.block)
     }
 
     /// Make an empty directory in the directory at `parent`.

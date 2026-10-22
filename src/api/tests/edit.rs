@@ -696,3 +696,45 @@ fn refusal_kind(e: &FsEditError) -> String {
         other => format!("{other}"),
     }
 }
+
+#[test]
+fn an_accented_path_is_found_by_name() {
+    // BUG-011: `Volume::lookup` compared a path's UTF-8 bytes against Latin-1
+    // names, so `ü` (C3 BC) never matched `ü` (FC) and `ade extract` could not
+    // reach a file `ade ls` listed. Built with ADE's writer, whose Latin-1
+    // placement ADFlib confirms above, because the fixture generator writes
+    // names as UTF-8 and cannot make this disk.
+    for flags in FLAGS {
+        let mut s = session(flags);
+        let root = s.root();
+        let dir = s.make_dir(root, b"Gr\xF6\xDFe").unwrap();
+        s.add_file(dir, b"f\xFCr.txt", b"accented").unwrap();
+
+        let image = ade_core::Image::from_bytes(s.bytes().to_vec()).unwrap();
+        let volume = image.volume().unwrap();
+        let entry = volume
+            .lookup("Größe/für.txt")
+            .unwrap_or_else(|e| panic!("DOS\\{flags}: an accented path should resolve: {e}"));
+        assert_eq!(volume.read_file(&entry).unwrap().into_bytes(), b"accented");
+
+        // Case folds the way the volume folds: ASCII on every volume, the
+        // accented letters only where the hash is international (C-006).
+        assert!(volume.lookup("GRÖSSE/für.txt").is_err(), "ß is not SS");
+        assert!(
+            volume.lookup("größe/FüR.TXT").is_ok(),
+            "ASCII case folds everywhere"
+        );
+        assert_eq!(
+            volume.lookup("GRÖßE/FÜR.TXT").is_ok(),
+            flags >= 2,
+            "DOS\\{flags}: accented case folds only on an international volume"
+        );
+
+        // A character with no Latin-1 byte cannot name anything on the disk.
+        assert!(matches!(
+            volume.lookup("日本"),
+            Err(ade_core::layers::filesystem::volume::FsError::NotFound { .. })
+        ));
+        assert_eq!(s.directory("Größe").unwrap(), dir);
+    }
+}

@@ -194,3 +194,32 @@ fn a_refusal_writes_nothing() {
     assert!(!out.exists());
     let _ = fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn a_file_put_under_an_accented_name_extracts_by_that_name() {
+    // BUG-011, from the command line: `ls` listed `für.txt` and `extract`
+    // said "no such entry".
+    let dir = scratch("accent");
+    let image = disk(&dir);
+    let host = dir.join("für.txt");
+    fs::write(&host, b"umlaut").unwrap();
+    let edited = dir.join("edited.adf");
+    let (_, err, code) = run(&[
+        "put",
+        &image,
+        host.to_str().unwrap(),
+        &format!("--output={}", edited.display()),
+    ]);
+    assert_eq!(code, Some(0), "{err}");
+
+    let out = dir.join("back.txt");
+    let (_, err, code) = run(&[
+        "extract",
+        edited.to_str().unwrap(),
+        "für.txt",
+        out.to_str().unwrap(),
+    ]);
+    assert_eq!(code, Some(0), "{err}");
+    assert_eq!(fs::read(&out).unwrap(), b"umlaut");
+    let _ = fs::remove_dir_all(&dir);
+}
