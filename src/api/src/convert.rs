@@ -401,3 +401,32 @@ pub fn encode_raw_mfm(sectors: &[u8]) -> Result<Vec<u8>, String> {
         .collect();
     extended::write(&sources).map_err(|e| e.to_string())
 }
+
+/// What `ade convert --format=json` reports (F-015, BUG-012).
+///
+/// The same fields as one row of [`matrix_json`], so a script reads a
+/// conversion it asked for exactly as it reads one it looked up, plus what
+/// was written.
+#[must_use]
+pub fn converted_json(
+    from: Kind,
+    to: Kind,
+    raw: bool,
+    written: &std::path::Path,
+    bytes: u64,
+) -> Value {
+    let to_label = if raw {
+        "extended ADF (raw MFM tracks)".to_owned()
+    } else {
+        to.to_string()
+    };
+    Value::Obj(vec![
+        ("from", Value::str(from.code())),
+        ("to", Value::str(to.code())),
+        ("from_label", Value::str(from.to_string())),
+        ("to_label", Value::str(to_label)),
+        ("conversion", conversion(from, to).to_json()),
+        ("written", Value::str(written.to_string_lossy())),
+        ("bytes", Value::Num(bytes)),
+    ])
+}

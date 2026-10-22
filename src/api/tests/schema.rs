@@ -593,3 +593,90 @@ fn the_batch_summary_emits_exactly_these_fields() {
         ],
     );
 }
+
+// --- The three documents BUG-012 added (schema 1.10 → 1.11) ---------------
+
+#[test]
+fn create_emits_exactly_these_fields() {
+    let json =
+        ade_core::create::created_json(std::path::Path::new("x.adf"), "ffs-intl", "Empty", 901_120)
+            .versioned();
+    compare(
+        "create",
+        &paths(&json),
+        &["schema", "written", "bytes", "type", "volume"],
+    );
+}
+
+#[test]
+fn convert_emits_exactly_these_fields() {
+    use ade_core::layers::container::Kind;
+    let json = ade_core::convert::converted_json(
+        Kind::Adf {
+            cylinders: 80,
+            sectors: 11,
+        },
+        Kind::Hardfile,
+        false,
+        std::path::Path::new("x.hdf"),
+        901_120,
+    )
+    .versioned();
+    compare(
+        "convert",
+        &paths(&json),
+        &[
+            "schema",
+            "from",
+            "to",
+            "from_label",
+            "to_label",
+            "conversion",
+            "conversion.kind",
+            "conversion.possible",
+            "conversion.reason",
+            "written",
+            "bytes",
+        ],
+    );
+}
+
+#[test]
+fn extract_emits_exactly_these_fields() {
+    use ade_core::layers::filesystem::volume::{DataFault, DataFaultKind, FileContents};
+    // A read with a fault in it, so the fault's fields are inventoried too.
+    let contents = FileContents {
+        bytes: vec![0; 10],
+        declared_size: 20,
+        short_by: 10,
+        exceeded_volume: false,
+        faults: vec![DataFault {
+            kind: DataFaultKind::Zeroed,
+            first_block: 900,
+            first_index: 1,
+            count: 1,
+        }],
+    };
+    let json =
+        ade_core::unpack::extracted_json("a", std::path::Path::new("out"), &contents).versioned();
+    compare(
+        "extract",
+        &paths(&json),
+        &[
+            "schema",
+            "path",
+            "written",
+            "bytes",
+            "declared_size",
+            "complete",
+            "short_by",
+            "exceeded_volume",
+            "faults",
+            "faults[].code",
+            "faults[].first_block",
+            "faults[].first_index",
+            "faults[].count",
+            "faults[].message",
+        ],
+    );
+}

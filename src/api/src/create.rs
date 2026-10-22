@@ -231,3 +231,18 @@ pub fn blank(
     }
     std::fs::write(path, &bytes).map_err(CreateError::Io)
 }
+
+/// What `ade create --format=json` reports (F-015, BUG-012).
+///
+/// The disk that was made, by the names a script would pass back in: the
+/// type by its code (`ffs-intl`), not its label.
+#[must_use]
+pub fn created_json(path: &Path, type_name: &str, volume: &str, bytes: u64) -> crate::json::Value {
+    use crate::json::Value;
+    Value::Obj(vec![
+        ("written", Value::str(path.to_string_lossy())),
+        ("bytes", Value::Num(bytes)),
+        ("type", Value::str(type_name.to_ascii_lowercase())),
+        ("volume", Value::str(volume)),
+    ])
+}

@@ -10,9 +10,13 @@ Severity vocabulary: low | medium | high.
 
 ## Open
 
+_None._
+
+## Fixed
+
 ### BUG-012 `create`, `convert` and single-file `extract` accept `--format=json` and ignore it
 **Severity:** low
-**Status:** open
+**Status:** fixed
 **Found:** 2026-10-11, adding `mkdir` and `put` and checking them against BUG-007.
 **Where:** [cli/src/main.rs](../cli/src/main.rs), the `create`, `convert` and two-argument `extract` arms.
 
@@ -22,7 +26,10 @@ Severity vocabulary: low | medium | high.
 
 **Not fixed here** because it is outside the change that found it (Maintenance Rule 8). `cli/tests/json_flag.rs` is the place for the test.
 
-## Fixed
+**Fixed 2026-10-22, by emitting rather than refusing.** BUG-007 called emitting the better contract and refusing the honest interim; these three have obvious records. `create` reports what it wrote, its type and volume name; `convert` reports the same `from`, `to`, labels and `conversion` fields as a row of `formats`, plus what it wrote — and in JSON the verdict travels inside the document rather than as a prose line before it; `extract` to a file reports the bytes recovered against the declared size, `complete`, and each structural fault with a stable code (`data-block-zeroed`, `-wrong-type`, `-wrong-owner`, `-out-of-sequence`, `-oversized`). `extract` to stdout cannot report, since stdout is the file, and refuses with exit 2. All three are built in the API and inventoried, so IMP-011's trap is not repeated; schema **1.10 → 1.11**.
+
+**The class, not just the instance.** `every_command_either_emits_json_or_refuses_it` reads the command list from `ade --help` and requires each to be classified and to behave as classified, so the next command added without a decision about the flag fails the build. Shown to catch BUG-012 by putting it back.
+
 
 ### BUG-011 A path with an accented name cannot be looked up: `ade extract disk.adf für.txt` finds nothing
 **Severity:** medium

@@ -307,22 +307,9 @@ fn main() -> ExitCode {
             args.format,
             args.partition.as_deref(),
         ),
-        ("extract", 2) => extract(Path::new(p(0)), p(1), None, args.partition.as_deref()),
-        ("extract", 3) => extract(
-            Path::new(p(0)),
-            p(1),
-            Some(PathBuf::from(p(2))),
-            args.partition.as_deref(),
-        ),
-        ("convert", 2) => convert(Path::new(p(0)), Path::new(p(1)), args.raw),
-        ("create", 1) => create(
-            Path::new(p(0)),
-            args.volume_name.as_deref(),
-            args.volume_type.as_deref(),
-            args.hd,
-            args.dd525,
-            args.size,
-        ),
+        ("extract", 2 | 3) => extract(&args),
+        ("convert", 2) => convert(Path::new(p(0)), Path::new(p(1)), args.raw, args.format),
+        ("create", 1) => create(&args),
         ("mkdir" | "put", _) => edit_command(&args),
         ("disasm", 1 | 2) => disasm(&args),
         ("scan", 1) => scan(Path::new(p(0)), args.format),
@@ -1187,7 +1174,21 @@ fn list(
 }
 
 /// Extract one file to disk, or to stdout when no destination is given.
-fn extract(path: &Path, inner: &str, dest: Option<PathBuf>, partition: Option<&str>) -> ExitCode {
+fn extract(args: &Args) -> ExitCode {
+    let p = |n: usize| args.positional.get(n).map_or("", String::as_str);
+    let path = Path::new(p(0));
+    let inner = p(1);
+    let dest = args.positional.get(2).map(PathBuf::from);
+    let partition = args.partition.as_deref();
+    // The file's bytes go to stdout when there is no destination, so there is
+    // nowhere for a JSON report to go: refused, not ignored (BUG-012).
+    if args.format == Format::Json && dest.is_none() {
+        eprintln!(
+            "ade: extract writes the file to stdout without a destination; give one for a \
+             JSON report"
+        );
+        return ExitCode::from(EXIT_USAGE);
+    }
     let image = match Image::open(path) {
         Ok(i) => i,
         Err(e) => {
@@ -1242,6 +1243,10 @@ fn extract(path: &Path, inner: &str, dest: Option<PathBuf>, partition: Option<&s
         eprintln!("ade: {inner}: {fault}");
     }
     let incomplete = !data.is_complete();
+    let report = dest
+        .as_ref()
+        .filter(|_| args.format == Format::Json)
+        .map(|out| ade_core::unpack::extracted_json(inner, out, &data));
     let data = data.into_bytes();
 
     if let Some(out) = dest {
@@ -1249,7 +1254,14 @@ fn extract(path: &Path, inner: &str, dest: Option<PathBuf>, partition: Option<&s
             eprintln!("ade: {}: {e}", out.display());
             return ExitCode::from(EXIT_UNREADABLE);
         }
-        eprintln!("{} bytes -> {}", data.len(), out.display());
+        match report {
+            Some(json) => {
+                let mut stdout = std::io::stdout().lock();
+                emit_json(&mut stdout, json);
+                let _ = stdout.flush();
+            }
+            None => eprintln!("{} bytes -> {}", data.len(), out.display()),
+        }
     } else {
         let mut stdout = std::io::stdout().lock();
         // A closed pipe here is ordinary: `ade extract ... | head -c 100`.
@@ -1498,7 +1510,7 @@ fn kind_from_extension(path: &Path) -> Option<ade_core::layers::container::Kind>
 
 /// Convert one container into another, refusing anything that would lose data
 /// silently (F-016).
-fn convert(input: &Path, output: &Path, raw: bool) -> ExitCode {
+fn convert(input: &Path, output: &Path, raw: bool, format: Format) -> ExitCode {
     let bytes = match std::fs::read(input) {
         Ok(b) => b,
         Err(e) => {
@@ -1535,10 +1547,14 @@ fn convert(input: &Path, output: &Path, raw: bool) -> ExitCode {
     } else {
         to.to_string()
     };
-    emit_lines(
-        &mut std::io::stdout().lock(),
-        &[format!("{from}  ->  {target}"), format!("  {verdict}")],
-    );
+    // In JSON the verdict travels in the one document written at the end;
+    // printed here as well it would be a second, unversioned line of output.
+    if format == Format::Text {
+        emit_lines(
+            &mut std::io::stdout().lock(),
+            &[format!("{from}  ->  {target}"), format!("  {verdict}")],
+        );
+    }
 
     // The verdict above is printed for a person; the engine decides again
     // below and is the one that governs. Two computations of one cheap answer,
@@ -1572,32 +1588,36 @@ fn convert(input: &Path, output: &Path, raw: bool) -> ExitCode {
         eprintln!("ade: {}: {e}", output.display());
         return ExitCode::from(EXIT_UNREADABLE);
     }
-    emit_lines(
-        &mut std::io::stdout().lock(),
-        &[format!(
-            "  wrote {} bytes to {}",
-            out_bytes.len(),
-            output.display()
-        )],
-    );
+    let mut stdout = std::io::stdout().lock();
+    if format == Format::Json {
+        emit_json(
+            &mut stdout,
+            ade_core::convert::converted_json(from, to, raw, output, out_bytes.len() as u64),
+        );
+        let _ = stdout.flush();
+    } else {
+        emit_lines(
+            &mut stdout,
+            &[format!(
+                "  wrote {} bytes to {}",
+                out_bytes.len(),
+                output.display()
+            )],
+        );
+    }
     ExitCode::from(EXIT_CLEAN)
 }
 
-/// Print the conversion matrix (F-016).
 /// Make a blank formatted disk (F-019).
 ///
 /// The first write path ADE ships, and the safest one there is: it produces a
 /// new file and touches nothing that exists, which is the irreversible damage
 /// D-004 is about. Refuses to overwrite, like `convert`.
-fn create(
-    output: &Path,
-    name: Option<&str>,
-    kind: Option<&str>,
-    hd: bool,
-    dd525: bool,
-    size: Option<u64>,
-) -> ExitCode {
+fn create(args: &Args) -> ExitCode {
     use ade_core::create::{self, Shape};
+    let output = Path::new(args.positional.first().map_or("", String::as_str));
+    let (name, kind) = (args.volume_name.as_deref(), args.volume_type.as_deref());
+    let (hd, dd525, size) = (args.hd, args.dd525, args.size);
 
     // Which filesystems exist and what each disk shape is are the engine's to
     // know, not a front end's: the GUI asks the same questions and two front
@@ -1644,13 +1664,22 @@ fn create(
     }
 
     let size = std::fs::metadata(output).map_or(0, |m| m.len());
-    emit_lines(
-        &mut std::io::stdout().lock(),
-        &[
-            format!("{type_name}  ->  {}", output.display()),
-            format!("  {size} bytes, volume \"{volume}\""),
-        ],
-    );
+    let mut stdout = std::io::stdout().lock();
+    if args.format == Format::Json {
+        emit_json(
+            &mut stdout,
+            create::created_json(output, type_name, volume, size),
+        );
+        let _ = stdout.flush();
+    } else {
+        emit_lines(
+            &mut stdout,
+            &[
+                format!("{type_name}  ->  {}", output.display()),
+                format!("  {size} bytes, volume \"{volume}\""),
+            ],
+        );
+    }
     ExitCode::from(EXIT_CLEAN)
 }
 
@@ -2225,6 +2254,7 @@ fn find(path: &Path, pattern: &str, format: Format, text: bool, ignore_case: boo
     })
 }
 
+/// Print the conversion matrix (F-016).
 fn formats(format: Format) -> ExitCode {
     if format == Format::Json {
         let mut out = std::io::stdout().lock();

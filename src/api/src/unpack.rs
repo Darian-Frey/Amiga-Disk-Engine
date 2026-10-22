@@ -227,3 +227,61 @@ fn under(dest: &Path, path: &str) -> PathBuf {
     }
     target
 }
+
+/// The stable code for a structural fault in a file's data (F-015).
+///
+/// Part of the JSON surface: these may not be renamed without a decision
+/// entry, where the message beside them may be reworded freely.
+#[must_use]
+pub const fn data_fault_code(kind: &ade_filesystem::volume::DataFaultKind) -> &'static str {
+    use ade_filesystem::volume::DataFaultKind;
+    match kind {
+        DataFaultKind::Zeroed => "data-block-zeroed",
+        DataFaultKind::NotADataBlock { .. } => "data-block-wrong-type",
+        DataFaultKind::WrongOwner { .. } => "data-block-wrong-owner",
+        DataFaultKind::OutOfSequence { .. } => "data-block-out-of-sequence",
+        DataFaultKind::OversizedLength { .. } => "data-block-oversized",
+    }
+}
+
+/// What `ade extract <image> <path> <dest> --format=json` reports (F-015,
+/// BUG-012).
+///
+/// The bytes are in the destination file; this is what a script needs to
+/// decide whether to trust them. `complete` is the one-word answer, and the
+/// rest says why not: fewer bytes than the header declared, a chain that ran
+/// past the volume, or data blocks that do not agree with their file.
+#[must_use]
+pub fn extracted_json(
+    path: &str,
+    written: &Path,
+    contents: &ade_filesystem::volume::FileContents,
+) -> crate::json::Value {
+    use crate::json::Value;
+    let faults = contents
+        .faults
+        .iter()
+        .map(|f| {
+            Value::Obj(vec![
+                ("code", Value::str(data_fault_code(&f.kind))),
+                ("first_block", Value::Num(u64::from(f.first_block))),
+                ("first_index", Value::Num(u64::from(f.first_index))),
+                ("count", Value::Num(u64::from(f.count))),
+                ("message", Value::str(f.to_string())),
+            ])
+        })
+        .collect();
+    Value::Obj(vec![
+        ("path", Value::str(path)),
+        ("written", Value::str(written.to_string_lossy())),
+        ("bytes", Value::Num(contents.bytes.len() as u64)),
+        (
+            "declared_size",
+            Value::Num(u64::from(contents.declared_size)),
+        ),
+        ("complete", Value::Bool(contents.is_complete())),
+        ("short_by", Value::Num(u64::from(contents.short_by))),
+        ("exceeded_volume", Value::Bool(contents.exceeded_volume)),
+        ("faults", Value::Arr(faults)),
+    ])
+}
