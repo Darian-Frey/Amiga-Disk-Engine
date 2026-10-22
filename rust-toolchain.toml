@@ -10,5 +10,5 @@
 # latest stable and reports without blocking, so the bump is scheduled rather
 # than sprung.
 [toolchain]
-channel = "1.98.0"
+channel = "1.99.1"
 components = ["rustfmt", "clippy"]

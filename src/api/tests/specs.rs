@@ -34,7 +34,10 @@ fn every_claim_carries_its_evidence() {
 
     assert!(!specs.facts.is_empty());
     for fact in &specs.facts {
-        assert!(!fact.what.trim().is_empty());
+        assert!(
+            !fact.what.trim().is_empty(),
+            "`fact.what.trim()` should not be empty"
+        );
         assert!(
             !fact.because.trim().is_empty(),
             "no evidence for: {}",
@@ -127,7 +130,7 @@ fn a_disk_that_says_nothing_gets_no_kickstart_claim() {
     v.add_file("data", &vec![0x42u8; 2000]);
     let specs = read(&v.build());
     assert!(!says(&specs, "Kickstart 2.0"));
-    assert!(specs.libraries.is_empty());
+    assert!(specs.libraries.is_empty(), "{:?}", specs.libraries);
 }
 
 #[test]
@@ -137,7 +140,7 @@ fn what_cannot_be_known_is_listed_with_its_reason() {
     // disk runs on anything.
     assert!(UNKNOWABLE.len() >= 4);
     for (what, why) in UNKNOWABLE {
-        assert!(!what.is_empty());
+        assert!(!what.is_empty(), "`what` should not be empty");
         assert!(why.len() > 30, "{what}: a reason, not a shrug");
     }
     let named: Vec<&str> = UNKNOWABLE.iter().map(|(w, _)| *w).collect();

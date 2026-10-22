@@ -134,7 +134,8 @@ fn overlapping_occurrences_are_all_reported() {
 fn case_is_significant_unless_it_is_waived() {
     let bytes = b"Workbench".to_vec();
     let exact = Pattern::parse("workbench", false, false).unwrap();
-    assert!(search(&bytes, &exact, BLOCK).is_empty());
+    let got = search(&bytes, &exact, BLOCK);
+    assert!(got.is_empty(), "{got:?}");
 
     let loose = Pattern::parse("workbench", false, true).unwrap();
     assert_eq!(search(&bytes, &loose, BLOCK).len(), 1);
@@ -144,12 +145,14 @@ fn case_is_significant_unless_it_is_waived() {
 fn a_pattern_longer_than_the_image_matches_nothing() {
     // Rather than panicking on the window arithmetic (D-006).
     let bytes = vec![0u8; 3];
-    assert!(search(&bytes, &parse("a much longer pattern"), BLOCK).is_empty());
+    let got = search(&bytes, &parse("a much longer pattern"), BLOCK);
+    assert!(got.is_empty(), "{got:?}");
 }
 
 #[test]
 fn an_empty_image_matches_nothing() {
-    assert!(search(&[], &parse("anything"), BLOCK).is_empty());
+    let got = search(&[], &parse("anything"), BLOCK);
+    assert!(got.is_empty(), "{got:?}");
 }
 
 #[test]

@@ -169,7 +169,7 @@ fn a_track_survives_a_drive_running_off_speed() {
 #[test]
 fn empty_flux_yields_empty_bits() {
     let stream = to_bits(&[], NOMINAL_CELL_TICKS);
-    assert!(stream.bits.is_empty());
+    assert!(stream.bits.is_empty(), "{:?}", stream.bits);
     assert_eq!(stream.out_of_range, 0);
 }
 

@@ -112,7 +112,7 @@ fn an_empty_description_is_still_a_description() {
     let inspection = inspect_bytes(disk_with("FILE_ID.DIZ", b""));
     let description = inspection.description.expect("found");
 
-    assert!(description.text.is_empty());
+    assert!(description.text.is_empty(), "{:?}", description.text);
     assert_eq!(description.declared_size, 0);
 }
 

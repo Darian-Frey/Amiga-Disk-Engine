@@ -150,7 +150,8 @@ fn a_cache_spanning_several_blocks_is_followed() {
     );
     assert_eq!(chain.records().len(), 60);
     assert_eq!(entries.len(), 60);
-    assert!(dircache::compare(&chain.records(), &entries).is_empty());
+    let got = dircache::compare(&chain.records(), &entries);
+    assert!(got.is_empty(), "{got:?}");
 
     // Each block should declare what it actually holds.
     for block in &chain.blocks {

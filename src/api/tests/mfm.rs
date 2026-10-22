@@ -263,7 +263,7 @@ fn a_truncated_sector_is_not_reported_as_one() {
 
     let decoded = decode_track(&track);
 
-    assert!(decoded.sectors.is_empty());
+    assert!(decoded.sectors.is_empty(), "{:?}", decoded.sectors);
     assert_eq!(decoded.stray_syncs, 1);
 }
 

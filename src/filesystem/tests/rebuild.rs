@@ -100,8 +100,10 @@ fn a_rebuilt_bitmap_describes_exactly_what_the_tree_reaches() {
         &reach,
         "a rebuilt bitmap must describe the set it was built from"
     );
-    assert!(read_back.orphaned(&reach).is_empty());
-    assert!(read_back.referenced_but_free(&reach).is_empty());
+    let got = read_back.orphaned(&reach);
+    assert!(got.is_empty(), "{got:?}");
+    let got = read_back.referenced_but_free(&reach);
+    assert!(got.is_empty(), "{got:?}");
 }
 
 #[test]
@@ -182,7 +184,8 @@ fn a_rebuild_repairs_a_bitmap_that_marks_live_data_free() {
     };
     let v2 = Volume::mount(&m2).unwrap();
     let fixed = Bitmap::read(&m2, v2.geometry(), v2.rootblock()).unwrap();
-    assert!(fixed.referenced_but_free(&reach).is_empty());
+    let got = fixed.referenced_but_free(&reach);
+    assert!(got.is_empty(), "{got:?}");
     assert!(fixed.is_allocated(file));
 }
 

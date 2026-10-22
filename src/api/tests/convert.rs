@@ -126,7 +126,10 @@ fn every_pair_has_an_answer_and_every_refusal_has_a_reason() {
                     assert!(!why.is_empty(), "{from} -> {to} gives no reason");
                 }
             }
-            assert!(!verdict.label().is_empty());
+            assert!(
+                !verdict.label().is_empty(),
+                "`verdict.label()` should not be empty"
+            );
         }
     }
 

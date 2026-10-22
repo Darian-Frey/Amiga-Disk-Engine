@@ -69,7 +69,11 @@ fn a_plurality_wins_and_is_reported_as_resolved() {
     assert_eq!(report.tracks.len(), 1);
     assert_eq!(report.tracks[0].track, 100 / 11);
     assert_eq!(report.tracks[0].disputed, vec![100 % 11]);
-    assert!(report.tracks[0].unresolved.is_empty());
+    assert!(
+        report.tracks[0].unresolved.is_empty(),
+        "{:?}",
+        report.tracks[0].unresolved
+    );
 }
 
 #[test]
@@ -163,7 +167,7 @@ fn diffing_identical_images_finds_nothing() {
     let report = diff(&a, &a).unwrap();
 
     assert!(report.is_identical());
-    assert!(report.sectors.is_empty());
+    assert!(report.sectors.is_empty(), "{:?}", report.sectors);
     assert_eq!(report.sectors_total, 1760);
 }
 

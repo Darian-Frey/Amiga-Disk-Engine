@@ -108,7 +108,8 @@ fn unknown_content_matches_nothing() {
     let mut catalogue = Catalogue::default();
     catalogue.add(&datfile(&[("Known", 4, 0x1234_5678)]), "s");
 
-    assert!(catalogue.identify(b"never seen before").is_empty());
+    let got = catalogue.identify(b"never seen before");
+    assert!(got.is_empty(), "{got:?}");
 }
 
 #[test]
@@ -143,7 +144,8 @@ fn a_hash_match_with_the_wrong_size_is_rejected() {
     let mut catalogue = Catalogue::default();
     catalogue.add(&datfile(&[("Wrong Size", 999_999, crc32(&bytes))]), "s");
 
-    assert!(catalogue.identify(&bytes).is_empty());
+    let got = catalogue.identify(&bytes);
+    assert!(got.is_empty(), "{got:?}");
 }
 
 #[test]
@@ -191,8 +193,11 @@ fn the_real_dataset_identifies_the_real_corpus() {
             for entry in &matches {
                 assert_eq!(entry.size, bytes.len() as u64);
                 assert_eq!(entry.crc32, crc32(&bytes));
-                assert!(!entry.name.is_empty());
-                assert!(!entry.source.is_empty());
+                assert!(!entry.name.is_empty(), "`entry.name` should not be empty");
+                assert!(
+                    !entry.source.is_empty(),
+                    "`entry.source` should not be empty"
+                );
             }
         }
         if matches.len() > 1 {

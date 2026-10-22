@@ -198,6 +198,6 @@ fn an_empty_container_is_still_valid() {
     let written = write(&[]).expect("writes");
     let parsed = ExtendedAdf::parse(&written).expect("parses");
 
-    assert!(parsed.tracks.is_empty());
-    assert!(parsed.faults.is_empty());
+    assert!(parsed.tracks.is_empty(), "{:?}", parsed.tracks);
+    assert!(parsed.faults.is_empty(), "{:?}", parsed.faults);
 }

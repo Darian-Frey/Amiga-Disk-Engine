@@ -62,7 +62,7 @@ fn an_ofs_file_nothing_points_at_is_recovered_and_proves_itself() {
         .expect("the lost file");
     assert_eq!(file.evidence, Evidence::SelfEvident);
     assert_eq!(file.size, 3000);
-    assert!(!file.blocks.is_empty());
+    assert!(!file.blocks.is_empty(), "`file.blocks` should not be empty");
 }
 
 #[test]

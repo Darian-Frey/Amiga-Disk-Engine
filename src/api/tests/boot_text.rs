@@ -53,7 +53,8 @@ fn repeated_opcodes_are_not_text() {
 
     // 0x55 is also an instruction byte and pads the same way.
     let image = disk_with_boot_text(200, &b"U".repeat(30));
-    assert!(Bootblock::text(&image).is_empty());
+    let got = Bootblock::text(&image);
+    assert!(got.is_empty(), "{got:?}");
 }
 
 #[test]
@@ -119,7 +120,8 @@ fn a_leading_byte_that_is_not_the_length_is_kept() {
 #[test]
 fn dense_punctuation_is_not_text() {
     let image = disk_with_boot_text(200, b"/\\|/\\|<>{}~/\\|<>");
-    assert!(Bootblock::text(&image).is_empty());
+    let got = Bootblock::text(&image);
+    assert!(got.is_empty(), "{got:?}");
 }
 
 #[test]
@@ -163,7 +165,8 @@ fn a_container_without_a_bootblock_yields_no_text() {
     bytes[..8].copy_from_slice(b"UAE-1ADF");
     bytes[200..230].copy_from_slice(b"THIS IS NOT BOOT CODE AT ALL!!");
 
-    assert!(inspect_bytes(bytes).boot_text.is_empty());
+    let got = inspect_bytes(bytes).boot_text;
+    assert!(got.is_empty(), "{got:?}");
 }
 
 #[test]

@@ -166,5 +166,5 @@ fn a_wrong_size_still_rules_an_entry_out_before_any_of_this() {
 
     let found = catalogue.identify_detailed(PAYLOAD);
     assert_eq!(found.kind, Match::Unknown);
-    assert!(found.entries.is_empty());
+    assert!(found.entries.is_empty(), "{:?}", found.entries);
 }

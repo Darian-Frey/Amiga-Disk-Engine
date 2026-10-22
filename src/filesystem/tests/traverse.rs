@@ -193,7 +193,10 @@ fn a_two_block_hash_cycle_terminates() {
     let mem = Mem::dd(img);
     let v = Volume::mount(&mem).unwrap();
     let listing = v.list(v.root()).expect("list must terminate");
-    assert!(!listing.cycles.is_empty());
+    assert!(
+        !listing.cycles.is_empty(),
+        "`listing.cycles` should not be empty"
+    );
 }
 
 #[test]
@@ -210,7 +213,10 @@ fn a_directory_cycle_terminates_a_tree_walk() {
     let mem = Mem::dd(img);
     let v = Volume::mount(&mem).unwrap();
     let walked = v.walk(v.root()).expect("walk must terminate");
-    assert!(!walked.entries.is_empty());
+    assert!(
+        !walked.entries.is_empty(),
+        "`walked.entries` should not be empty"
+    );
     assert!(
         walked.entries.len() < 100,
         "a visited set must stop the walk, not a depth limit: got {} entries",
@@ -426,7 +432,8 @@ fn ffs_has_no_data_block_faults_to_find() {
     let mem = Mem::dd(f.build());
     let v = Volume::mount(&mem).unwrap();
     let e = v.lookup("victim").unwrap();
-    assert!(v.read_file(&e).unwrap().faults.is_empty());
+    let got = v.read_file(&e).unwrap().faults;
+    assert!(got.is_empty(), "{got:?}");
 }
 
 #[test]

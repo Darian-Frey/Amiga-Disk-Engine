@@ -43,7 +43,8 @@ fn an_anchored_magic_is_ignored_mid_block() {
     // sample data are not a file, and reporting them would drown the real
     // hits — 4.2 GB of corpus is a lot of chances for four bytes to recur.
     let bytes = image(4, 1030, b"PP20");
-    assert!(scan(&bytes, BLOCK).is_empty());
+    let got = scan(&bytes, BLOCK);
+    assert!(got.is_empty(), "{got:?}");
 }
 
 #[test]
@@ -116,9 +117,12 @@ fn hits_come_back_in_offset_order() {
 
 #[test]
 fn an_empty_or_tiny_image_finds_nothing_and_does_not_panic() {
-    assert!(scan(&[], BLOCK).is_empty());
-    assert!(scan(&[0x00], BLOCK).is_empty());
-    assert!(scan(b"PP2", BLOCK).is_empty());
+    let got = scan(&[], BLOCK);
+    assert!(got.is_empty(), "{got:?}");
+    let got = scan(&[0x00], BLOCK);
+    assert!(got.is_empty(), "{got:?}");
+    let got = scan(b"PP2", BLOCK);
+    assert!(got.is_empty(), "{got:?}");
 }
 
 #[test]

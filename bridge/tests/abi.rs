@@ -49,7 +49,7 @@ fn the_version_is_a_valid_c_string() {
     // SAFETY: the function contracts that this is a static NUL-terminated
     // string valid for the life of the program.
     let text = unsafe { CStr::from_ptr(ptr) }.to_str().expect("ASCII");
-    assert!(!text.is_empty());
+    assert!(!text.is_empty(), "`text` should not be empty");
 }
 
 #[test]
@@ -265,7 +265,10 @@ fn an_image_with_no_volume_says_why_rather_than_failing_to_open() {
 
         let why = ade::ade_image_volume_absent(image);
         assert!(!why.is_null(), "the reason must be available");
-        assert!(!CStr::from_ptr(why).to_bytes().is_empty());
+        assert!(
+            !CStr::from_ptr(why).to_bytes().is_empty(),
+            "`CStr::from_ptr(why).to_bytes()` should not be empty"
+        );
 
         // And the directory calls degrade rather than crash.
         assert!(ade::ade_dir_open(image, ade::ADE_WHOLE_IMAGE, 880).is_null());
@@ -304,7 +307,7 @@ fn a_walk_returns_every_entry_with_its_path() {
                 AdeResult::Ok
             );
             let name = std::slice::from_raw_parts(entry.name.data, entry.name.len);
-            assert!(!name.is_empty());
+            assert!(!name.is_empty(), "`name` should not be empty");
             // A walk carries paths; a plain listing does not.
             if entry.path.len > 0 {
                 saw_path = true;

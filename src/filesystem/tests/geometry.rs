@@ -146,7 +146,7 @@ fn a_hardfile_mounts_and_needs_several_bitmap_blocks() {
         5,
         "five bitmap blocks for 16382 covered blocks"
     );
-    assert!(bm.bad_checksums.is_empty());
+    assert!(bm.bad_checksums.is_empty(), "{:?}", bm.bad_checksums);
     assert!(!bm.incomplete, "the map must cover the whole volume");
 }
 
@@ -174,8 +174,10 @@ fn a_hardfile_bitmap_survives_a_rebuild() {
             reach.extend(b);
         }
     }
-    assert!(bm.referenced_but_free(&reach).is_empty());
-    assert!(bm.orphaned(&reach).is_empty());
+    let got = bm.referenced_but_free(&reach);
+    assert!(got.is_empty(), "{got:?}");
+    let got = bm.orphaned(&reach);
+    assert!(got.is_empty(), "{got:?}");
 
     let rebuilt = ade_filesystem::bitmap::Bitmap::rebuild(&reach, v.geometry(), &bm.blocks);
     assert_eq!(rebuilt.len(), 5);

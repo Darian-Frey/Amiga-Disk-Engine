@@ -119,7 +119,7 @@ fn round_trips_incompressible_data() {
 #[test]
 fn an_empty_stream_round_trips() {
     let out = inflate::gunzip(&gzip(&[], "-9"), MAX_DECOMPRESSED).unwrap();
-    assert!(out.is_empty());
+    assert!(out.is_empty(), "{out:?}");
 }
 
 #[test]
