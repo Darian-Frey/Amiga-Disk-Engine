@@ -580,3 +580,31 @@ But `create` is the easy case. It **makes a new file**, so the damage D-004 exis
 - **Part 3 changes** only if a target filesystem cannot rename atomically, in which case the honest answer is to refuse to save there rather than to fall back to writing in place.
 - **Part 4 weakens for nothing.** If a write cannot be verified by both ADE and the oracle, it is not ready; that is D-002's whole bargain and D-013 is the standing example of it being kept.
 - The whole entry is reconsidered if ADE ever writes to **real media** through a Greaseweazle (F-006), where there is no temporary file to rename and no original to preserve. That is a different problem and would need its own entry rather than an amendment to this one.
+
+---
+
+### D-019 An assembly *viewer* now; the reverse-engineering suite later, and separately
+**Decided:** 2026-10-22
+**Recorded:** 2026-10-22
+**Status:** Accepted
+**Authors:** Darian-Frey (decision); Claude (analysis)
+**Related:** F-032, F-020, F-028, AV-002, D-002, D-003, D-006, ROADMAP §Atari Disk Engine feature map
+
+**Context.** The Atari feature map records a 68000 disassembler as "needs a decision first", because the Atari engine's is a whole reverse-engineering surface — call graph, cross-references, function list, library signatures, a project format, 4,672 lines — and the prior question was whether a disk engine is where that belongs. Asked for on 2026-10-22 in a narrower form: an **Assembly** tab beside Hex, Map and Text that shows a program's code as instructions.
+
+**Options.**
+- **A. Neither.** Extract executables cleanly (F-020 already finds 7,445 of them) and let a real disassembler be a disassembler. Rejected: reading a disk is exactly when a person wants to know what a file *is*, and a hex dump of 68000 code answers that for almost nobody.
+- **B. The full suite now.** Rejected for now, not forever: most of it is a reverse-engineering workbench rather than a disk tool, and none of it is useful until the decoder underneath is right.
+- **C. A read-only viewer now, the suite later as its own decision.** **Chosen.**
+
+**Decision.** Option C, scoped as follows.
+
+1. **In:** the complete 68000 instruction set; Motorola syntax; code located the way the disk says it is — the code hunks of an AmigaDOS executable (`HUNK_HEADER`) and the boot code of a bootblock — with data hunks shown as data, BSS as a size, and relocations and symbols used to label what they point at. Any other bytes can be disassembled only when asked, and are labelled as a guess, because 68000 instructions are 2–10 bytes long and decoding from the wrong place produces confident nonsense.
+2. **Out, until a later decision:** 68020+ and FPU instructions (shown as `dc.w` and said to be beyond the 68000), library-call naming, cross-references, call graphs, function lists, editing, reassembly, export.
+3. **It never executes anything.** Disassembly turns bytes into text; AV-002's defence — no interpreter, no emulator, no execution path — is unchanged and remains structural. The decoder is a parser of untrusted bytes and is held to D-006: bounded, panic-free, fuzzed.
+4. **Checked against an implementation nobody here wrote.** GNU objdump (`binutils-m68k-linux-gnu`, `-m m68k:68000`) is the oracle, used by tests only and never linked or read — D-002's bargain applied to a second format. Every one of the 65,536 opcode words is decoded by both, and the tests require the same validity, the same length and the same instruction.
+5. **It lives in `ade-object`**, which recognises what bytes are (F-020) and is where interpreting a file's contents belongs. That crate gains `ade-endian` as a dependency — a deliberate widening of the layering policy, made here rather than in a Cargo.toml, because the decoder reads big-endian words and C-001 routes every such read through that crate.
+
+**Consequences.** F-032 is the viewer. The suite stays on the Atari map as a candidate. F-028 gains a route to its first real processor evidence — a 68020-only instruction in a code hunk is a fact — but using it there is a separate change.
+
+**Reversal conditions.** Part 2 loosens one item at a time, each with its own entry; the first likely one is library-call naming, which needs the base register tracked and is wrong whenever it guesses. Part 4 changes only if the oracle becomes unavailable, in which case the decoder's tests must find another independent implementation rather than check it against itself.

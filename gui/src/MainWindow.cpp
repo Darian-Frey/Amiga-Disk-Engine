@@ -6,6 +6,7 @@
 #include "ImageTree.h"
 
 #include <QAction>
+#include <QSyntaxHighlighter>
 #include <QCloseEvent>
 #include <QInputDialog>
 #include <set>
@@ -48,6 +49,55 @@
 
 namespace {
 using namespace tree;
+
+// The Assembly view's colouring (F-032): remarks and headings in a muted
+// colour, labels bold, data dimmed. Derived from the widget's own palette, so
+// it reads in a dark theme as well as a light one — the same rule the hex
+// pane's tints follow.
+class AsmHighlighter : public QSyntaxHighlighter {
+public:
+    AsmHighlighter(QTextDocument *document, const QWidget *owner)
+        : QSyntaxHighlighter(document) {
+        const QPalette p = owner->palette();
+        const QColor text = p.color(QPalette::Text);
+        const QColor base = p.color(QPalette::Base);
+        const auto mix = [&](qreal t) {
+            return QColor::fromRgbF(text.redF() * t + base.redF() * (1 - t),
+                                    text.greenF() * t + base.greenF() * (1 - t),
+                                    text.blueF() * t + base.blueF() * (1 - t));
+        };
+        m_remark.setForeground(mix(0.55));
+        m_remark.setFontItalic(true);
+        m_label.setFontWeight(QFont::Bold);
+        m_data.setForeground(mix(0.6));
+        m_address.setForeground(mix(0.5));
+    }
+
+protected:
+    void highlightBlock(const QString &line) override {
+        if (line.startsWith(QLatin1Char(';'))) {
+            setFormat(0, static_cast<int>(line.size()), m_remark);
+            return;
+        }
+        if (line.endsWith(QLatin1Char(':'))) {
+            setFormat(0, static_cast<int>(line.size()), m_label);
+            return;
+        }
+        // Address and bytes: the first two columns, 34 characters.
+        constexpr int Columns = 34;
+        setFormat(0, qMin(Columns, static_cast<int>(line.size())), m_address);
+        if (line.mid(Columns).startsWith(QStringLiteral("dc."))) {
+            setFormat(Columns, static_cast<int>(line.size()) - Columns, m_data);
+        }
+        const auto comment = line.indexOf(QStringLiteral("; "), Columns);
+        if (comment > 0) {
+            setFormat(static_cast<int>(comment), static_cast<int>(line.size() - comment), m_remark);
+        }
+    }
+
+private:
+    QTextCharFormat m_remark, m_label, m_data, m_address;
+};
 
 
 // How much of a file to show. A preview is a preview: reading a whole 512 KB
@@ -246,6 +296,46 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
     m_views->addTab(hexTab, QStringLiteral("Hex"));
     m_views->addTab(m_mapTab, QStringLiteral("Map"));
     m_views->addTab(m_text, QStringLiteral("Text"));
+
+    // The Assembly view (F-032): a program's 68000 code, or the disk's boot
+    // code. Built only while it is showing, so browsing with it hidden costs
+    // nothing.
+    m_asm = new QPlainTextEdit(this);
+    m_asm->setObjectName(QStringLiteral("assembly"));
+    m_asm->setReadOnly(true);
+    m_asm->setLineWrapMode(QPlainTextEdit::NoWrap);
+    m_asm->setFont(QFontDatabase::systemFont(QFontDatabase::FixedFont));
+    new AsmHighlighter(m_asm->document(), m_asm);
+    m_asmStatus = new QLabel(this);
+    m_asmStatus->setObjectName(QStringLiteral("assemblyStatus"));
+    m_asmStatus->setWordWrap(true);
+    m_asmStatus->setContentsMargins(4, 2, 4, 2);
+    m_asmRaw = new QPushButton(QStringLiteral("Decode anyway"), this);
+    m_asmRaw->setObjectName(QStringLiteral("assemblyRaw"));
+    m_asmRaw->setToolTip(QStringLiteral(
+        "Decode the file from its first byte as if it were 68000 code.\n"
+        "Instructions are 2 to 10 bytes long, so if this is not code, or the code\n"
+        "starts elsewhere, the result is noise that looks like code."));
+    m_asmRaw->hide();
+    connect(m_asmRaw, &QPushButton::clicked, this, [this] {
+        m_asmForceRaw = true;
+        m_asmStale = true;
+        refreshAssembly();
+    });
+    m_asmTab = new QWidget(this);
+    auto *asmBar = new QHBoxLayout;
+    asmBar->addWidget(m_asmStatus, 1);
+    asmBar->addWidget(m_asmRaw);
+    auto *asmLayout = new QVBoxLayout(m_asmTab);
+    asmLayout->setContentsMargins(0, 0, 0, 0);
+    asmLayout->setSpacing(0);
+    asmLayout->addLayout(asmBar);
+    asmLayout->addWidget(m_asm);
+    m_views->addTab(m_asmTab, QStringLiteral("Assembly"));
+    connect(m_views, &QTabWidget::currentChanged, this, [this] {
+        if (m_views->currentWidget() == m_asmTab) refreshAssembly();
+    });
+
     m_views->addTab(m_results, QStringLiteral("Search"));
 
     // The search box sits above the tree: it searches every open image, not
@@ -1566,6 +1656,10 @@ QByteArray MainWindow::contentsOf(QTreeWidgetItem *item) const {
 
 void MainWindow::showEntry(QTreeWidgetItem *item) {
     m_selected = item;
+    // The Assembly view follows the selection, but is only built when shown.
+    m_asmStale = true;
+    m_asmForceRaw = false;
+    if (m_views && m_views->currentWidget() == m_asmTab) refreshAssembly();
     // Extracting everything needs a disk, not a file: any row of any image
     // will do, because the whole disk is what it takes.
     if (m_extractAll) m_extractAll->setEnabled(imageFor(item) != nullptr);
@@ -2027,4 +2121,74 @@ void MainWindow::filesDropped(QTreeWidgetItem *target, const QList<QUrl> &urls) 
         return;
     }
     for (const QString &path : paths) openImage(path);
+}
+
+// ---------------------------------------------------------------------------
+// The Assembly view (F-032)
+// ---------------------------------------------------------------------------
+
+void MainWindow::refreshAssembly() {
+    if (!m_asmStale || !m_asm) return;
+    m_asmStale = false;
+    m_asmRaw->hide();
+    const auto say = [this](const QString &why) {
+        m_asm->clear();
+        m_asmStatus->setText(why);
+    };
+
+    QTreeWidgetItem *item = m_selected;
+    const Open *open = imageFor(item);
+    if (!open) {
+        say(QStringLiteral("Select a program to see its 68000 code, or a disk's own row to "
+                           "see its boot code."));
+        return;
+    }
+    if (item->data(0, RoleOffset).isValid()) {
+        say(QStringLiteral("A search hit is a place on the disk, not a program. Select a file "
+                           "or the disk's own row."));
+        return;
+    }
+    ade::Disassembly listing;
+    QString what;
+    if (!item->parent()) {
+        // The disk's own row: its boot code.
+        listing = open->image.bootCode();
+        what = QStringLiteral("Boot code of %1").arg(open->name);
+    } else if (item->data(0, RoleIsDir).toBool() || !item->data(0, RoleBlock).isValid()) {
+        say(QStringLiteral("A folder holds no code. Select a program inside it."));
+        return;
+    } else {
+        listing = open->image.disassemble(item->data(0, RolePartition).toUInt(),
+                                          item->data(0, RoleBlock).toUInt(), m_asmForceRaw);
+        what = item->text(ColName);
+    }
+    if (!listing.read) {
+        say(QStringLiteral("%1 could not be read.").arg(what));
+        return;
+    }
+    if (!listing.refusal.isEmpty()) {
+        say(QStringLiteral("%1 is %2.").arg(what, listing.refusal.startsWith(QStringLiteral("not "))
+                                                      ? listing.refusal
+                                                      : QStringLiteral("not shown: ") +
+                                                            listing.refusal));
+        // Offered for a file, never for a disk: the boot code's place is
+        // fixed by the format, and a disk that has none has none.
+        if (item->parent()) m_asmRaw->show();
+        return;
+    }
+
+    QStringList lines;
+    lines.reserve(listing.lines.size());
+    int instructions = 0;
+    for (const ade::AsmLine &line : listing.lines) {
+        lines << line.text;
+        if (line.kind == ADE_ASM_CODE) ++instructions;
+    }
+    m_asm->setPlainText(lines.join(QLatin1Char('\n')));
+    m_asmStatus->setText(QStringLiteral("%1 — %2 instruction%3%4")
+                             .arg(what)
+                             .arg(instructions)
+                             .arg(instructions == 1 ? "" : "s")
+                             .arg(m_asmForceRaw ? QStringLiteral(", decoded as a guess")
+                                                : QString{}));
 }

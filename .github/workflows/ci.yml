@@ -79,6 +79,15 @@ jobs:
       - name: Differential check against ADFlib (D-002)
         run: cargo test -p ade-core --test oracle_fixtures
 
+      # The 68000 decoder against GNU objdump (D-019): every one of the 65,536
+      # opcode words, twice, must decode to the same instruction. Test-only,
+      # like ADFlib; the earlier test step skipped it for want of the tool.
+      - name: Install the D-019 oracle
+        run: sudo apt-get install -y binutils-m68k-linux-gnu
+
+      - name: Differential check against objdump (D-019)
+        run: cargo test -p ade-object --test m68k_oracle
+
       # F-001's acceptance bar. Runs on every push at modest iteration counts;
       # a deep sweep is `ADE_FUZZ_ITERS=150000 cargo test --release --test fuzz`.
       #

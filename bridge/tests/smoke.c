@@ -176,7 +176,27 @@ int main(int argc, char **argv) {
                 check(bytes.data != NULL, "and a valid pointer");
                 ade_buffer_free(buf);
             }
+
+            /* Disassembly (F-032): the fixture's files are not programs, so
+               the answer is a reason, and a listing only when asked for. */
+            AdeDisasm *refused = ade_disasm_open(image, ADE_WHOLE_IMAGE, file_block, false);
+            AdeBytes why = ade_disasm_refusal(refused);
+            check(refused && ade_disasm_count(refused) == 0 && why.len > 0,
+                  "a file that is not a program says why");
+            ade_disasm_free(refused);
+            AdeDisasm *guess = ade_disasm_open(image, ADE_WHOLE_IMAGE, file_block, true);
+            AdeAsmLine line;
+            check(guess && ade_disasm_count(guess) > 0 &&
+                      ade_disasm_line(guess, 0, &line) == ADE_OK &&
+                      line.kind == ADE_ASM_NOTE && line.text.len > 0,
+                  "and decodes as a guess when asked, saying so first");
+            check(ade_disasm_line(guess, ade_disasm_count(guess), &line) == ADE_NOT_FOUND,
+                  "past the end is NOT_FOUND");
+            ade_disasm_free(guess);
         }
+        AdeDisasm *boot = ade_disasm_bootblock(image);
+        check(boot != NULL && ade_disasm_count(boot) > 0, "the bootblock lists");
+        ade_disasm_free(boot);
         ade_listing_free(listing);
     }
 

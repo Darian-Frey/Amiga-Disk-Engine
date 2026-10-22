@@ -324,6 +324,7 @@ fn main() -> ExitCode {
             args.size,
         ),
         ("mkdir" | "put", _) => edit_command(&args),
+        ("disasm", 1 | 2) => disasm(&args),
         ("scan", 1) => scan(Path::new(p(0)), args.format),
         ("find", 2) => find(
             Path::new(p(0)),
@@ -387,6 +388,8 @@ fn usage() {
             .to_owned(),
         "    ade put <image> <file> [path] --output=<new> add a file, saved as a new image"
             .to_owned(),
+        "    ade disasm <image> [path]          a program's 68000 code; no path: the bootblock"
+            .to_owned(),
         "    ade scan <image>                   find known content by its magic (F-020)".to_owned(),
         "    ade find <image> <pattern>         search the image for text or hex (F-021)"
             .to_owned(),
@@ -409,6 +412,7 @@ fn usage() {
         "    --format=json   machine-readable; field names and fault codes are stable".to_owned(),
         "    --partition=P   which partition of a hard disk, by name (DH0) or index (0)".to_owned(),
         "    --raw           convert writes raw MFM tracks (an extended ADF)".to_owned(),
+        "                    disasm decodes a file that is not a program, as a guess".to_owned(),
         "    --hash          include SHA-1 content hashes (not free; see VOCABULARY.md)".to_owned(),
         "    --name=NAME     create: the volume name (default \"Empty\")".to_owned(),
         "    --type=T        create: ofs, ffs, ofs-intl, ffs-intl, ofs-dc, ffs-dc".to_owned(),
@@ -569,6 +573,75 @@ fn put(image: &Path, file: &Path, dest: Option<&str>, output: Option<&Path>) -> 
             data.len()
         ))
     })
+}
+
+/// `ade disasm`: a program's code, or the bootblock's (F-032).
+///
+/// Only an AmigaDOS executable is disassembled unless `--raw` says otherwise,
+/// because decoding anything else from its first byte is a guess — and the
+/// listing says so when asked for one.
+fn disasm(args: &Args) -> ExitCode {
+    use ade_core::disasm::{self, Mode};
+    let path = Path::new(args.positional.first().map_or("", String::as_str));
+    let inner = args.positional.get(1).map(String::as_str);
+    let (raw, format, partition) = (args.raw, args.format, args.partition.as_deref());
+    // Refused rather than ignored (BUG-007).
+    if format == Format::Json {
+        eprintln!("ade: disasm has no JSON output; it reports in text only");
+        return ExitCode::from(EXIT_USAGE);
+    }
+    let image = match Image::open(path) {
+        Ok(i) => i,
+        Err(e) => {
+            eprintln!("ade: {}: {e}", path.display());
+            return ExitCode::from(EXIT_UNREADABLE);
+        }
+    };
+    let listing = match inner {
+        None => disasm::bootblock(&image),
+        Some(inner) => {
+            let window = match select_partition(&image, partition) {
+                Ok(w) => w,
+                Err(e) => {
+                    eprintln!("ade: {}: {e}", path.display());
+                    return ExitCode::from(EXIT_NO_VOLUME);
+                }
+            };
+            let mounted = match &window {
+                Some(w) => Volume::mount(w),
+                None => image.volume(),
+            };
+            let volume = match mounted {
+                Ok(v) => v,
+                Err(e) => {
+                    eprintln!("ade: {}: {e}", path.display());
+                    return ExitCode::from(EXIT_NO_VOLUME);
+                }
+            };
+            let bytes = match volume.lookup(inner).and_then(|e| volume.read_file(&e)) {
+                Ok(d) => d.into_bytes(),
+                Err(e) => {
+                    eprintln!("ade: {inner}: {e}");
+                    return ExitCode::from(EXIT_FAULTS);
+                }
+            };
+            disasm::file(&bytes, if raw { Mode::Raw } else { Mode::Auto })
+        }
+    };
+    match listing {
+        Ok(l) => {
+            let lines: Vec<String> = l.lines.into_iter().map(|line| line.text).collect();
+            emit_lines(&mut std::io::stdout().lock(), &lines);
+            ExitCode::from(EXIT_CLEAN)
+        }
+        Err(e) => {
+            eprintln!("ade: {e}");
+            if inner.is_some() && !raw {
+                eprintln!("ade: --raw decodes it anyway, from its first byte");
+            }
+            ExitCode::from(EXIT_FAULTS)
+        }
+    }
 }
 
 /// Load the dataset a caller configured, if any (F-013).

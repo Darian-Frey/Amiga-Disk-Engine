@@ -7,4 +7,7 @@
 //! distinct from what a directory entry calls them.
 
 pub mod find;
+pub mod hunk;
+pub mod listing;
+pub mod m68k;
 pub mod signature;

@@ -1560,3 +1560,105 @@ fn the_edit_calls_tolerate_null() {
         );
     }
 }
+
+#[test]
+fn a_program_on_the_disk_lists_and_a_text_file_says_why_not() {
+    use ade_core::layers::block::Geometry;
+    use ade_core::layers::filesystem::{dostype::Dostype, edit, format};
+    let when = format::Stamp {
+        days: 17_000,
+        mins: 1,
+        ticks: 0,
+    };
+    let mut disk = format::blank(
+        Geometry::DD_FLOPPY,
+        Dostype::from_raw(0x444F_5301).unwrap(),
+        "Code",
+        when,
+    )
+    .unwrap();
+    // HUNK_HEADER, one CODE hunk of two longs: moveq #0,d0 / rts / nop / nop.
+    let longs = [
+        0x3F3u32,
+        0,
+        1,
+        0,
+        0,
+        2,
+        0x3E9,
+        2,
+        0x7000_4E75,
+        0x4E71_4E71,
+        0x3F2,
+    ];
+    let mut program = vec![0u8; longs.len() * 4];
+    for (i, v) in longs.iter().enumerate() {
+        put_u32(&mut program, i * 4, *v).unwrap();
+    }
+    let exe = edit::add_file(&mut disk, Geometry::DD_FLOPPY, 880, b"prog", &program, when).unwrap();
+    let plain = edit::add_file(
+        &mut disk,
+        Geometry::DD_FLOPPY,
+        880,
+        b"notes",
+        b"plain",
+        when,
+    )
+    .unwrap();
+    let (path, c_path) = fixture("disasm", &disk);
+
+    // SAFETY: a valid path; every handle is freed once.
+    unsafe {
+        let image = ade::ade_image_open(c_path.as_ptr(), std::ptr::null(), std::ptr::null_mut());
+        assert!(!image.is_null());
+
+        let listing = ade::ade_disasm_open(image, ade::ADE_WHOLE_IMAGE, exe, false);
+        assert!(!listing.is_null());
+        assert_eq!(ade::ade_disasm_refusal(listing).len, 0);
+        let mut listed = String::new();
+        let mut line = std::mem::zeroed::<ade::AdeAsmLine>();
+        for i in 0..ade::ade_disasm_count(listing) {
+            assert_eq!(
+                ade::ade_disasm_line(listing, i, &raw mut line),
+                AdeResult::Ok
+            );
+            let bytes = std::slice::from_raw_parts(line.text.data, line.text.len);
+            listed.push_str(std::str::from_utf8(bytes).unwrap());
+            listed.push('\n');
+        }
+        assert!(listed.contains("moveq   #0,d0"), "{listed}");
+        assert!(listed.contains("rts"), "{listed}");
+        let count = ade::ade_disasm_count(listing);
+        assert_eq!(
+            ade::ade_disasm_line(listing, count, &raw mut line),
+            AdeResult::NotFound
+        );
+        ade::ade_disasm_free(listing);
+
+        // A text file is not code: a reason, no lines — unless asked.
+        let refused = ade::ade_disasm_open(image, ade::ADE_WHOLE_IMAGE, plain, false);
+        assert_eq!(ade::ade_disasm_count(refused), 0);
+        assert!(ade::ade_disasm_refusal(refused).len > 0);
+        ade::ade_disasm_free(refused);
+        let guessed = ade::ade_disasm_open(image, ade::ADE_WHOLE_IMAGE, plain, true);
+        assert!(ade::ade_disasm_count(guessed) > 0);
+        ade::ade_disasm_free(guessed);
+
+        // A blank disk's bootblock has a header and no code, and says so.
+        let boot = ade::ade_disasm_bootblock(image);
+        assert!(!boot.is_null());
+        ade::ade_disasm_line(boot, 0, &raw mut line);
+        let first = std::slice::from_raw_parts(line.text.data, line.text.len);
+        assert!(std::str::from_utf8(first).unwrap().contains("no boot code"));
+        ade::ade_disasm_free(boot);
+
+        // Null is tolerated.
+        assert!(ade::ade_disasm_open(std::ptr::null(), 0, 0, false).is_null());
+        assert!(ade::ade_disasm_bootblock(std::ptr::null()).is_null());
+        assert_eq!(ade::ade_disasm_count(std::ptr::null()), 0);
+        assert_eq!(ade::ade_disasm_refusal(std::ptr::null()).len, 0);
+        ade::ade_disasm_free(std::ptr::null_mut());
+        ade::ade_image_free(image);
+    }
+    let _ = std::fs::remove_file(&path);
+}

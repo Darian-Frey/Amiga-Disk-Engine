@@ -568,6 +568,30 @@ A new directory or file changes more blocks than the one it occupies. For one en
 
 **The check that matters most cannot be made by walking.** An entry in the wrong hash slot is still listed by every reader that visits every slot — ADE, `ade check`, `unadf -r` — and found by none that looks a name up. Only accented names hash differently between the international and plain functions (C-006), so a test with ASCII names cannot tell them apart either. ADE's writer is tested by reading the slot directly and by asking ADFlib for files by name; IMP-012 records that `ade check` should do the first of those for every disk.
 
+## Executables and 68000 code
+
+*For F-032. Measured 2026-10-22 over every executable in the corpus.*
+
+### The hunk format
+
+An AmigaDOS executable begins `000003F3` (`HUNK_HEADER`), then a list of resident-library names ended by a zero length (never used by executables), a table size, the first and last hunk numbers, and one long per hunk: its size in longs in the low 30 bits, its memory requirement in the top two (01 chip, 10 fast, 11 an extra long of attributes follows). Each hunk is then a `HUNK_CODE` (3E9), `HUNK_DATA` (3EA) or `HUNK_BSS` (3EB) block — a long count and that many longs, or for BSS the count alone — followed by any of `HUNK_RELOC32` (3EC: groups of count, target hunk, offsets, ended by a zero count), `HUNK_RELOC32SHORT` (3FC, and 3F7 used for it: the same in words, padded to a long), `HUNK_SYMBOL` (3F0: name length in longs, name, value; ended by zero), `HUNK_DEBUG` (3F1: a count and that many longs), and `HUNK_END` (3F2). A `HUNK_NAME` (3E8) may precede a hunk. Block type longs carry the same memory flags in their top bits, masked off before dispatch. [AmigaDOS Manual 3rd ed., `dos/doshunks.h`]
+
+**Corpus:** 39,368 executables, all but 5 with a readable header; 209 parse with a note — an overlay (3F5, only the root hunks are listed), a block type ADE does not read, or a count running past the end of the file. 226,157 hunks, 131,976 of them code, 405 MB of code.
+
+### Decoding the 68000
+
+The 68000 instruction set from Motorola's *M68000 Family Programmer's Reference Manual*. Three points where the chip is more permissive than the manual's tables, each established against objdump and kept because the 68000 behaves that way:
+
+- **An index extension's scale bits (9–10) are ignored by a 68000.** The instruction runs; a scale other than 1 means the code was written for a 68020, and is shown (`d0.w*8`).
+- **A branch byte of `FF` is −1 on a 68000**, not the 68020's 32-bit form. It branches to an odd address and faults, but it is what the chip decodes.
+- **A static bit number's high byte is ignored.** Only the low byte numbers the bit.
+
+And one where ADE stays strict while objdump does not: **an index extension with bit 8 set is the 68020's full format** — base and outer displacements, memory indirection — which a 68000 does not have. ADE reports it as a 68020 addressing mode; objdump decodes it regardless of the CPU it was told. **At least 17,043 corpus code hunks contain one** — a lower bound, because the comparison stops each hunk at the first word objdump reads differently. It is evidence of 68020 code rather than proof: data embedded in a code hunk can take the same shape, and telling the two apart needs flow analysis D-019 leaves out.
+
+### The oracle and where it differs on purpose
+
+GNU objdump `-D -z -b binary -m m68k:68000`. `-z` matters: without it objdump silently skips runs of zero bytes, which reads as instructions missing. Words it decodes that a 68000 does not have, and so excluded from comparison: line F (coprocessor), `4AFC`/`4AFD` followed by a word (SVR4's `swbeg`), `SUBQ.B` to an address register (the manual allows word and long only; objdump accepts it for SUBQ and not ADDQ), and the full-format index words above. Its formatting quirks — an 8-bit index displacement in bare hex sign-extended to 64 bits, immediates signed at the instruction's size, register ranges running from `d7` into `a0` — are reproduced by `Instruction::gnu` for the comparison and nowhere else.
+
 ## Links
 
 Hard links are FFS-only and chain through `next_link`. Soft links were broken and support was removed in AmigaDOS 3.0. [FAQ §4.6]

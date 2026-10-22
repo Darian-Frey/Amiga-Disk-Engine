@@ -496,6 +496,47 @@ AdeBuffer *ade_file_read(const AdeImage *image, uint32_t partition, uint32_t blo
 AdeBytes   ade_buffer_bytes(const AdeBuffer *buffer);
 void       ade_buffer_free(AdeBuffer *buffer);
 
+/* --- Disassembly (F-032) ------------------------------------------------
+ *
+ * A program's 68000 code as Motorola-syntax text. Only an AmigaDOS executable
+ * is listed unless `raw` asks otherwise: 68000 instructions are 2-10 bytes
+ * long, so decoding from the wrong byte gives plausible nonsense, and only an
+ * executable's hunk header says where the code is. Nothing is ever executed.
+ *
+ * Every call returns a handle, unless the image is NULL or the file cannot be
+ * read; a file that is not code gives a handle with no lines and a reason in
+ * ade_disasm_refusal. Free with ade_disasm_free. */
+typedef enum {
+    ADE_ASM_HEADING = 0, /* a hunk, the boot code          */
+    ADE_ASM_LABEL   = 1, /* names the next line's address  */
+    ADE_ASM_CODE    = 2, /* an instruction                 */
+    ADE_ASM_DATA    = 3, /* bytes shown as data            */
+    ADE_ASM_NOTE    = 4  /* a remark about the listing     */
+} AdeAsmKind;
+
+/* One line. `text` borrows from the listing. `offset` counts from the start
+ * of the file, or of the image for boot code, and is meaningful only when
+ * `has_offset` is true. */
+typedef struct {
+    AdeAsmKind kind;
+    bool       has_offset;
+    uint64_t   offset;
+    uint32_t   length;
+    AdeBytes   text;
+} AdeAsmLine;
+
+typedef struct AdeDisasm AdeDisasm;
+
+AdeDisasm *ade_disasm_open(const AdeImage *image, uint32_t partition, uint32_t block,
+                           bool raw);
+AdeDisasm *ade_disasm_bootblock(const AdeImage *image);
+size_t     ade_disasm_count(const AdeDisasm *listing);
+/* ADE_NOT_FOUND past the end. */
+AdeResult  ade_disasm_line(const AdeDisasm *listing, size_t index, AdeAsmLine *out);
+/* Why there is no listing, UTF-8, borrowed; empty when there is one. */
+AdeBytes   ade_disasm_refusal(const AdeDisasm *listing);
+void       ade_disasm_free(AdeDisasm *listing);
+
 /* --- Writing into a disk (D-018) -----------------------------------------
  *
  * Edits change the open image **in memory** and nothing else. Nothing reaches

@@ -2333,3 +2333,202 @@ pub unsafe extern "C" fn ade_image_save_destination(image: *const AdeImage) -> *
             .map_or(std::ptr::null_mut(), CString::into_raw)
     })
 }
+
+// ---------------------------------------------------------------------------
+// Disassembly (F-032)
+// ---------------------------------------------------------------------------
+
+/// What a listing line is.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdeAsmKind {
+    /// A section heading: a hunk, the boot code.
+    Heading = 0,
+    /// A label naming the next line's address.
+    Label = 1,
+    /// An instruction.
+    Code = 2,
+    /// Bytes shown as data.
+    Data = 3,
+    /// A remark about the listing.
+    Note = 4,
+}
+
+/// One line of a listing. `text` borrows from the listing.
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct AdeAsmLine {
+    /// What the line is.
+    pub kind: AdeAsmKind,
+    /// Whether `offset` and `length` say where the line's bytes are.
+    pub has_offset: bool,
+    /// Where the bytes start, counted from the start of the file — or of the
+    /// image, for boot code.
+    pub offset: u64,
+    /// How many bytes the line stands for.
+    pub length: u32,
+    /// The line, columns included. UTF-8; in practice ASCII.
+    pub text: AdeBytes,
+}
+
+/// A disassembly, or the reason there is none.
+pub struct AdeDisasm {
+    lines: Vec<ade_core::disasm::Line>,
+    refusal: Vec<u8>,
+}
+
+impl AdeDisasm {
+    fn from(result: Result<ade_core::disasm::Listing, ade_core::disasm::NotCode>) -> *mut Self {
+        let handle = match result {
+            Ok(listing) => Self {
+                lines: listing.lines,
+                refusal: Vec::new(),
+            },
+            Err(why) => Self {
+                lines: Vec::new(),
+                refusal: why.0.into_bytes(),
+            },
+        };
+        Box::into_raw(Box::new(handle))
+    }
+}
+
+/// Disassemble the file at `block`. With `raw` false only an AmigaDOS
+/// executable is listed, and anything else comes back as a handle with no
+/// lines and a reason; with `raw` true the file is decoded from its first
+/// byte, headed as a guess.
+///
+/// Null if the image is null or the file cannot be read.
+///
+/// # Safety
+/// `image` must be a live handle or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ade_disasm_open(
+    image: *const AdeImage,
+    partition: u32,
+    block: u32,
+    raw: bool,
+) -> *mut AdeDisasm {
+    with_image(image, std::ptr::null_mut(), |image| {
+        let bytes = with_volume(image, partition, |volume| {
+            let entry = volume.entry_at(block).ok()?;
+            Some(volume.read_file(&entry).ok()?.into_bytes())
+        });
+        let Some(bytes) = bytes else {
+            return std::ptr::null_mut();
+        };
+        let mode = if raw {
+            ade_core::disasm::Mode::Raw
+        } else {
+            ade_core::disasm::Mode::Auto
+        };
+        AdeDisasm::from(ade_core::disasm::file(&bytes, mode))
+    })
+}
+
+/// Disassemble the image's boot code. A handle with no lines and a reason
+/// when the image does not begin with an AmigaDOS bootblock.
+///
+/// # Safety
+/// `image` must be a live handle or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ade_disasm_bootblock(image: *const AdeImage) -> *mut AdeDisasm {
+    with_image(image, std::ptr::null_mut(), |image| {
+        let Some(handle) = image.image.as_ref() else {
+            return AdeDisasm::from(Err(ade_core::disasm::NotCode(
+                "ADE could not read this image's blocks".to_owned(),
+            )));
+        };
+        AdeDisasm::from(ade_core::disasm::bootblock(handle))
+    })
+}
+
+/// Lines in the listing; zero when there is a reason instead.
+///
+/// # Safety
+/// `listing` must be a live handle or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ade_disasm_count(listing: *const AdeDisasm) -> usize {
+    if listing.is_null() {
+        return 0;
+    }
+    // SAFETY: checked non-null; the caller promises a live handle.
+    guard(0, || unsafe { &*listing }.lines.len())
+}
+
+/// Copy line `index` into `*out`. [`AdeResult::NotFound`] past the end.
+///
+/// # Safety
+/// `listing` must be a live handle or null; `out` writable or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ade_disasm_line(
+    listing: *const AdeDisasm,
+    index: usize,
+    out: *mut AdeAsmLine,
+) -> AdeResult {
+    if listing.is_null() || out.is_null() {
+        return AdeResult::NullArgument;
+    }
+    guard(AdeResult::Internal, || {
+        // SAFETY: checked non-null; the caller promises a live handle.
+        let listing = unsafe { &*listing };
+        let Some(line) = listing.lines.get(index) else {
+            return AdeResult::NotFound;
+        };
+        let kind = match line.kind {
+            ade_core::disasm::LineKind::Heading => AdeAsmKind::Heading,
+            ade_core::disasm::LineKind::Label => AdeAsmKind::Label,
+            ade_core::disasm::LineKind::Code => AdeAsmKind::Code,
+            ade_core::disasm::LineKind::Data => AdeAsmKind::Data,
+            ade_core::disasm::LineKind::Note => AdeAsmKind::Note,
+        };
+        // SAFETY: checked non-null; the caller promises it is writable.
+        unsafe {
+            *out = AdeAsmLine {
+                kind,
+                has_offset: line.offset.is_some(),
+                offset: line.offset.unwrap_or(0),
+                length: line.length,
+                text: AdeBytes::of(line.text.as_bytes()),
+            };
+        }
+        AdeResult::Ok
+    })
+}
+
+/// Why there is no listing, as UTF-8 borrowed from the handle; empty when
+/// there is one.
+///
+/// # Safety
+/// `listing` must be a live handle or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ade_disasm_refusal(listing: *const AdeDisasm) -> AdeBytes {
+    if listing.is_null() {
+        return AdeBytes::empty();
+    }
+    guard(AdeBytes::empty(), || {
+        // SAFETY: checked non-null; the caller promises a live handle.
+        let listing = unsafe { &*listing };
+        if listing.refusal.is_empty() {
+            AdeBytes::empty()
+        } else {
+            AdeBytes::of(&listing.refusal)
+        }
+    })
+}
+
+/// Release a listing.
+///
+/// # Safety
+/// `listing` must come from `ade_disasm_open` or `ade_disasm_bootblock` and
+/// not have been freed, or be null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ade_disasm_free(listing: *mut AdeDisasm) {
+    if listing.is_null() {
+        return;
+    }
+    guard((), || {
+        // SAFETY: checked non-null; the caller's contract.
+        drop(unsafe { Box::from_raw(listing) });
+    });
+}

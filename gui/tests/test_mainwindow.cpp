@@ -32,6 +32,7 @@
 #include <QTabWidget>
 #include <cmath>
 #include <QLabel>
+#include <QPushButton>
 #include <QMenu>
 #include <QMenuBar>
 #include <QScreen>
@@ -49,6 +50,16 @@ ImageTree *browser(MainWindow &window) {
 }
 ImageTree *results(MainWindow &window) {
     return window.findChild<ImageTree *>(QStringLiteral("results"));
+}
+
+// The two panes that preview a file, hex and text. The Assembly pane is
+// excluded: it is built only while its tab is showing (F-032).
+QList<QPlainTextEdit *> previewPanes(MainWindow &window) {
+    QList<QPlainTextEdit *> out;
+    for (auto *view : window.findChildren<QPlainTextEdit *>()) {
+        if (view->objectName() != QStringLiteral("assembly")) out << view;
+    }
+    return out;
 }
 
 // An image is a root in the tree; its files hang beneath it.
@@ -75,6 +86,9 @@ private slots:
     void closingWithUnsavedEditsAsksFirst();
     void aRefusedCopySaysWhyAndKeepsTheRest();
     void aPartitionOfAHardDiskIsNotWrittenInto();
+    void aProgramShowsItsCodeInTheAssemblyView();
+    void aFileThatIsNotAProgramSaysWhyAndCanBeDecodedAnyway();
+    void theDiskRowShowsItsBootCodeAndAFolderSaysItHasNone();
     void anImageIsARootWithItsEntriesBeneath();
     void aFileSelectionFillsTheHexView();
     void aDirectoryExpandsLazily();
@@ -184,7 +198,7 @@ void TestMainWindow::aFileSelectionFillsTheHexView() {
     QVERIFY(startup);
     tree->setCurrentItem(startup);
 
-    const auto views = window.findChildren<QPlainTextEdit *>();
+    const auto views = previewPanes(window);
     QCOMPARE(views.size(), 2);
     // The hex view is the first tab; both must have picked up the contents.
     bool sawContents = false;
@@ -287,7 +301,7 @@ void TestMainWindow::searchReportsThePathAndTheImage() {
     auto *tree = browser(window);
     tree->setCurrentItem(childNamed(tree->topLevelItem(0), QStringLiteral("startup")));
     found->setCurrentItem(found->topLevelItem(0));
-    const auto views = window.findChildren<QPlainTextEdit *>();
+    const auto views = previewPanes(window);
     QCOMPARE(views.size(), 2);
     QVERIFY(!views.first()->toPlainText().isEmpty());
     // Taking the selection means taking it: a row left highlighted in the
@@ -465,7 +479,7 @@ void TestMainWindow::aFileInsideAPartitionPreviewsAndExtracts() {
     QVERIFY(startup);
     tree->setCurrentItem(startup);
 
-    const auto views = window.findChildren<QPlainTextEdit *>();
+    const auto views = previewPanes(window);
     QCOMPARE(views.size(), 2);
     bool sawContents = false;
     for (auto *view : views) {
@@ -510,7 +524,7 @@ void TestMainWindow::searchCoversEveryPartitionNotJustTheFirst() {
 
     // And selecting each gives the file from *that* partition. The two share a
     // name and a path, so nothing but the partition tells them apart.
-    const auto views = window.findChildren<QPlainTextEdit *>();
+    const auto views = previewPanes(window);
     QStringList shown;
     for (int i = 0; i < 2; ++i) {
         found->setCurrentItem(found->topLevelItem(i));
@@ -2002,6 +2016,115 @@ void TestMainWindow::aPartitionOfAHardDiskIsNotWrittenInto() {
     QVERIFY(!window.makeFolder(partition, QStringLiteral("Nope")));
     QCOMPARE(errors.size(), 1);
     QVERIFY2(errors.first().contains(QStringLiteral("partition")), qPrintable(errors.first()));
+}
+
+// --- The Assembly view (F-032) ---------------------------------------------
+
+namespace {
+
+// Select a row the way a click does, and bring the Assembly tab forward.
+QPlainTextEdit *showAssembly(MainWindow &window, QTreeWidgetItem *item) {
+    auto *tree = browser(window);
+    tree->selectionModel()->select(tree->indexFromItem(item),
+                                   QItemSelectionModel::ClearAndSelect);
+    auto *asmView = window.findChild<QPlainTextEdit *>(QStringLiteral("assembly"));
+    if (!asmView) return nullptr;
+    auto *tabs = window.findChild<QTabWidget *>();
+    for (QTabWidget *t : window.findChildren<QTabWidget *>()) {
+        for (int i = 0; i < t->count(); ++i) {
+            if (t->tabText(i) == QStringLiteral("Assembly")) tabs = t;
+        }
+    }
+    for (int i = 0; i < tabs->count(); ++i) {
+        if (tabs->tabText(i) == QStringLiteral("Assembly")) tabs->setCurrentIndex(i);
+    }
+    return asmView;
+}
+
+QString assemblyStatus(MainWindow &window) {
+    auto *label = window.findChild<QLabel *>(QStringLiteral("assemblyStatus"));
+    return label ? label->text() : QString{};
+}
+
+// A minimal AmigaDOS executable: one code hunk, `moveq #0,d0 / rts`.
+QByteArray program() {
+    const quint32 longs[] = {0x3F3, 0, 1, 0, 0, 1, 0x3E9, 1, 0x70004E75, 0x3F2};
+    QByteArray out;
+    for (quint32 v : longs) {
+        out.append(static_cast<char>(v >> 24));
+        out.append(static_cast<char>(v >> 16));
+        out.append(static_cast<char>(v >> 8));
+        out.append(static_cast<char>(v));
+    }
+    return out;
+}
+
+}  // namespace
+
+void TestMainWindow::aProgramShowsItsCodeInTheAssemblyView() {
+    QTemporaryDir dir;
+    const QString disk = blankDisk(dir, QStringLiteral("blank.adf"));
+    const QString host = dir.filePath(QStringLiteral("Hello"));
+    writeFile(host, program());
+    MainWindow window;
+    window.openImage(disk);
+    QCOMPARE(window.addFiles(browser(window)->topLevelItem(0), {host}), 1);
+    QTreeWidgetItem *row = childNamed(browser(window)->topLevelItem(0), QStringLiteral("Hello"));
+    QVERIFY(row);
+
+    QPlainTextEdit *view = showAssembly(window, row);
+    QVERIFY(view);
+    const QString text = view->toPlainText();
+    QVERIFY2(text.contains(QStringLiteral("moveq   #0,d0")), qPrintable(text));
+    QVERIFY2(text.contains(QStringLiteral("hunk 0: CODE")), qPrintable(text));
+    QVERIFY2(assemblyStatus(window).contains(QStringLiteral("2 instructions")),
+             qPrintable(assemblyStatus(window)));
+    auto *raw = window.findChild<QPushButton *>(QStringLiteral("assemblyRaw"));
+    QVERIFY(raw && raw->isHidden());
+}
+
+void TestMainWindow::aFileThatIsNotAProgramSaysWhyAndCanBeDecodedAnyway() {
+    MainWindow window;
+    window.openImage(m_image);
+    QTreeWidgetItem *startup = childNamed(browser(window)->topLevelItem(0),
+                                          QStringLiteral("startup"));
+    QVERIFY(startup);
+    QPlainTextEdit *view = showAssembly(window, startup);
+    QVERIFY(view);
+    QVERIFY(view->toPlainText().isEmpty());
+    QVERIFY2(assemblyStatus(window).contains(QStringLiteral("not an AmigaDOS executable")),
+             qPrintable(assemblyStatus(window)));
+
+    auto *raw = window.findChild<QPushButton *>(QStringLiteral("assemblyRaw"));
+    QVERIFY(raw && !raw->isHidden());
+    raw->click();
+    QVERIFY(!view->toPlainText().isEmpty());
+    // A guess says it is one, in the listing and beside it.
+    QVERIFY(view->toPlainText().startsWith(QStringLiteral("; not an executable")));
+    QVERIFY(assemblyStatus(window).contains(QStringLiteral("guess")));
+
+    // Moving on and back forgets the request: a guess is never the default.
+    QTreeWidgetItem *root = browser(window)->topLevelItem(0);
+    showAssembly(window, root);
+    showAssembly(window, startup);
+    QVERIFY(view->toPlainText().isEmpty());
+}
+
+void TestMainWindow::theDiskRowShowsItsBootCodeAndAFolderSaysItHasNone() {
+    MainWindow window;
+    window.openImage(m_image);
+    QTreeWidgetItem *root = browser(window)->topLevelItem(0);
+    QPlainTextEdit *view = showAssembly(window, root);
+    QVERIFY(view);
+    // The fixture's bootblock has its header and no code, which is said.
+    QVERIFY2(view->toPlainText().contains(QStringLiteral("no boot code")),
+             qPrintable(view->toPlainText()));
+    QTreeWidgetItem *tools = childNamed(root, QStringLiteral("Tools"));
+    QVERIFY(tools);
+    showAssembly(window, tools);
+    QVERIFY(assemblyStatus(window).contains(QStringLiteral("folder")));
+    auto *raw = window.findChild<QPushButton *>(QStringLiteral("assemblyRaw"));
+    QVERIFY(raw && raw->isHidden());
 }
 
 QTEST_MAIN(TestMainWindow)

@@ -33,7 +33,8 @@ POLICY = {
     # through the seam rather than be written inline (2026-08-28).
     "ade-flux":       {"ade-track", "ade-block", "ade-endian"},
     "ade-filesystem": {"ade-block", "ade-endian"},
-    "ade-object":     {"ade-filesystem"},
+    # ade-endian since D-019: the 68000 decoder reads big-endian words (C-001).
+    "ade-object":     {"ade-filesystem", "ade-endian"},
     # Also `ade-block`, for CRC32 (F-013). Content identification and gzip need
     # the same algorithm, and `ade-block` is the lowest layer both can reach;
     # implementing a checksum twice is how two copies of it silently diverge.

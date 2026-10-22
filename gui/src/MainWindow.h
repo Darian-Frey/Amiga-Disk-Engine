@@ -16,6 +16,7 @@ class QAction;
 class QLabel;
 class QComboBox;
 class QLineEdit;
+class QPushButton;
 class QTimer;
 /// How the tree stores what each row stands for.
 ///
@@ -186,6 +187,8 @@ private:
     void showMapLegend(const QVector<HexRegion> &regions);
     void goToOffset(quint64 offset);
     void markWhatIsOnScreen();
+    // Fill the Assembly view for the selection, if it is showing and stale.
+    void refreshAssembly();
     void markRow(quint32 block);
     QByteArray contentsOf(QTreeWidgetItem *item) const;
     // One line describing an image: container, volume, size, findings.
@@ -238,6 +241,16 @@ private:
     QAction *m_carve = nullptr;
     QAction *m_specs = nullptr;
     QAction *m_surface = nullptr;
+    /// The Assembly view (F-032).
+    QWidget *m_asmTab = nullptr;
+    QPlainTextEdit *m_asm = nullptr;
+    QLabel *m_asmStatus = nullptr;
+    QPushButton *m_asmRaw = nullptr;
+    /// Whether the view no longer matches the selection.
+    bool m_asmStale = true;
+    /// Whether the selected file is to be decoded even though it is not a
+    /// program. Reset whenever the selection changes.
+    bool m_asmForceRaw = false;
     QAction *m_save = nullptr;
     QAction *m_saveAs = nullptr;
     QAction *m_undo = nullptr;

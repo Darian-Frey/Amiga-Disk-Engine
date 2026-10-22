@@ -30,6 +30,7 @@ Deliberately **not** build dependencies:
 
 - **`cargo-fuzz`** / libFuzzer — the F-001 fuzz corpus is part of the Phase-1 acceptance bar, not an afterthought.
 - **ADFlib binary** — differential oracle, as above. The suite must skip rather than fail when it is absent, so that a fresh clone still builds and tests.
+- **GNU objdump for m68k** (`binutils-m68k-linux-gnu`) — the 68000 decoder's oracle (D-019), on the same terms as ADFlib: run by tests, never linked. `m68k-linux-gnu-objdump` on `PATH`, or `ADE_M68K_OBJDUMP` naming it; without it `m68k_oracle` and `disasm` skip. Without root, `apt-get download binutils-m68k-linux-gnu` and `dpkg -x` it anywhere, then point `ADE_M68K_OBJDUMP` at a wrapper setting `LD_LIBRARY_PATH` to its `usr/lib/x86_64-linux-gnu`.
 - **Fixture corpus** — what may be committed is open under **D-010**; expect a fetch step for anything not freely distributable.
 
 Exact versions and per-platform install commands: TBD until the first build.

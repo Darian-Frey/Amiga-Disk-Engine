@@ -13,6 +13,7 @@
 
 #include <QByteArray>
 #include <QString>
+#include <QVector>
 
 #include <utility>
 
@@ -54,6 +55,42 @@ struct EditResult {
     quint32 block = 0;
     bool ok() const { return code == ADE_OK; }
 };
+
+/// One line of a disassembly (F-032).
+struct AsmLine {
+    AdeAsmKind kind = ADE_ASM_NOTE;
+    bool hasOffset = false;
+    quint64 offset = 0;
+    quint32 length = 0;
+    QString text;
+};
+
+/// A disassembly, or why there is none.
+struct Disassembly {
+    /// Empty when there is a listing.
+    QString refusal;
+    QVector<AsmLine> lines;
+    /// False when the file could not be read at all.
+    bool read = false;
+};
+
+/// Take an engine listing into Qt types, freeing it.
+inline Disassembly takeDisassembly(AdeDisasm *raw) {
+    Disassembly out;
+    if (!raw) return out;
+    out.read = true;
+    out.refusal = QString::fromUtf8(bytes(ade_disasm_refusal(raw)));
+    const size_t count = ade_disasm_count(raw);
+    out.lines.reserve(static_cast<int>(count));
+    for (size_t i = 0; i < count; ++i) {
+        AdeAsmLine line{};
+        if (ade_disasm_line(raw, i, &line) != ADE_OK) continue;
+        out.lines.append(AsmLine{line.kind, line.has_offset, line.offset, line.length,
+                                 QString::fromUtf8(bytes(line.text))});
+    }
+    ade_disasm_free(raw);
+    return out;
+}
 
 class Listing {
 public:
@@ -362,6 +399,14 @@ public:
     Search find(const char *pattern, bool text = false, bool ignoreCase = false) const {
         return Search{ade_find_open(m_raw, pattern, text, ignoreCase)};
     }
+
+    /// A file's code, if it is an executable; or decoded as a guess when
+    /// `raw` asks (F-032).
+    Disassembly disassemble(quint32 partition, quint32 block, bool raw) const {
+        return takeDisassembly(ade_disasm_open(m_raw, partition, block, raw));
+    }
+    /// The disk's boot code.
+    Disassembly bootCode() const { return takeDisassembly(ade_disasm_bootblock(m_raw)); }
 
     /// Raw bytes of the mounted image, for a hex view of the disk itself.
     Buffer readRange(quint64 offset, quint64 length) const {

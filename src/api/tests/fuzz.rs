@@ -502,3 +502,67 @@ fn gzip_of(data: &[u8]) -> Vec<u8> {
         .expect("write");
     child.wait_with_output().expect("gzip").stdout
 }
+
+#[test]
+fn fuzz_the_executable_parser_and_listing() {
+    // F-032. An executable's hunk header is a list of counts that size reads:
+    // hunk sizes, relocation counts, symbol name lengths. Each must be bounded
+    // by what the file holds, and a listing must stay within its line cap
+    // whatever the counts claim.
+    use ade_core::layers::object::{hunk, listing};
+    let mut rng = Rng::new(0x5EED_0F32);
+    let put = |v: &mut Vec<u8>, x: u32| {
+        v.extend_from_slice(&[(x >> 24) as u8, (x >> 16) as u8, (x >> 8) as u8, x as u8]);
+    };
+    // A small, valid two-hunk program with relocations and a symbol, as the
+    // base worth mutating: mutation then lands on plausible structure.
+    let mut base = Vec::new();
+    for x in [
+        0x3F3,
+        0,
+        2,
+        0,
+        1,
+        2,
+        1,
+        0x3E9,
+        2,
+        0x41F9_0000,
+        0x0000_4E75,
+        0x3EC,
+        1,
+        1,
+        2,
+        0,
+        0x3F0,
+        1,
+        0x6D61_696E,
+        0,
+        0,
+        0x3F2,
+        0x3EA,
+        1,
+        0x1234_5678,
+        0x3F2,
+    ] {
+        put(&mut base, x);
+    }
+    for i in 0..iterations(20_000) {
+        let seed = u64::from(i);
+        let mut buf = base.clone();
+        for _ in 0..=rng.below(6) {
+            mutate(&mut buf, &mut rng);
+        }
+        if rng.below(4) == 0 {
+            buf.truncate(rng.below(buf.len() + 1));
+        }
+        timed(seed, "executable parser", || {
+            let _ = hunk::parse(&buf);
+            if let Some(l) = listing::executable(&buf) {
+                assert!(l.lines.len() <= listing::MAX_LINES + 1);
+            }
+            let _ = listing::raw(&buf);
+            let _ = listing::bootblock(&buf);
+        });
+    }
+}
