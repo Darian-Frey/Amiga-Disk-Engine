@@ -333,6 +333,7 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
     asmLayout->addWidget(m_asm);
     m_views->addTab(m_asmTab, QStringLiteral("Assembly"));
     connect(m_views, &QTabWidget::currentChanged, this, [this] {
+        fillVisiblePreview();
         if (m_views->currentWidget() == m_asmTab) refreshAssembly();
     });
 
@@ -1577,6 +1578,9 @@ void MainWindow::showLegend(const QVector<HexRegion> &regions) {
 void MainWindow::showHit(QTreeWidgetItem *item) {
     showWholeDisk(item);
     const quint64 offset = item->data(0, RoleOffset).toULongLong();
+    // The hex tab first: its pane is filled only when it is showing
+    // (IMP-009), and scrolling it before then scrolls an empty document.
+    m_views->setCurrentWidget(m_hexTab);
 
     // A few lines above the hit rather than at the very top: a match on the
     // first visible line looks like the top of the view rather than like a
@@ -1588,7 +1592,6 @@ void MainWindow::showHit(QTreeWidgetItem *item) {
     // scrolled to. Two bytes is a placeholder for "here": the pane's selection
     // is per-field, and the search does not report the pattern's length.
     m_hex->selectBytesAt(offset);
-    m_views->setCurrentWidget(m_hexTab);
     markWhatIsOnScreen();
 }
 
@@ -1633,8 +1636,12 @@ void MainWindow::showWholeDisk(QTreeWidgetItem *item) {
     m_diskPartition = item->data(0, RolePartition).toUInt();
     m_topLine = -1;
     if (m_follow) m_follow->start();
-    m_hex->setPlainText(hexview::dump(bytes));
-    m_text->setPlainText(QString::fromLatin1(bytes));
+    // Filled when its tab is showing, not before (IMP-009): on a whole disk
+    // the hex pane costs about 380 ms and the text pane 130, and rebuilding
+    // a hidden one on every click is time spent on nothing.
+    m_text->clear();
+    m_pending = {true, true, bytes};
+    fillVisiblePreview();
     showLegend(regions);
     m_extract->setEnabled(false);
 
@@ -1729,15 +1736,18 @@ void MainWindow::showEntry(QTreeWidgetItem *item) {
     if (data.isEmpty()) {
         // Either unreadable or genuinely empty. Both are worth saying, and
         // neither is worth a dialog.
+        m_pending = {};
         m_hex->setPlainText(QStringLiteral("(no readable contents)"));
         m_text->clear();
         return;
     }
     const QByteArray head = data.left(PreviewBytes);
 
-    m_hex->setPlainText(hexview::dump(head));
-    // Latin-1, like every other name and string off an Amiga disk.
-    m_text->setPlainText(QString::fromLatin1(head));
+    // Only the pane whose tab is showing is filled now; the other waits until
+    // it is brought forward (IMP-009).
+    m_text->clear();
+    m_pending = {true, true, head};
+    fillVisiblePreview();
     if (data.size() > head.size()) {
         statusBar()->showMessage(
             QStringLiteral("Showing the first %1 of %2 bytes").arg(head.size()).arg(data.size()));
@@ -1767,6 +1777,7 @@ void MainWindow::extractSelected() {
 }
 
 void MainWindow::clearViews() {
+    m_pending = {};
     m_hex->clear();
     m_text->clear();
     // The map and its legend belong to whatever was being shown. Left behind,
@@ -2236,4 +2247,23 @@ void MainWindow::refreshAssembly() {
                              .arg(instructions == 1 ? "" : "s")
                              .arg(m_asmForceRaw ? QStringLiteral(", decoded as a guess")
                                                 : QString{}));
+}
+
+// ---------------------------------------------------------------------------
+// Filling only the preview that is showing (IMP-009)
+// ---------------------------------------------------------------------------
+
+void MainWindow::fillVisiblePreview() {
+    if (!m_views) return;
+    QWidget *showing = m_views->currentWidget();
+    if (m_pending.hex && showing == m_hexTab) {
+        m_pending.hex = false;
+        m_hex->setPlainText(hexview::dump(m_pending.bytes));
+    }
+    if (m_pending.text && showing == m_text) {
+        m_pending.text = false;
+        // Latin-1, like every other name and string off an Amiga disk.
+        m_text->setPlainText(QString::fromLatin1(m_pending.bytes));
+    }
+    if (!m_pending.hex && !m_pending.text) m_pending.bytes.clear();
 }

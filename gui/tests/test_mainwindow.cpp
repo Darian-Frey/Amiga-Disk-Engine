@@ -62,6 +62,28 @@ QList<QPlainTextEdit *> previewPanes(MainWindow &window) {
     return out;
 }
 
+// The hex pane and the text pane, told apart by type: `findChildren` does not
+// keep creation order once widgets are moved into layouts and tab stacks, so
+// "the first preview pane" was never a reliable way to name one.
+QPlainTextEdit *hexPane(MainWindow &window) { return window.findChild<HexPane *>(); }
+QPlainTextEdit *textPane(MainWindow &window) {
+    for (auto *view : previewPanes(window)) {
+        if (!qobject_cast<HexPane *>(view)) return view;
+    }
+    return nullptr;
+}
+
+// Bring a tab of the main view to the front, as a click on it would. The hex
+// and text panes are filled only when their tab is showing (IMP-009), so a
+// test reading one must show it first, exactly as a person must.
+void bringForward(MainWindow &window, const QString &tab) {
+    for (QTabWidget *tabs : window.findChildren<QTabWidget *>()) {
+        for (int i = 0; i < tabs->count(); ++i) {
+            if (tabs->tabText(i) == tab) tabs->setCurrentIndex(i);
+        }
+    }
+}
+
 // An image is a root in the tree; its files hang beneath it.
 QTreeWidgetItem *childNamed(QTreeWidgetItem *parent, const QString &name) {
     for (int i = 0; i < parent->childCount(); ++i) {
@@ -203,14 +225,14 @@ void TestMainWindow::aFileSelectionFillsTheHexView() {
 
     const auto views = previewPanes(window);
     QCOMPARE(views.size(), 2);
-    // The hex view is the first tab; both must have picked up the contents.
-    bool sawContents = false;
-    for (auto *view : views) {
-        if (view->toPlainText().contains(QStringLiteral("hello from a generated fixture"))) {
-            sawContents = true;
-        }
-    }
-    QVERIFY2(sawContents, "selecting a file should show its contents");
+    // The hex view is the tab in front, so it is filled; the text view is
+    // not showing, so it waits (IMP-009) — and fills the moment it is shown.
+    QVERIFY2(!hexPane(window)->toPlainText().isEmpty(), "the showing pane is filled");
+    QVERIFY2(textPane(window)->toPlainText().isEmpty(), "the hidden pane is not built");
+    bringForward(window, QStringLiteral("Text"));
+    QVERIFY2(textPane(window)->toPlainText().contains(
+                 QStringLiteral("hello from a generated fixture")),
+             "selecting a file should show its contents");
 }
 
 void TestMainWindow::aDirectoryExpandsLazily() {
@@ -306,7 +328,8 @@ void TestMainWindow::searchReportsThePathAndTheImage() {
     found->setCurrentItem(found->topLevelItem(0));
     const auto views = previewPanes(window);
     QCOMPARE(views.size(), 2);
-    QVERIFY(!views.first()->toPlainText().isEmpty());
+    bringForward(window, QStringLiteral("Hex"));
+    QVERIFY(!hexPane(window)->toPlainText().isEmpty());
     // Taking the selection means taking it: a row left highlighted in the
     // tree would read as the thing being previewed, and it is not.
     QVERIFY(tree->selectedItems().isEmpty());
@@ -528,10 +551,11 @@ void TestMainWindow::searchCoversEveryPartitionNotJustTheFirst() {
     // And selecting each gives the file from *that* partition. The two share a
     // name and a path, so nothing but the partition tells them apart.
     const auto views = previewPanes(window);
+    bringForward(window, QStringLiteral("Text"));
     QStringList shown;
     for (int i = 0; i < 2; ++i) {
         found->setCurrentItem(found->topLevelItem(i));
-        shown << views.at(1)->toPlainText();
+        shown << textPane(window)->toPlainText();
     }
     QVERIFY2(shown[0] != shown[1], "two files of one name must read differently");
     QVERIFY(shown.filter(QStringLiteral("this is DH0")).size() == 1);

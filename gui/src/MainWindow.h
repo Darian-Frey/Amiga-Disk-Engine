@@ -204,6 +204,9 @@ private:
     void markWhatIsOnScreen();
     // Fill the Assembly view for the selection, if it is showing and stale.
     void refreshAssembly();
+    // Fill whichever of the hex and text panes is showing and not yet filled
+    // for the current selection (IMP-009).
+    void fillVisiblePreview();
     void markRow(quint32 block);
     QByteArray contentsOf(QTreeWidgetItem *item) const;
     // One line describing an image: container, volume, size, findings.
@@ -256,6 +259,15 @@ private:
     QAction *m_carve = nullptr;
     QAction *m_specs = nullptr;
     QAction *m_surface = nullptr;
+    /// What the hex and text panes are waiting to show, filled only when
+    /// their tab is in front (IMP-009). Selecting a disk filled both with the
+    /// whole disk — about half a second — whichever tab was showing.
+    struct PendingPreview {
+        bool hex = false;
+        bool text = false;
+        QByteArray bytes;
+    };
+    PendingPreview m_pending;
     /// The Assembly view (F-032).
     QWidget *m_asmTab = nullptr;
     QPlainTextEdit *m_asm = nullptr;

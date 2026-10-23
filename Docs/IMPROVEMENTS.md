@@ -11,6 +11,18 @@ Effort vocabulary: trivial | small | medium | large.
 
 ## Suggested
 
+### IMP-017 Selecting a disk lays out its whole hex dump: 400 ms a click
+**Status:** suggested
+**Effort:** medium
+
+**Where:** [gui/src/HexView.h](../gui/src/HexView.h) `HexPane`, and `MainWindow::fillVisiblePreview`.
+
+**What happens.** Measured 2026-10-23 with IMP-009 applied: selecting a disk's own row with the Hex tab in front costs **401 ms**, nearly all of it `setPlainText` laying out a 56,000-line dump of an 880 KB floppy and the region highlighter colouring every line of it. A hard disk is capped at 4 MB of dump, about 1.4 s. A file costs 5.4 ms for the same reason at a sixty-fourth of the size.
+
+**What would be better.** IMP-009's second half: a pane that formats and highlights only the lines on screen, from the bytes, as it scrolls — a `QAbstractScrollArea` painting rows on demand rather than a `QPlainTextEdit` holding a finished string. The cost becomes a screenful, whatever the disk.
+
+**Trade-offs.** The current pane is a plain text document, and a great deal relies on that: selection that stays within one field (hex or ASCII), copying exactly what is highlighted, marking the characters a hex selection spells, the scroll-follow that marks the file on screen, the region tints. Each is tested, and each would need reimplementing in the new widget — which is why this is medium rather than small, and why it was split from IMP-009 rather than done with it. It also removes the 4 MB cap, which exists only because layout is slow.
+
 ### IMP-016 Two entries with the same name in one directory are not reported
 **Status:** suggested
 **Effort:** small
@@ -69,8 +81,10 @@ The split is not random and there is a defensible rule inside it — a command t
 
 **Why it matters now.** [[D-018]] settles the overwrite question for the write suite, and cites this entry: the suite's rule was chosen to be coherent with the *majority* of these paths rather than with all of them, because they do not agree with each other. Whatever is decided here should be decided for all five at once.
 
+## Applied
+
 ### IMP-009 Previewing a file builds a 64 KB hex dump nobody can see
-**Status:** suggested
+**Status:** applied
 **Effort:** small
 **Found:** 2026-08-29, separating the two halves of IMP-008's measurement.
 **Where:** [gui/src/MainWindow.cpp](../gui/src/MainWindow.cpp), `showEntry` and `hexDump`.
@@ -85,7 +99,18 @@ Two cheap halves suggest themselves before anything ambitious: fill only the vis
 
 **Not urgent, and the number is misleading on its own.** 3.6 ms is a click, not a corpus: it took selecting 1,478 files in a loop to make it visible at all. Unlike [[imp-008]], which compounded into 35 seconds because it was quadratic in the whole tree, this is linear and bounded by what one person can click. It is recorded because it was measured, not because it hurts.
 
-## Applied
+**Applied 2026-10-23: the first half, and the measurement had grown.** Re-measured before changing anything, over 30 corpus disks and their 222 top-level files: a file selection had become **8.6 ms**, not 3.6 — the window has gained the map, the Assembly tab and the edit actions since — and almost all of it was still the preview: 3.3 ms setting the hex pane, 3.0 setting the text pane, 1.8 formatting the dump. Selecting a disk's own row was worse and unrecorded: **542 ms**, 382 of it the whole-disk hex pane and 131 the text pane, rebuilt on every click whichever tab was showing.
+
+The hex and text panes now fill only when their tab is in front, and the other waits until it is brought forward. Same 30 disks, before → after:
+
+| tab in front | file selection | disk-row selection |
+|---|---|---|
+| Hex | 8.64 → **5.44 ms** | 542 → **401 ms** |
+| Map | 7.87 → **0.04 ms** | 542 → **1.1 ms** |
+
+One ordering bug it exposed and fixed: a content-search hit scrolled the hex pane *before* switching to its tab, which with lazy filling scrolled an empty document. Three tests assumed a hidden pane held content and were changed to bring it forward first, as a person must; one now asserts the hidden pane is *not* built. They had also been naming the panes by position in `findChildren`, which does not keep creation order once widgets move into layouts; they now name them by type. The GUI suite runs in 10 seconds instead of 27 as a side effect. The second half — formatting only what is on screen — is what remains of the 401 ms, and is IMP-017.
+
+
 
 ### IMP-012 The health report does not check that each entry sits in the hash slot its name hashes to
 **Status:** applied
