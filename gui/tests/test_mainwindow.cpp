@@ -33,6 +33,7 @@
 #include <cmath>
 #include <QLabel>
 #include <QPushButton>
+#include <QCheckBox>
 #include <QMenu>
 #include <QMenuBar>
 #include <QScreen>
@@ -2108,6 +2109,19 @@ void TestMainWindow::aProgramShowsItsCodeInTheAssemblyView() {
              qPrintable(assemblyStatus(window)));
     auto *raw = window.findChild<QPushButton *>(QStringLiteral("assemblyRaw"));
     QVERIFY(raw && raw->isHidden());
+
+    // Each instruction says what it does, at the end of its line — and the
+    // column can be turned off without decoding again.
+    QVERIFY2(text.contains(QStringLiteral("; d0 = 0")), qPrintable(text));
+    QVERIFY2(text.contains(QStringLiteral("; return from the subroutine")), qPrintable(text));
+    auto *explain = window.findChild<QCheckBox *>(QStringLiteral("assemblyExplain"));
+    QVERIFY(explain && explain->isChecked());
+    explain->setChecked(false);
+    const QString plain = view->toPlainText();
+    QVERIFY2(!plain.contains(QStringLiteral("; d0 = 0")), qPrintable(plain));
+    QVERIFY(plain.contains(QStringLiteral("moveq   #0,d0")));
+    explain->setChecked(true);
+    QVERIFY(view->toPlainText().contains(QStringLiteral("; d0 = 0")));
 }
 
 void TestMainWindow::aFileThatIsNotAProgramSaysWhyAndCanBeDecodedAnyway() {

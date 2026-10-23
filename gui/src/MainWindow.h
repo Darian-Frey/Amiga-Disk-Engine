@@ -17,6 +17,7 @@ class QLabel;
 class QComboBox;
 class QLineEdit;
 class QPushButton;
+class QCheckBox;
 class QTimer;
 /// How the tree stores what each row stands for.
 ///
@@ -204,6 +205,8 @@ private:
     void markWhatIsOnScreen();
     // Fill the Assembly view for the selection, if it is showing and stale.
     void refreshAssembly();
+    // Lay out the listing already decoded, with or without its explanations.
+    void renderAssembly();
     // Fill whichever of the hex and text panes is showing and not yet filled
     // for the current selection (IMP-009).
     void fillVisiblePreview();
@@ -273,6 +276,11 @@ private:
     QPlainTextEdit *m_asm = nullptr;
     QLabel *m_asmStatus = nullptr;
     QPushButton *m_asmRaw = nullptr;
+    QCheckBox *m_asmExplain = nullptr;
+    /// The listing on screen, kept so the explanations can be shown or
+    /// hidden without decoding again.
+    ade::Disassembly m_asmShown;
+    QString m_asmWhat;
     /// Whether the view no longer matches the selection.
     bool m_asmStale = true;
     /// Whether the selected file is to be decoded even though it is not a

@@ -523,6 +523,9 @@ typedef struct {
     uint64_t   offset;
     uint32_t   length;
     AdeBytes   text;
+    /* What the line does, in words, UTF-8; empty when there is nothing to
+     * explain. Kept apart from `text` so a view can show or hide it. */
+    AdeBytes   comment;
 } AdeAsmLine;
 
 typedef struct AdeDisasm AdeDisasm;

@@ -54,6 +54,29 @@ pub struct Line {
     pub length: u32,
     /// The text, columns included.
     pub text: String,
+    /// What the line does, in words (F-032) — kept apart from `text` so a
+    /// view can show or hide it without decoding again. `None` for a line
+    /// with nothing to explain.
+    pub comment: Option<String>,
+}
+
+/// The column an explanation starts at when it is shown on the line.
+pub const COMMENT_COLUMN: usize = 72;
+
+impl Line {
+    /// The line with its explanation, if any, as a `; comment` at
+    /// [`COMMENT_COLUMN`] — or two spaces past the text when the text is
+    /// longer than that.
+    #[must_use]
+    pub fn with_comment(&self) -> String {
+        match &self.comment {
+            Some(c) => {
+                let width = COMMENT_COLUMN.max(self.text.chars().count().saturating_add(2));
+                format!("{:<width$}; {c}", self.text)
+            }
+            None => self.text.clone(),
+        }
+    }
 }
 
 /// A listing and how it was made.
@@ -75,6 +98,7 @@ impl Listing {
                     offset: None,
                     length: 0,
                     text: format!("; stopped after {MAX_LINES} lines"),
+                    comment: None,
                 });
             }
             return false;
@@ -84,6 +108,7 @@ impl Listing {
             offset,
             length,
             text,
+            comment: None,
         });
         true
     }
@@ -107,7 +132,9 @@ fn hex(bytes: &[u8]) -> String {
         }
         let _ = write!(out, "{b:02x}");
     }
-    format!("{out:<24}")
+    // Two spaces wider than the longest instruction's bytes (five words, 24
+    // characters), so the mnemonic never runs into them.
+    format!("{out:<26}")
 }
 
 /// Decode `code`, which sits at `base` in whatever was listed and whose first
@@ -160,7 +187,7 @@ fn decode_run(
             .max(1);
         let bytes = rest.get(..len).unwrap_or(&[]);
         let offset = Some(base.saturating_add(at as u64));
-        let (kind, text) = match &decoded {
+        let (kind, text, comment) = match &decoded {
             Decoded::Instruction(i) => {
                 // A relocated long inside this instruction is an address the
                 // loader fills in; name it by what it points at.
@@ -172,26 +199,33 @@ fn decode_run(
                         Some((value, name))
                     })
                     .collect();
-                let label = |v: u32| -> Option<String> {
-                    if let Some(prefix) = span.get(&v) {
-                        return Some(format!("{prefix}+${v:x}"));
-                    }
-                    labels.get(&v).cloned()
+                let position = |v: u32| labels.get(&v).cloned();
+                let absolute = |v: u32| span.get(&v).map(|prefix| format!("{prefix}+${v:x}"));
+                let names = crate::m68k::Names {
+                    position: &position,
+                    absolute: &absolute,
                 };
-                (LineKind::Code, i.motorola(&label))
+                let words = crate::explain::explain(i, &names);
+                (LineKind::Code, i.motorola(&names), Some(words))
             }
+            // The note goes in the comment column, so every remark on the
+            // listing lines up; a view shows it whether or not explanations
+            // are on, because it is a fact about the bytes, not an explanation.
             Decoded::Needs68020(w) => (
                 LineKind::Data,
-                format!(
-                    "{:<8}${w:04x}        ; 68020 addressing mode: not a 68000 instruction",
-                    "dc.w"
-                ),
+                format!("{:<8}${w:04x}", "dc.w"),
+                Some("68020 addressing mode: not a 68000 instruction".to_owned()),
             ),
             Decoded::Invalid(w) => (
                 LineKind::Data,
-                format!("{:<8}${w:04x}        ; not a 68000 instruction", "dc.w"),
+                format!("{:<8}${w:04x}", "dc.w"),
+                Some("not a 68000 instruction".to_owned()),
             ),
-            Decoded::Truncated => (LineKind::Data, format!("{:<8}{}", "dc.b", byte_list(bytes))),
+            Decoded::Truncated => (
+                LineKind::Data,
+                format!("{:<8}{}", "dc.b", byte_list(bytes)),
+                None,
+            ),
         };
         if !out.push(
             kind,
@@ -200,6 +234,9 @@ fn decode_run(
             format!("{address:08x}  {}{text}", hex(bytes)),
         ) {
             return;
+        }
+        if let Some(line) = out.lines.last_mut() {
+            line.comment = comment;
         }
         if let Decoded::Instruction(i) = &decoded
             && i.ends_flow()
@@ -306,7 +343,7 @@ fn hunk_listing(out: &mut Listing, bytes: &[u8], h: &Hunk) {
                 LineKind::Data,
                 None,
                 0,
-                format!("{:08x}  {:<24}{:<8}{}", 0, "", "ds.b", h.size),
+                format!("{:08x}  {:<26}{:<8}{}", 0, "", "ds.b", h.size),
             );
         }
         Kind::Data => data_run(out, data, base),
@@ -425,6 +462,81 @@ mod tests {
             .find(|l| l.text.contains("lea"))
             .unwrap();
         assert_eq!((lea.offset, lea.length), (Some(36), 6));
+    }
+
+    #[test]
+    fn a_ten_byte_instruction_keeps_its_mnemonic_apart_and_every_code_line_is_explained() {
+        // andi.l #$f7,($bfd100).l: five words, the longest a 68000 has. The
+        // screenshot that asked for explanations also showed its bytes running
+        // into the mnemonic.
+        let listing = raw(&[0x02, 0xb9, 0x00, 0x00, 0x00, 0xf7, 0x00, 0xbf, 0xd1, 0x00]);
+        let line = listing
+            .lines
+            .iter()
+            .find(|l| l.kind == LineKind::Code)
+            .unwrap();
+        assert!(
+            line.text.contains("d100  andi.l"),
+            "two spaces before the mnemonic: {}",
+            line.text
+        );
+        let comment = line.comment.as_deref().unwrap();
+        assert!(comment.contains("CIAB PRB"), "{comment}");
+        assert!(
+            line.with_comment().contains("; keep only bits $f7"),
+            "{}",
+            line.with_comment()
+        );
+        // Notes and data have nothing to explain.
+        assert!(
+            listing
+                .lines
+                .iter()
+                .filter(|l| l.kind != LineKind::Code)
+                .all(|l| l.comment.is_none())
+        );
+    }
+
+    #[test]
+    fn a_word_that_is_no_instruction_says_so_in_the_comment_column() {
+        // Kept out of the text, so it lines up with every other remark.
+        let listing = raw(&[0xa0, 0x00]);
+        let line = listing
+            .lines
+            .iter()
+            .find(|l| l.kind == LineKind::Data)
+            .unwrap();
+        assert_eq!(line.comment.as_deref(), Some("not a 68000 instruction"));
+        assert!(!line.text.contains(';'), "{}", line.text);
+        assert_eq!(line.with_comment().find(';'), Some(COMMENT_COLUMN));
+    }
+
+    #[test]
+    fn a_number_is_named_only_when_a_relocation_makes_it_an_address() {
+        // Offset 4 has a label (the branch lands there), and the code also
+        // holds the number 4 as an immediate and as an absolute address.
+        // Neither is that label: without a relocation they are numbers. Found
+        // in 3D Pool's boot code, where `move.l #$c8,d2` read `#lab_00c8`.
+        let listing = raw(&[
+            0x60, 0x02, // bra.s  lab_0004
+            0x4e, 0x71, // nop
+            0x24, 0x3c, 0x00, 0x00, 0x00, 0x04, // move.l #4,d2
+            0x4e, 0xf9, 0x00, 0x00, 0x00, 0x04, // jmp ($4).l
+        ]);
+        let text: Vec<&str> = listing.lines.iter().map(|l| l.text.as_str()).collect();
+        let all = text.join("\n");
+        assert!(
+            all.contains("bra.s   lab_0004"),
+            "the branch is named: {all}"
+        );
+        assert!(
+            all.contains("move.l  #4,d2"),
+            "the immediate is a number: {all}"
+        );
+        assert!(
+            all.contains("jmp     ($4).l"),
+            "the absolute address is a number: {all}"
+        );
     }
 
     #[test]

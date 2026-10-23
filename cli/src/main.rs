@@ -617,7 +617,7 @@ fn disasm(args: &Args) -> ExitCode {
     };
     match listing {
         Ok(l) => {
-            let lines: Vec<String> = l.lines.into_iter().map(|line| line.text).collect();
+            let lines: Vec<String> = l.lines.iter().map(disasm::Line::with_comment).collect();
             emit_lines(&mut std::io::stdout().lock(), &lines);
             ExitCode::from(EXIT_CLEAN)
         }

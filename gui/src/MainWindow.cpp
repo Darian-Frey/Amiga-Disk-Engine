@@ -6,6 +6,7 @@
 #include "ImageTree.h"
 
 #include <QAction>
+#include <QCheckBox>
 #include <QSyntaxHighlighter>
 #include <QCloseEvent>
 #include <QInputDialog>
@@ -83,8 +84,8 @@ protected:
             setFormat(0, static_cast<int>(line.size()), m_label);
             return;
         }
-        // Address and bytes: the first two columns, 34 characters.
-        constexpr int Columns = 34;
+        // Address and bytes: the first two columns, 36 characters.
+        constexpr int Columns = 36;
         setFormat(0, qMin(Columns, static_cast<int>(line.size())), m_address);
         if (line.mid(Columns).startsWith(QStringLiteral("dc."))) {
             setFormat(Columns, static_cast<int>(line.size()) - Columns, m_data);
@@ -324,7 +325,18 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
     });
     m_asmTab = new QWidget(this);
     auto *asmBar = new QHBoxLayout;
+    // What each instruction does, at the end of its line (F-032). On by
+    // default: the listing is for reading, and the column is what makes it
+    // readable to somebody who does not already know 68000. Turned off, the
+    // listing is a plain assembler's — and nothing is decoded again.
+    m_asmExplain = new QCheckBox(QStringLiteral("Explain"), this);
+    m_asmExplain->setObjectName(QStringLiteral("assemblyExplain"));
+    m_asmExplain->setChecked(true);
+    m_asmExplain->setToolTip(QStringLiteral(
+        "Describe what each instruction does, and name the Amiga hardware it touches."));
+    connect(m_asmExplain, &QCheckBox::toggled, this, [this] { renderAssembly(); });
     asmBar->addWidget(m_asmStatus, 1);
+    asmBar->addWidget(m_asmExplain);
     asmBar->addWidget(m_asmRaw);
     auto *asmLayout = new QVBoxLayout(m_asmTab);
     asmLayout->setContentsMargins(0, 0, 0, 0);
@@ -2188,6 +2200,7 @@ void MainWindow::refreshAssembly() {
     m_asmStale = false;
     m_asmRaw->hide();
     const auto say = [this](const QString &why) {
+        m_asmShown = {};
         m_asm->clear();
         m_asmStatus->setText(why);
     };
@@ -2233,16 +2246,37 @@ void MainWindow::refreshAssembly() {
         return;
     }
 
+    m_asmShown = std::move(listing);
+    m_asmWhat = what;
+    renderAssembly();
+}
+
+void MainWindow::renderAssembly() {
+    if (!m_asm || m_asmShown.lines.isEmpty()) return;
+    // The column the explanations start at, matching the CLI's listing.
+    constexpr int CommentColumn = 72;
+    const bool explain = m_asmExplain && m_asmExplain->isChecked();
     QStringList lines;
-    lines.reserve(listing.lines.size());
+    lines.reserve(m_asmShown.lines.size());
     int instructions = 0;
-    for (const ade::AsmLine &line : listing.lines) {
-        lines << line.text;
+    for (const ade::AsmLine &line : m_asmShown.lines) {
+        // Explanations follow the checkbox; a note about the bytes themselves
+        // ("not a 68000 instruction") is shown either way.
+        const bool show = !line.comment.isEmpty() && (explain || line.kind != ADE_ASM_CODE);
+        if (show) {
+            const int width = qMax(CommentColumn, static_cast<int>(line.text.size()) + 2);
+            lines << line.text.leftJustified(width) + QStringLiteral("; ") + line.comment;
+        } else {
+            lines << line.text;
+        }
         if (line.kind == ADE_ASM_CODE) ++instructions;
     }
+    // Where the reader was, kept across a toggle of the column.
+    const int top = m_asm->verticalScrollBar()->value();
     m_asm->setPlainText(lines.join(QLatin1Char('\n')));
+    m_asm->verticalScrollBar()->setValue(top);
     m_asmStatus->setText(QStringLiteral("%1 — %2 instruction%3%4")
-                             .arg(what)
+                             .arg(m_asmWhat)
                              .arg(instructions)
                              .arg(instructions == 1 ? "" : "s")
                              .arg(m_asmForceRaw ? QStringLiteral(", decoded as a guess")

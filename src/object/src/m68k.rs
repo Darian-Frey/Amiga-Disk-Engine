@@ -912,7 +912,7 @@ fn s_name(cond: &str) -> &'static str {
 // ---------------------------------------------------------------------------
 
 /// A register by number, 0–7 data and 8–15 address, with `a7` as `sp`.
-fn reg_name(reg: u8) -> String {
+pub(crate) fn reg_name(reg: u8) -> String {
     match reg {
         0..=7 => format!("d{reg}"),
         15 => "sp".to_owned(),
@@ -920,13 +920,13 @@ fn reg_name(reg: u8) -> String {
     }
 }
 
-fn a_name(reg: u8) -> String {
+pub(crate) fn a_name(reg: u8) -> String {
     reg_name(reg.saturating_add(8))
 }
 
 /// A number the way an Amiga assembler listing writes it: small ones in
 /// decimal, anything else in hex with a `$`.
-fn number(value: i64) -> String {
+pub(crate) fn number(value: i64) -> String {
     if (-9..=9).contains(&value) {
         value.to_string()
     } else if value < 0 {
@@ -936,7 +936,7 @@ fn number(value: i64) -> String {
     }
 }
 
-fn index(i: Index) -> String {
+pub(crate) fn index(i: Index) -> String {
     let scale = if i.scale == 1 {
         String::new()
     } else {
@@ -979,11 +979,39 @@ fn reg_list(mask: u16) -> String {
     parts.join("/")
 }
 
+/// How a listing names numbers in an instruction.
+///
+/// Two kinds, kept apart because they are different claims. A **position** —
+/// a branch target, a PC-relative operand — is a place in the listing, so the
+/// listing's labels name it. An **absolute** value — an immediate, an absolute
+/// address — is a number until the executable's relocations say the loader
+/// turns it into an address; only then may it be named. Merging the two named
+/// `move.l #$c8,d2` as `#lab_00c8` because a branch target happened to sit at
+/// offset `$c8`.
+pub struct Names<'a> {
+    /// Names a place in the listing.
+    pub position: &'a dyn Fn(u32) -> Option<String>,
+    /// Names a value the loader relocates.
+    pub absolute: &'a dyn Fn(u32) -> Option<String>,
+}
+
+const fn nameless(_: u32) -> Option<String> {
+    None
+}
+
+impl Names<'static> {
+    /// No names at all: every address is a number.
+    pub const NONE: Self = Self {
+        position: &nameless,
+        absolute: &nameless,
+    };
+}
+
 impl Operand {
-    /// The operand in Motorola syntax. `label` names an address when the
-    /// listing knows one — a symbol, or a relocated hunk offset.
+    /// The operand in Motorola syntax, naming what `names` can name.
     #[must_use]
-    pub fn motorola(&self, label: &dyn Fn(u32) -> Option<String>) -> String {
+    pub fn motorola(&self, names: &Names<'_>) -> String {
+        let label = names.position;
         let addr = |a: u32| label(a).unwrap_or_else(|| format!("${a:x}"));
         match self {
             Self::D(r) => reg_name(*r),
@@ -996,10 +1024,10 @@ impl Operand {
                 format!("{}({},{})", number(i64::from(*d)), a_name(*r), index(*i))
             }
             Self::AbsW(a) => format!("(${:x}).w", unsigned32(i32::from(*a))),
-            Self::AbsL(a) => label(*a).unwrap_or_else(|| format!("(${a:x}).l")),
+            Self::AbsL(a) => (names.absolute)(*a).unwrap_or_else(|| format!("(${a:x}).l")),
             Self::PcDisp(t) => format!("{}(pc)", addr(*t)),
             Self::PcIndexed(t, i) => format!("{}(pc,{})", addr(*t), index(*i)),
-            Self::Imm(v) => match label(*v) {
+            Self::Imm(v) => match (names.absolute)(*v) {
                 Some(name) => format!("#{name}"),
                 None => format!("#{}", number(i64::from(*v))),
             },
@@ -1027,7 +1055,7 @@ impl Instruction {
 
     /// The whole instruction in Motorola syntax, mnemonic padded to a column.
     #[must_use]
-    pub fn motorola(&self, label: &dyn Fn(u32) -> Option<String>) -> String {
+    pub fn motorola(&self, names: &Names<'_>) -> String {
         let operands: Vec<String> = self
             .operands
             .iter()
@@ -1040,7 +1068,7 @@ impl Instruction {
                         number(i64::from(i32::from_ne_bytes(v.to_ne_bytes())))
                     )
                 }
-                other => other.motorola(label),
+                other => other.motorola(names),
             })
             .collect();
         if operands.is_empty() {
@@ -1227,7 +1255,7 @@ mod tests {
 
     fn text(bytes: &[u8]) -> String {
         match decode(bytes, 0) {
-            Decoded::Instruction(i) => i.motorola(&|_| None),
+            Decoded::Instruction(i) => i.motorola(&Names::NONE),
             other => panic!("{bytes:02x?}: {other:?}"),
         }
     }

@@ -6,7 +6,20 @@
 //! Content signatures (F-020) live here: recognising what bytes *are*, as
 //! distinct from what a directory entry calls them.
 
+pub mod explain;
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    clippy::panic,
+    clippy::too_many_lines,
+    clippy::nonminimal_bool,
+    reason = "a test module over every opcode word"
+)]
+mod explain_audit;
 pub mod find;
+pub mod hardware;
 pub mod hunk;
 pub mod listing;
 pub mod m68k;

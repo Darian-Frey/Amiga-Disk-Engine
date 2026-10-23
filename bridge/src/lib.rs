@@ -2461,6 +2461,9 @@ pub struct AdeAsmLine {
     pub length: u32,
     /// The line, columns included. UTF-8; in practice ASCII.
     pub text: AdeBytes,
+    /// What the line does, in words, UTF-8; empty for a line with nothing to
+    /// explain. Separate from `text` so a view can hide it.
+    pub comment: AdeBytes,
 }
 
 /// A disassembly, or the reason there is none.
@@ -2582,6 +2585,10 @@ pub unsafe extern "C" fn ade_disasm_line(
                 offset: line.offset.unwrap_or(0),
                 length: line.length,
                 text: AdeBytes::of(line.text.as_bytes()),
+                comment: line
+                    .comment
+                    .as_ref()
+                    .map_or_else(AdeBytes::empty, |c| AdeBytes::of(c.as_bytes())),
             };
         }
         AdeResult::Ok

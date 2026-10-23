@@ -11,6 +11,18 @@ Effort vocabulary: trivial | small | medium | large.
 
 ## Suggested
 
+### IMP-018 The Amiga hardware names have not been reviewed one by one, as the instructions were
+**Status:** suggested
+**Effort:** small
+
+**Where:** [src/object/src/hardware.rs](../src/object/src/hardware.rs) — `custom`, `cia`, `port_bit`, `vector`, `base`.
+
+**What is missing.** The Assembly view's explanations (F-032) are checked two ways: an audit over every opcode word, and a reference table, `src/object/tests/m68k_explanations.txt`, of all 1,931 instruction forms reviewed line by line against the *M68000 Programmer's Reference Manual*. The hardware names those explanations quote are not. The reference table holds one example per instruction *form*, so it exercises a handful of addresses, not the tables; `hardware.rs`'s own two tests check about twenty addresses — DMACON, INTENA, the first and last colour, audio, bitplane and sprite registers, a few CIA registers, two port bits, ExecBase and two vectors — and the boundaries (odd offsets, the wrong CIA half, past `$1fe`). Every other custom-chip register name and meaning, the ECS/AGA markings, all thirty-two CIA registers' meanings, the sixteen port-bit meanings and the vector table were written from the *Hardware Reference Manual* and never checked against it entry by entry. A wrong name there is worse than none: the column states it as fact beside the code.
+
+**What would be better.** The same mechanism the instructions have. A generated table, `src/object/tests/hardware_names.txt`, listing every address `hardware::name` answers for — each custom offset `$000`–`$1fe`, each CIA register on both chips, each vector and ExecBase — with its name and meaning, plus every `port_bit` and `base` answer; a test that fails when the table and the code disagree, regenerated with `ADE_BLESS=1`; and one review of the table against the *Hardware Reference Manual*'s Appendix A (register summary by address), its CIA chapter for the port bits, and the *M68000 PRM* for the vectors. A second, independent source is available without committing it: the NDK's `hardware/custom.i` and `hardware/cia.i` give each register's offset by name, so a local test (as the corpus tests are, D-010) can check every *name* against its *offset* mechanically, leaving only the meanings to read.
+
+**Trade-offs.** The table is a few hundred lines to read once, and a second file to regenerate when a name is added. The NDK check covers names and offsets only — the plain-English meanings and the active-low port bits still need a person with the manual — and the NDK cannot be committed, so that half runs only where it is installed, like the corpus. Against: these are the explanations most likely to be read as authoritative, because they are the ones a reader cannot work out from the instruction.
+
 ### IMP-017 Selecting a disk lays out its whole hex dump: 400 ms a click
 **Status:** suggested
 **Effort:** medium

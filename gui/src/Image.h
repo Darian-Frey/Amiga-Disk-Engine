@@ -63,6 +63,8 @@ struct AsmLine {
     quint64 offset = 0;
     quint32 length = 0;
     QString text;
+    /// What the line does, in words; empty when there is nothing to explain.
+    QString comment;
 };
 
 /// A disassembly, or why there is none.
@@ -86,7 +88,8 @@ inline Disassembly takeDisassembly(AdeDisasm *raw) {
         AdeAsmLine line{};
         if (ade_disasm_line(raw, i, &line) != ADE_OK) continue;
         out.lines.append(AsmLine{line.kind, line.has_offset, line.offset, line.length,
-                                 QString::fromUtf8(bytes(line.text))});
+                                 QString::fromUtf8(bytes(line.text)),
+                                 QString::fromUtf8(bytes(line.comment))});
     }
     ade_disasm_free(raw);
     return out;
