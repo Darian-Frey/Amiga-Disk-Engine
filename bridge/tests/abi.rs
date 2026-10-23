@@ -1665,3 +1665,125 @@ fn a_program_on_the_disk_lists_and_a_text_file_says_why_not() {
     }
     let _ = std::fs::remove_file(&path);
 }
+
+#[test]
+fn a_group_opened_before_the_first_edit_still_undoes_as_one() {
+    // The session is created lazily, by the first edit; a group opened before
+    // then must still cover it (IMP-014).
+    let (path, c_path) = fixture("group", &blank_disk());
+    // SAFETY: a valid path; the handle is freed once.
+    unsafe {
+        let image = ade::ade_image_open(c_path.as_ptr(), std::ptr::null(), std::ptr::null_mut());
+        let root = ade::ade_image_root_block(image);
+        assert_eq!(ade::ade_edit_group_end(image), AdeResult::NotFound);
+        assert_eq!(ade::ade_edit_group_begin(image), AdeResult::Ok);
+        for name in [&b"one"[..], b"two", b"three"] {
+            let bytes = ade::AdeBytes {
+                data: name.as_ptr(),
+                len: name.len(),
+            };
+            assert_eq!(
+                ade::ade_edit_mkdir(
+                    image,
+                    root,
+                    bytes,
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut()
+                ),
+                AdeResult::Ok
+            );
+        }
+        assert_eq!(ade::ade_edit_group_end(image), AdeResult::Ok);
+        assert_eq!(ade::ade_edit_undo(image), AdeResult::Ok);
+        assert!(
+            !ade::ade_edit_can_undo(image),
+            "three directories, one step"
+        );
+        let listing = ade::ade_dir_open(image, ade::ADE_WHOLE_IMAGE, root);
+        assert_eq!(ade::ade_listing_count(listing), 0);
+        ade::ade_listing_free(listing);
+        assert_eq!(
+            ade::ade_edit_group_begin(std::ptr::null_mut()),
+            AdeResult::NullArgument
+        );
+        assert_eq!(
+            ade::ade_edit_group_end(std::ptr::null_mut()),
+            AdeResult::NullArgument
+        );
+        ade::ade_image_free(image);
+    }
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn save_over_keeps_the_original_once_and_writes_the_edit() {
+    let (path, c_path) = fixture("over", &blank_disk());
+    let pristine = std::fs::read(&path).unwrap();
+    // SAFETY: a valid path; strings and the handle are freed once.
+    unsafe {
+        let image = ade::ade_image_open(c_path.as_ptr(), std::ptr::null(), std::ptr::null_mut());
+        let root = ade::ade_image_root_block(image);
+        assert_eq!(
+            ade::ade_image_save_over(image, true, std::ptr::null_mut(), std::ptr::null_mut()),
+            AdeResult::NotFound,
+            "nothing edited, nothing to save"
+        );
+        let name = b"Saved";
+        let bytes = ade::AdeBytes {
+            data: name.as_ptr(),
+            len: name.len(),
+        };
+        ade::ade_edit_mkdir(
+            image,
+            root,
+            bytes,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        );
+        let mut backup = std::ptr::null_mut();
+        assert_eq!(
+            ade::ade_image_save_over(image, true, &raw mut backup, std::ptr::null_mut()),
+            AdeResult::Ok
+        );
+        let backup_path = take_message(backup);
+        assert_eq!(backup_path, format!("{}.orig", path.display()));
+        assert_eq!(std::fs::read(&backup_path).unwrap(), pristine);
+        assert!(!ade::ade_image_is_modified(image));
+
+        // The second save makes no second backup.
+        let again = b"Again";
+        let bytes = ade::AdeBytes {
+            data: again.as_ptr(),
+            len: again.len(),
+        };
+        ade::ade_edit_mkdir(
+            image,
+            root,
+            bytes,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        );
+        let mut backup = std::ptr::null_mut();
+        assert_eq!(
+            ade::ade_image_save_over(image, true, &raw mut backup, std::ptr::null_mut()),
+            AdeResult::Ok
+        );
+        assert!(backup.is_null());
+        ade::ade_image_free(image);
+
+        let saved = ade_core::Image::from_bytes(std::fs::read(&path).unwrap()).unwrap();
+        let volume = saved.volume().unwrap();
+        assert_eq!(volume.list(volume.root()).unwrap().entries.len(), 2);
+        let _ = std::fs::remove_file(&backup_path);
+        assert_eq!(
+            ade::ade_image_save_over(
+                std::ptr::null_mut(),
+                true,
+                std::ptr::null_mut(),
+                std::ptr::null_mut()
+            ),
+            AdeResult::NullArgument
+        );
+    }
+    let _ = std::fs::remove_file(&path);
+}

@@ -574,6 +574,13 @@ AdeResult ade_edit_mkdir(AdeImage *image, uint32_t parent, AdeBytes name,
 AdeResult ade_edit_add_file(AdeImage *image, uint32_t parent, AdeBytes name,
                             AdeBytes data, uint32_t *out_block, char **out_message);
 
+/* Group edits a person sees as one action -- a drop of twenty files -- so
+ * one undo takes them all back. Groups nest and only the outermost counts; a
+ * group in which nothing succeeded leaves nothing to undo; undo and redo close
+ * any open group. ade_edit_group_end returns ADE_NOT_FOUND when none is open. */
+AdeResult ade_edit_group_begin(AdeImage *image);
+AdeResult ade_edit_group_end(AdeImage *image);
+
 /* Whether there are edits no save has captured. */
 bool      ade_image_is_modified(const AdeImage *image);
 
@@ -591,6 +598,15 @@ AdeResult ade_image_save_as(AdeImage *image, const char *path, char **out_messag
 /* Save over the file the last ade_image_save_as made. ADE_REFUSED before any
  * Save As: the first save always names a new file. */
 AdeResult ade_image_save(AdeImage *image, char **out_message);
+/* Save over the file the image was opened from (D-020). Call only after the
+ * person has confirmed it. With keep_backup, the first such save keeps the
+ * file as it was on disk beside it as <file>.orig (.orig-2 ... if taken; an
+ * existing backup is never overwritten) and returns its path in *out_backup,
+ * UTF-8, to free with ade_string_free; NULL when no backup was made. Atomic,
+ * as every save is. ADE_REFUSED with a message if the file changed on disk
+ * after it was opened; ADE_NOT_FOUND when nothing was edited. */
+AdeResult ade_image_save_over(AdeImage *image, bool keep_backup, char **out_backup,
+                              char **out_message);
 /* Where ade_image_save would write, or NULL before any Save As. UTF-8; free
  * with ade_string_free. */
 char     *ade_image_save_destination(const AdeImage *image);

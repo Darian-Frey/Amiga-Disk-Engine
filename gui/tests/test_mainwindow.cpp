@@ -87,6 +87,9 @@ private slots:
     void aRefusedCopySaysWhyAndKeepsTheRest();
     void aPartitionOfAHardDiskIsNotWrittenInto();
     void aProgramShowsItsCodeInTheAssemblyView();
+    void oneDropIsOneUndo();
+    void saveOnAnOpenedDiskAsksThenKeepsTheOriginal();
+    void aDiskMadeHereSavesWithoutAskingOrBackup();
     void aFileThatIsNotAProgramSaysWhyAndCanBeDecodedAnyway();
     void theDiskRowShowsItsBootCodeAndAFolderSaysItHasNone();
     void anImageIsARootWithItsEntriesBeneath();
@@ -2125,6 +2128,98 @@ void TestMainWindow::theDiskRowShowsItsBootCodeAndAFolderSaysItHasNone() {
     QVERIFY(assemblyStatus(window).contains(QStringLiteral("folder")));
     auto *raw = window.findChild<QPushButton *>(QStringLiteral("assemblyRaw"));
     QVERIFY(raw && raw->isHidden());
+}
+
+void TestMainWindow::oneDropIsOneUndo() {
+    // IMP-014: dropping a folder of files took one Undo per file and folder.
+    QTemporaryDir dir;
+    const QString disk = blankDisk(dir, QStringLiteral("blank.adf"));
+    QDir(dir.path()).mkpath(QStringLiteral("Folder"));
+    for (int i = 0; i < 5; ++i) {
+        writeFile(dir.filePath(QStringLiteral("Folder/f%1").arg(i)), "x");
+    }
+    writeFile(dir.filePath(QStringLiteral("loose.txt")), "y");
+
+    MainWindow window;
+    window.openImage(disk);
+    QVERIFY(window.makeFolder(browser(window)->topLevelItem(0), QStringLiteral("Earlier")));
+    QCOMPARE(window.addFiles(browser(window)->topLevelItem(0),
+                             {dir.filePath(QStringLiteral("Folder")),
+                              dir.filePath(QStringLiteral("loose.txt"))}),
+             7);
+    QCOMPARE(browser(window)->topLevelItem(0)->childCount(), 3);
+
+    QVERIFY(window.undoEdit());
+    QTreeWidgetItem *root = browser(window)->topLevelItem(0);
+    QCOMPARE(root->childCount(), 1);
+    QVERIFY2(childNamed(root, QStringLiteral("Earlier")),
+             "one Undo takes the whole drop and nothing before it");
+    QVERIFY(window.redoEdit());
+    QCOMPARE(browser(window)->topLevelItem(0)->childCount(), 3);
+}
+
+void TestMainWindow::saveOnAnOpenedDiskAsksThenKeepsTheOriginal() {
+    // D-020: Save on a disk that was opened asks, then writes over it, keeping
+    // the original beside it the first time.
+    QTemporaryDir dir;
+    const QString disk = blankDisk(dir, QStringLiteral("game.adf"));
+    const QByteArray pristine = readAll(disk);
+    MainWindow window;
+    QStringList asked;
+    bool answer = false;
+    window.setSaveConfirmation([&](const QString &question) {
+        asked << question;
+        return answer;
+    });
+    window.openImage(disk);
+    QVERIFY2(!window.saveImage(), "nothing edited, nothing to save");
+    QVERIFY(asked.isEmpty());
+    QVERIFY(window.makeFolder(browser(window)->topLevelItem(0), QStringLiteral("Saves")));
+
+    // Cancel: nothing is written anywhere.
+    QVERIFY(!window.saveImage());
+    QCOMPARE(asked.size(), 1);
+    QVERIFY2(asked.first().contains(QStringLiteral("game.adf.orig")), qPrintable(asked.first()));
+    QCOMPARE(readAll(disk), pristine);
+    QVERIFY(!QFile::exists(disk + QStringLiteral(".orig")));
+    QVERIFY(browser(window)->topLevelItem(0)->text(0).contains(QStringLiteral("unsaved")));
+
+    // Save: the original is kept, then the disk is written over.
+    answer = true;
+    QVERIFY(window.saveImage());
+    QCOMPARE(readAll(disk + QStringLiteral(".orig")), pristine);
+    QVERIFY(readAll(disk) != pristine);
+    ade::Image saved = ade::Image::open(disk);
+    QCOMPARE(saved.list(ADE_WHOLE_IMAGE, saved.rootBlock()).count(), size_t(1));
+    QVERIFY(!browser(window)->topLevelItem(0)->text(0).contains(QStringLiteral("unsaved")));
+    QVERIFY(!window.windowTitle().startsWith(QLatin1Char('*')));
+
+    // A second save asks again, says the original is already kept, and makes
+    // no second backup.
+    QVERIFY(window.makeFolder(browser(window)->topLevelItem(0), QStringLiteral("More")));
+    QVERIFY(window.saveImage());
+    QCOMPARE(asked.size(), 3);
+    QVERIFY2(asked.last().contains(QStringLiteral("already kept")), qPrintable(asked.last()));
+    QVERIFY(!QFile::exists(disk + QStringLiteral(".orig-2")));
+    QCOMPARE(readAll(disk + QStringLiteral(".orig")), pristine);
+}
+
+void TestMainWindow::aDiskMadeHereSavesWithoutAskingOrBackup() {
+    QTemporaryDir dir;
+    const QString disk = blankDisk(dir, QStringLiteral("new.adf"));
+    MainWindow window;
+    int asked = 0;
+    window.setSaveConfirmation([&](const QString &) {
+        ++asked;
+        return false;
+    });
+    window.openCreated(disk);
+    QVERIFY(window.makeFolder(browser(window)->topLevelItem(0), QStringLiteral("Work")));
+    QVERIFY(window.saveImage());
+    QCOMPARE(asked, 0);
+    QVERIFY(!QFile::exists(disk + QStringLiteral(".orig")));
+    ade::Image saved = ade::Image::open(disk);
+    QCOMPARE(saved.list(ADE_WHOLE_IMAGE, saved.rootBlock()).count(), size_t(1));
 }
 
 QTEST_MAIN(TestMainWindow)

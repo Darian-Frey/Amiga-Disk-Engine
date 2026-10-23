@@ -9,11 +9,12 @@
 //!    changes that and nothing else, so closing without saving costs nothing,
 //!    and undo is a stack of earlier copies rather than a promise about a
 //!    file.
-//! 2. **A save never writes over the file the image was opened from.** The
-//!    first save needs a destination; later ones may reuse it, because ADE
-//!    made it in this session. Anything else already on disk is refused too —
-//!    the majority behaviour IMP-010 records, and the one that matches a
-//!    preservation tool.
+//! 2. **A save over the file the image was opened from is a separate,
+//!    confirmed call** — [`Session::save_over_original`] — which keeps the
+//!    original beside it as `.orig` the first time (D-020, amending D-018's
+//!    "never"). [`Session::save_as`] still refuses that file, and any other
+//!    existing file the session did not make: the majority behaviour IMP-010
+//!    records, and the one that matches a preservation tool.
 //! 3. **A save is atomic.** A temporary file beside the destination, flushed,
 //!    then renamed over it. A process killed halfway leaves the old file or
 //!    the new one, never a torn one.
@@ -71,6 +72,12 @@ pub enum EditError {
     Exists,
     /// There is nowhere to save to yet: the first save is a Save As.
     NoDestination,
+    /// The session was not opened from a file, so there is no original to
+    /// save over.
+    NoOriginal,
+    /// The original file changed on disk after it was opened. Saving over it
+    /// would destroy changes this session never saw (D-020).
+    ChangedOnDisk,
     /// Reading or writing a file failed.
     Io(std::io::Error),
 }
@@ -88,8 +95,13 @@ impl core::fmt::Display for EditError {
             ),
             Self::Lookup(e) => write!(f, "{e}"),
             Self::WouldOverwriteOriginal => f.write_str(
-                "that is the file this disk was opened from; ADE never saves over an \
-                 original (D-018), so choose a new file",
+                "that is the file this disk was opened from; Save As always makes a new \
+                 file, and Save is what writes over the original (D-020)",
+            ),
+            Self::NoOriginal => f.write_str("this disk was not opened from a file"),
+            Self::ChangedOnDisk => f.write_str(
+                "the file has changed on disk since it was opened; saving over it would lose \
+                 those changes, so use Save As",
             ),
             Self::Exists => f.write_str("already exists, refusing to overwrite"),
             Self::NoDestination => f.write_str("nothing has been saved yet; use Save As"),
@@ -122,6 +134,17 @@ pub struct Session {
     dirty: bool,
     /// A fixed datestamp for edits, in place of the clock.
     clock: Option<Stamp>,
+    /// The original file's length and CRC32 as this session last knew it: at
+    /// open, then after each save over it. A mismatch means somebody else
+    /// wrote it in between (D-020).
+    origin_digest: Option<(u64, u32)>,
+    /// Where this session kept the original before first saving over it.
+    backup: Option<PathBuf>,
+    /// How many groups are open; edits inside one undo as one (IMP-014).
+    group_depth: u32,
+    /// Whether the open group has saved its undo snapshot yet. Only its first
+    /// edit does: that snapshot is the state before the whole group.
+    group_snapshot: bool,
 }
 
 impl Session {
@@ -132,8 +155,10 @@ impl Session {
     /// [`EditError::Unsound`] as for [`Self::from_bytes`].
     pub fn open(path: &Path) -> Result<Self, EditError> {
         let bytes = fs::read(path).map_err(EditError::Io)?;
+        let digest = digest(&bytes);
         let mut session = Self::from_bytes(bytes)?;
         session.origin = Some(path.to_path_buf());
+        session.origin_digest = Some(digest);
         Ok(session)
     }
 
@@ -178,6 +203,10 @@ impl Session {
             redo: Vec::new(),
             dirty: false,
             clock: None,
+            group_depth: 0,
+            group_snapshot: false,
+            origin_digest: None,
+            backup: None,
         })
     }
 
@@ -285,7 +314,12 @@ impl Session {
         }
 
         let previous = std::mem::replace(&mut self.bytes, next);
-        self.push_undo(previous);
+        // Inside a group only the first edit records where to undo to, so the
+        // whole group comes off with one Undo.
+        if self.group_depth == 0 || !self.group_snapshot {
+            self.push_undo(previous);
+            self.group_snapshot = self.group_depth > 0;
+        }
         self.redo.clear();
         self.baseline = after;
         self.dirty = true;
@@ -299,6 +333,45 @@ impl Session {
             let dropped = self.undo.remove(0);
             held = held.saturating_sub(dropped.len());
         }
+    }
+
+    /// Start a group: every edit until the matching [`Self::end_group`] is
+    /// one step for undo and redo (IMP-014).
+    ///
+    /// For an operation a person sees as one thing — dropping twenty files is
+    /// one action, not twenty — so one Undo takes it back. Groups nest; only
+    /// the outermost counts. A group in which no edit succeeded leaves nothing
+    /// to undo.
+    pub fn begin_group(&mut self) {
+        if self.group_depth == 0 {
+            self.group_snapshot = false;
+        }
+        self.group_depth = self.group_depth.saturating_add(1);
+    }
+
+    /// Close the group [`Self::begin_group`] opened. Closing one that is not
+    /// open does nothing.
+    pub fn end_group(&mut self) {
+        self.group_depth = self.group_depth.saturating_sub(1);
+        if self.group_depth == 0 {
+            self.group_snapshot = false;
+        }
+    }
+
+    /// Run `body` as one group, closing it however `body` returns.
+    pub fn grouped<T>(&mut self, body: impl FnOnce(&mut Self) -> T) -> T {
+        self.begin_group();
+        let out = body(self);
+        self.end_group();
+        out
+    }
+
+    /// Moving through history closes any open group: undo means "before what
+    /// I did", and a group left open would fold the next edit into the step
+    /// just undone.
+    fn close_groups(&mut self) {
+        self.group_depth = 0;
+        self.group_snapshot = false;
     }
 
     /// Whether there is an edit to undo.
@@ -315,6 +388,7 @@ impl Session {
 
     /// Undo the last edit. Returns whether there was one.
     pub fn undo(&mut self) -> bool {
+        self.close_groups();
         let Some(previous) = self.undo.pop() else {
             return false;
         };
@@ -326,6 +400,7 @@ impl Session {
 
     /// Redo the last undone edit. Returns whether there was one.
     pub fn redo(&mut self) -> bool {
+        self.close_groups();
         let Some(next) = self.redo.pop() else {
             return false;
         };
@@ -363,6 +438,58 @@ impl Session {
         self.destination = Some(path.to_path_buf());
         self.dirty = false;
         Ok(())
+    }
+
+    /// Save over the file this session was opened from (D-020).
+    ///
+    /// Only ever called after the person has confirmed it — that is the front
+    /// end's job, and the reason this is a separate call rather than what
+    /// [`Self::save`] does. With `keep_backup`, the first save over the
+    /// original in this session first copies the file as it is on disk to
+    /// `<file>.orig` beside it (or `.orig-2`, `-3` … — an existing backup is
+    /// never overwritten), so a wrong edit is still recoverable. The backup is
+    /// written and flushed in full before the original is touched, and the
+    /// original is then replaced atomically, as every save is.
+    ///
+    /// Returns the backup's path when this call made one.
+    ///
+    /// # Errors
+    /// [`EditError::NoOriginal`] for a session not opened from a file,
+    /// [`EditError::ChangedOnDisk`] if the file is no longer what this
+    /// session last read or wrote, or [`EditError::Io`].
+    pub fn save_over_original(&mut self, keep_backup: bool) -> Result<Option<PathBuf>, EditError> {
+        let origin = self.origin.clone().ok_or(EditError::NoOriginal)?;
+        let on_disk = fs::read(&origin).map_err(EditError::Io)?;
+        if Some(digest(&on_disk)) != self.origin_digest {
+            return Err(EditError::ChangedOnDisk);
+        }
+        let mut made = None;
+        if keep_backup && self.backup.is_none() {
+            let path = backup_name(&origin).ok_or_else(|| {
+                EditError::Io(std::io::Error::other(
+                    "no free name for a backup beside the file",
+                ))
+            })?;
+            write_new(&path, &on_disk).map_err(EditError::Io)?;
+            self.backup = Some(path.clone());
+            made = Some(path);
+        }
+        write_atomically(&origin, &self.bytes).map_err(EditError::Io)?;
+        self.origin_digest = Some(digest(&self.bytes));
+        self.dirty = false;
+        Ok(made)
+    }
+
+    /// Where this session kept the original, once it has saved over it.
+    #[must_use]
+    pub fn backup(&self) -> Option<&Path> {
+        self.backup.as_deref()
+    }
+
+    /// The file this session was opened from, if any.
+    #[must_use]
+    pub fn origin(&self) -> Option<&Path> {
+        self.origin.as_deref()
     }
 
     /// Save over the file the last [`Self::save_as`] made.
@@ -427,6 +554,41 @@ fn same_file(a: &Path, b: &Path) -> bool {
         }
     }
     false
+}
+
+/// A file's length and CRC32: enough to notice that it changed.
+fn digest(bytes: &[u8]) -> (u64, u32) {
+    (bytes.len() as u64, ade_block::checksum::crc32(bytes))
+}
+
+/// The first of `<file>.orig`, `<file>.orig-2` … that does not exist.
+fn backup_name(origin: &Path) -> Option<PathBuf> {
+    let name = origin.file_name()?.to_string_lossy().into_owned();
+    (1..1000u32)
+        .map(|n| {
+            let suffix = if n == 1 {
+                ".orig".to_owned()
+            } else {
+                format!(".orig-{n}")
+            };
+            origin.with_file_name(format!("{name}{suffix}"))
+        })
+        .find(|p| !p.exists())
+}
+
+/// Write a file that must not already exist, flushed before returning. A
+/// partial one is removed: a half-written backup is worse than none, because
+/// it would be trusted.
+fn write_new(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let result = (|| {
+        let mut file = fs::File::create_new(path)?;
+        file.write_all(bytes)?;
+        file.sync_all()
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(path);
+    }
+    result
 }
 
 /// Write `bytes` to `path` so that `path` holds either its old contents or

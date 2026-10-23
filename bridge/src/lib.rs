@@ -265,6 +265,9 @@ pub struct AdeImage {
     /// four hundred images for browsing holds four hundred file handles and
     /// not four hundred copies of the disk.
     session: Option<ade_core::edit::Session>,
+    /// Groups opened before the first edit created the session; handed to it
+    /// when it is (IMP-014).
+    group_depth: u32,
 }
 
 /// A directory listing or a whole-volume walk, owned by the caller until freed.
@@ -415,6 +418,7 @@ pub unsafe extern "C" fn ade_image_open(
             absent,
             path,
             session: None,
+            group_depth: 0,
         }))
     })
 }
@@ -2085,7 +2089,12 @@ fn edit(
     with_image_mut(image, AdeResult::NullArgument, |image| {
         if image.session.is_none() {
             match ade_core::edit::Session::open(&image.path) {
-                Ok(s) => image.session = Some(s),
+                Ok(mut s) => {
+                    for _ in 0..image.group_depth {
+                        s.begin_group();
+                    }
+                    image.session = Some(s);
+                }
                 Err(e) => {
                     set_message(out_message, &e.to_string());
                     return edit_code(&e);
@@ -2174,6 +2183,42 @@ pub unsafe extern "C" fn ade_edit_add_file(
     })
 }
 
+/// Open a group: every edit until the matching [`ade_edit_group_end`] undoes
+/// and redoes as one step (IMP-014). Groups nest; only the outermost counts.
+/// Undo and redo close any open group.
+///
+/// # Safety
+/// `image` must be a live handle or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ade_edit_group_begin(image: *mut AdeImage) -> AdeResult {
+    with_image_mut(image, AdeResult::NullArgument, |i| {
+        i.group_depth = i.group_depth.saturating_add(1);
+        if let Some(s) = i.session.as_mut() {
+            s.begin_group();
+        }
+        AdeResult::Ok
+    })
+}
+
+/// Close the group [`ade_edit_group_begin`] opened. [`AdeResult::NotFound`]
+/// when none is open.
+///
+/// # Safety
+/// `image` must be a live handle or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ade_edit_group_end(image: *mut AdeImage) -> AdeResult {
+    with_image_mut(image, AdeResult::NullArgument, |i| {
+        if i.group_depth == 0 {
+            return AdeResult::NotFound;
+        }
+        i.group_depth = i.group_depth.saturating_sub(1);
+        if let Some(s) = i.session.as_mut() {
+            s.end_group();
+        }
+        AdeResult::Ok
+    })
+}
+
 /// Whether the image has edits no save has captured.
 ///
 /// # Safety
@@ -2220,6 +2265,9 @@ pub unsafe extern "C" fn ade_edit_can_redo(image: *const AdeImage) -> bool {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ade_edit_undo(image: *mut AdeImage) -> AdeResult {
     with_image_mut(image, AdeResult::NullArgument, |i| {
+        // Moving through history closes any open group, here and in the
+        // session alike.
+        i.group_depth = 0;
         if !i
             .session
             .as_mut()
@@ -2239,6 +2287,9 @@ pub unsafe extern "C" fn ade_edit_undo(image: *mut AdeImage) -> AdeResult {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ade_edit_redo(image: *mut AdeImage) -> AdeResult {
     with_image_mut(image, AdeResult::NullArgument, |i| {
+        // Moving through history closes any open group, here and in the
+        // session alike.
+        i.group_depth = 0;
         if !i
             .session
             .as_mut()
@@ -2309,6 +2360,47 @@ pub unsafe extern "C" fn ade_image_save(
         };
         match session.save() {
             Ok(()) => AdeResult::Ok,
+            Err(e) => {
+                set_message(out_message, &e.to_string());
+                edit_code(&e)
+            }
+        }
+    })
+}
+
+/// Save over the file the image was opened from, after the person has
+/// confirmed it (D-020).
+///
+/// With `keep_backup`, the first such save on this handle first keeps the
+/// file as it is on disk beside it as `<file>.orig` (`.orig-2` … if that is
+/// taken); its path goes to `*out_backup`, to free with [`ade_string_free`],
+/// and is left NULL when no backup was made. Without it — for a disk this
+/// front end created — the file is simply replaced. Either way the write is
+/// atomic. [`AdeResult::Refused`] with a message if the file changed on disk
+/// after it was opened; [`AdeResult::NotFound`] when nothing was edited.
+///
+/// # Safety
+/// `image` must be a live handle or null; `out_backup` and `out_message`
+/// writable or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ade_image_save_over(
+    image: *mut AdeImage,
+    keep_backup: bool,
+    out_backup: *mut *mut c_char,
+    out_message: *mut *mut c_char,
+) -> AdeResult {
+    with_image_mut(image, AdeResult::NullArgument, |i| {
+        let Some(session) = i.session.as_mut() else {
+            set_message(out_message, "there are no edits to save");
+            return AdeResult::NotFound;
+        };
+        match session.save_over_original(keep_backup) {
+            Ok(backup) => {
+                if let Some(path) = backup {
+                    set_message(out_backup, &path.to_string_lossy());
+                }
+                AdeResult::Ok
+            }
             Err(e) => {
                 set_message(out_message, &e.to_string());
                 edit_code(&e)

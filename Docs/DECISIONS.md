@@ -532,7 +532,7 @@ Roughly 20% of corpus disks yield reportable text after filtering, and 91% of th
 ### D-018 Writes into an existing disk are buffered, saved explicitly, and never over the file they came from
 **Decided:** 2026-09-01
 **Recorded:** 2026-09-01
-**Status:** Accepted
+**Status:** Accepted; part 2 amended by D-020 (2026-10-23)
 **Authors:** Darian-Frey (decision); Claude (analysis)
 **Related:** D-004, D-002, D-010, AV-002, C-006, F-019, F-025, IMP-010, F-031
 
@@ -608,3 +608,36 @@ But `create` is the easy case. It **makes a new file**, so the damage D-004 exis
 **Consequences.** F-032 is the viewer. The suite stays on the Atari map as a candidate. F-028 gains a route to its first real processor evidence — a 68020-only instruction in a code hunk is a fact — but using it there is a separate change.
 
 **Reversal conditions.** Part 2 loosens one item at a time, each with its own entry; the first likely one is library-call naming, which needs the base register tracked and is wrong whenever it guesses. Part 4 changes only if the oracle becomes unavailable, in which case the decoder's tests must find another independent implementation rather than check it against itself.
+
+---
+
+### D-020 Save may write over the disk that was opened — asked first, and the original kept
+**Decided:** 2026-10-23
+**Recorded:** 2026-10-23
+**Status:** Accepted
+**Authors:** Darian-Frey (decision); Claude (analysis)
+**Related:** D-018, D-004, F-031, IMP-010
+
+**Context.** D-018 part 2 made every save of an opened disk a Save As: the file a disk was opened from is never written. In use, from the window: *"if I open a disk and edit it then click save it should ask me to confirm I want to save the edits and if I click yes it should then save it like normal."* That is the expectation every other editor sets, and the file dialog on every Save of an opened disk was being met as a fault. D-018's reversal condition for part 2 is exactly this — in-place saving asked for by somebody who understands the cost — and requires it be explicit, never a default.
+
+**What it costs.** Part 2 was the rule that made a wrong edit unable to destroy anything: the opened file survived any edit, however mistaken. Saving over it gives that up for the edits that are saved. Atomicity (part 3) is unaffected — a crash still leaves the old file or the new one, never a torn one — so the risk is a *wrong* edit saved, not a broken file.
+
+**Options.**
+- **A. Keep D-018 part 2.** Rejected by the person it serves: the safety was real, and so was the friction.
+- **B. Confirm, then write over.** Rejected alone: one click past a dialog that is seen on every save, and the original is gone.
+- **C. Confirm, and keep the original beside it the first time.** **Chosen.**
+- **D. An opt-in setting, then confirm.** Rejected as indirection: the confirmation already makes each overwrite explicit, which is what part 2's reversal condition asks.
+
+**Decision.** Option C, in four parts.
+
+1. **Save on an opened disk asks first**, every time, naming the file. Cancel writes nothing anywhere.
+2. **The first save over it in a session keeps the original**: the file *as it is on disk* is copied beside it as `<file>.orig`, written and flushed in full before the original is touched. An existing backup is never overwritten — a later session's becomes `.orig-2`, and so on — so every original a session started from survives.
+3. **A file that changed on disk after it was opened is not saved over.** The session remembers the file's length and CRC32 from when it read it (and after each save); a mismatch means somebody else wrote it, and saving would destroy changes this session never saw. Refused, with Save As offered.
+4. **A disk the window itself created** (New disk) is ADE's own file: Save writes back to it without asking and without a backup, because there is no original to protect.
+
+Unchanged: Save As always makes a new file and still refuses the opened one and any existing file the session did not make; after a Save As, Save goes to that file; every save is atomic (D-018 part 3) and every edit is checked (part 4). The CLI keeps its required `--output` — this is the window's behaviour, and a command that can overwrite its input is still one typo from doing so.
+
+**Consequences.** `Session::save_over_original(keep_backup)` in the engine and `ade_image_save_over` in the ABI, separate from `save` and `save_as` so no existing call changes meaning. Backups accumulate beside edited disks; that is the cost of part 2, and D-018 option D rejected backups only because part 2 made them unnecessary.
+
+**Reversal conditions.** Part 2 (the backup) could become a setting if `.orig` files are measured to be clutter nobody uses — but not removed, because it is now the only thing standing between a confirmed wrong edit and a lost disk. Part 3 does not weaken. If ADE ever saves over files it did not open itself (a batch edit, a CLI in-place flag), that is a new entry, not this one.
+

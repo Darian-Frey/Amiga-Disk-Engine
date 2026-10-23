@@ -11,18 +11,6 @@ Effort vocabulary: trivial | small | medium | large.
 
 ## Suggested
 
-### IMP-014 A drop of twenty files is twenty undo steps
-**Status:** suggested
-**Effort:** small
-
-**Where:** `gui/src/MainWindow.cpp`, `addFiles`, over `ade_core::edit::Session`.
-
-**What it does.** Each file or folder a drop copies is its own edit, so undoing a drop of twenty files takes twenty presses of Undo — and a drop that partly failed leaves the successful part as that many separate steps. Found 2026-10-11 writing F-031.
-
-**What would be better.** A session-level group: `begin_group` / `end_group`, collapsing the snapshots taken in between into one undo step, exposed through the ABI. The window wraps each drop in one.
-
-**Trade-offs.** One more piece of state in the session and two more calls in the ABI, for something a person meets only on multi-file drops. Against: a person who drops a folder by mistake expects one Undo to take it back, and twenty is how a tool teaches people not to trust its undo.
-
 ### IMP-012 The health report does not check that each entry sits in the hash slot its name hashes to
 **Status:** suggested
 **Effort:** small
@@ -86,6 +74,21 @@ Two cheap halves suggest themselves before anything ambitious: fill only the vis
 **Not urgent, and the number is misleading on its own.** 3.6 ms is a click, not a corpus: it took selecting 1,478 files in a loop to make it visible at all. Unlike [[imp-008]], which compounded into 35 seconds because it was quadratic in the whole tree, this is linear and bounded by what one person can click. It is recorded because it was measured, not because it hurts.
 
 ## Applied
+
+### IMP-014 A drop of twenty files is twenty undo steps
+**Status:** applied
+**Effort:** small
+
+**Where:** `gui/src/MainWindow.cpp`, `addFiles`, over `ade_core::edit::Session`.
+
+**What it does.** Each file or folder a drop copies is its own edit, so undoing a drop of twenty files takes twenty presses of Undo — and a drop that partly failed leaves the successful part as that many separate steps. Found 2026-10-11 writing F-031.
+
+**What would be better.** A session-level group: `begin_group` / `end_group`, collapsing the snapshots taken in between into one undo step, exposed through the ABI. The window wraps each drop in one.
+
+**Trade-offs.** One more piece of state in the session and two more calls in the ABI, for something a person meets only on multi-file drops. Against: a person who drops a folder by mistake expects one Undo to take it back, and twenty is how a tool teaches people not to trust its undo.
+
+**Applied 2026-10-23, as proposed.** `Session::begin_group` / `end_group` (and `grouped` for Rust callers), `ade_edit_group_begin` / `ade_edit_group_end` in the ABI, and the window wraps each drop in one. Inside a group only the first successful edit saves an undo snapshot, so the step is "before the whole group". Three rules the tests pin: groups nest and only the outermost counts; a group in which nothing succeeded leaves nothing to undo, so a drop that was entirely refused is not a step; and undo or redo closes any open group, because a group left open would fold the next edit into the step just undone. A group can be opened before the handle's first edit creates its session; the handle carries the depth until then. Removing the window's grouping fails `oneDropIsOneUndo`.
+
 
 ### IMP-013 `cargo doc --workspace` writes two crates called `ade` into the same place
 **Status:** applied

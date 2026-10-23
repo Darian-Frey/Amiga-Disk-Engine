@@ -455,6 +455,9 @@ public:
     bool canUndo() const { return ade_edit_can_undo(m_raw); }
     bool canRedo() const { return ade_edit_can_redo(m_raw); }
     bool undo() { return ade_edit_undo(m_raw) == ADE_OK; }
+    // Edits between these undo as one step (IMP-014).
+    void beginGroup() { ade_edit_group_begin(m_raw); }
+    void endGroup() { ade_edit_group_end(m_raw); }
     bool redo() { return ade_edit_redo(m_raw) == ADE_OK; }
     EditResult saveAs(const QString &path) {
         EditResult r;
@@ -468,6 +471,19 @@ public:
         char *why = nullptr;
         r.code = ade_image_save(m_raw, &why);
         r.message = take(why);
+        return r;
+    }
+    /// Save over the file the image was opened from (D-020). `backup`
+    /// receives the path of the copy kept of the original, when this save
+    /// made one.
+    EditResult saveOver(bool keepBackup, QString *backup) {
+        EditResult r;
+        char *why = nullptr;
+        char *kept = nullptr;
+        r.code = ade_image_save_over(m_raw, keepBackup, &kept, &why);
+        r.message = take(why);
+        if (backup) *backup = take(kept);
+        else take(kept);
         return r;
     }
     /// Where save() would write, or empty before any Save As.

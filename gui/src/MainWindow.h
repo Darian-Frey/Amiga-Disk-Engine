@@ -105,6 +105,14 @@ public:
     /// Save the disk `item` belongs to as a new file. Never the file it was
     /// opened from; never over another existing file.
     bool saveImageAs(QTreeWidgetItem *item, const QString &path);
+    /// Save: to the last Save As destination if there is one; otherwise over
+    /// the file the disk was opened from, after asking (D-020), keeping the
+    /// original beside it the first time. A disk this window created saves
+    /// back to its own file without asking. Returns whether it saved.
+    bool saveImage(QTreeWidgetItem *item = nullptr);
+    /// Open a disk this window has just created (New disk), so its later
+    /// saves go back to its own file.
+    void openCreated(const QString &path);
     /// Undo or redo the last edit to the disk the actions act on.
     bool undoEdit();
     bool redoEdit();
@@ -114,6 +122,8 @@ public:
     /// blocks until somebody clicks it.
     using Confirm = std::function<bool(const QString &question)>;
     void setDiscardConfirmation(Confirm confirm) { m_confirmDiscard = std::move(confirm); }
+    /// How the window asks whether to save over the disk that was opened.
+    void setSaveConfirmation(Confirm confirm) { m_confirmSave = std::move(confirm); }
 
     // How many images are open. Several can be, which is what makes
     // cross-image search meaningful.
@@ -150,6 +160,11 @@ private:
         QString path;
         QString name;
         size_t index = 0;
+        /// Made by this window's New disk: its file is ADE's own, so Save
+        /// writes back to it without asking and without a backup (D-020).
+        bool createdHere = false;
+        /// Where the original was kept the first time Save wrote over it.
+        QString backup;
     };
 
     void addImageRoot(Open &open);
@@ -260,4 +275,5 @@ private:
     /// nothing is selected.
     size_t m_lastEdited = static_cast<size_t>(-1);
     Confirm m_confirmDiscard;
+    Confirm m_confirmSave;
 };

@@ -495,6 +495,11 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
         "To copy files on, drop them onto the disk or a folder in the tree."));
     connect(m_newFolder, &QAction::triggered, this, &MainWindow::newFolder);
 
+    m_confirmSave = [this](const QString &question) {
+        return QMessageBox::question(this, QStringLiteral("Save changes"), question,
+                                     QMessageBox::Save | QMessageBox::Cancel,
+                                     QMessageBox::Save) == QMessageBox::Save;
+    };
     m_confirmDiscard = [this](const QString &question) {
         return QMessageBox::question(this, QStringLiteral("Unsaved changes"), question,
                                      QMessageBox::Discard | QMessageBox::Cancel,
@@ -1202,7 +1207,7 @@ void MainWindow::newDisk() {
     }
     // Opened straight away, because a disk you cannot see is not obviously a
     // disk: the tree shows its volume name and the hex pane its bootblock.
-    openImage(path);
+    openCreated(path);
 }
 
 void MainWindow::extractAll() {
@@ -1880,7 +1885,10 @@ int MainWindow::addFiles(QTreeWidgetItem *target, const QStringList &paths) {
     }
     int made = 0;
     QStringList refused;
+    // One drop is one action, so one Undo takes all of it back (IMP-014).
+    open->image.beginGroup();
     for (const QString &path : paths) addPath(*open, dir, path, 0, &made, &refused);
+    open->image.endGroup();
     m_lastEdited = open->index;
     if (made > 0) reloadImage(*open);
     if (!refused.isEmpty()) {
@@ -1939,21 +1947,58 @@ bool MainWindow::saveImageAs(QTreeWidgetItem *item, const QString &path) {
     return true;
 }
 
-void MainWindow::save() {
-    Open *open = editTarget();
-    if (!open) return;
-    // The first save is always a Save As: there is no file yet that ADE made.
-    if (open->image.saveDestination().isEmpty()) {
-        saveAs();
-        return;
+void MainWindow::save() { saveImage(nullptr); }
+
+void MainWindow::openCreated(const QString &path) {
+    const size_t before = m_images.size();
+    openImage(path);
+    if (m_images.size() > before) m_images.back()->createdHere = true;
+}
+
+bool MainWindow::saveImage(QTreeWidgetItem *item) {
+    Open *open = item ? imageFor(item) : editTarget();
+    if (!open || !open->image.isModified()) return false;
+
+    // After a Save As, Save goes to that file: ADE made it in this session.
+    if (!open->image.saveDestination().isEmpty()) {
+        const ade::EditResult r = open->image.save();
+        if (!r.ok()) {
+            emit errorOccurred(QStringLiteral("Could not save: %1").arg(r.message));
+            return false;
+        }
+        reloadImage(*open);
+        statusBar()->showMessage(QStringLiteral("Saved %1").arg(open->image.saveDestination()));
+        return true;
     }
-    const ade::EditResult r = open->image.save();
+
+    // Otherwise over the file it was opened from (D-020): asked first, and the
+    // original kept the first time. A disk this window made is ADE's own file,
+    // so it is neither asked about nor backed up.
+    if (!open->createdHere) {
+        const QString question =
+            open->backup.isEmpty()
+                ? QStringLiteral("Save the changes over \u201c%1\u201d?\n\nThe disk as it was "
+                                 "when you opened it will be kept beside it as %2.orig.")
+                      .arg(open->name, open->name)
+                : QStringLiteral("Save the changes over \u201c%1\u201d?\n\nThe original is "
+                                 "already kept as %2.")
+                      .arg(open->name, QFileInfo(open->backup).fileName());
+        if (!m_confirmSave || !m_confirmSave(question)) return false;
+    }
+    QString backup;
+    const ade::EditResult r = open->image.saveOver(!open->createdHere, &backup);
     if (!r.ok()) {
-        emit errorOccurred(QStringLiteral("Could not save: %1").arg(r.message));
-        return;
+        emit errorOccurred(QStringLiteral("Could not save %1: %2").arg(open->name, r.message));
+        return false;
     }
+    if (!backup.isEmpty()) open->backup = backup;
     reloadImage(*open);
-    statusBar()->showMessage(QStringLiteral("Saved %1").arg(open->image.saveDestination()));
+    statusBar()->showMessage(
+        backup.isEmpty()
+            ? QStringLiteral("Saved %1").arg(open->path)
+            : QStringLiteral("Saved %1 \u2014 the original is kept as %2")
+                  .arg(open->path, QFileInfo(backup).fileName()));
+    return true;
 }
 
 void MainWindow::saveAs() {

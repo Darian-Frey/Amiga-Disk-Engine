@@ -738,3 +738,173 @@ fn an_accented_path_is_found_by_name() {
         assert_eq!(s.directory("Größe").unwrap(), dir);
     }
 }
+
+#[test]
+fn a_group_of_edits_undoes_and_redoes_as_one() {
+    // IMP-014: dropping twenty files is one action, and took twenty Undos.
+    let mut s = session(3);
+    let root = s.root();
+    s.make_dir(root, b"Before").unwrap();
+    let before = s.bytes().to_vec();
+
+    s.grouped(|s| {
+        let dir = s.make_dir(root, b"Dropped").unwrap();
+        for i in 0..5u8 {
+            s.add_file(dir, format!("f{i}").as_bytes(), &[i; 100])
+                .unwrap();
+        }
+        // A refusal inside the group is not a step and does not end it.
+        assert!(s.make_dir(root, b"Before").is_err());
+        s.add_file(root, b"last", b"x").unwrap();
+    });
+    let after = s.bytes().to_vec();
+
+    assert!(s.undo(), "the group is one step");
+    assert_eq!(s.bytes(), &before[..], "and it all comes off at once");
+    assert!(s.undo(), "the edit before the group is still its own step");
+    assert!(!s.can_undo());
+    assert!(s.redo());
+    assert!(s.redo(), "and the group comes back as one");
+    assert_eq!(s.bytes(), &after[..]);
+    assert!(!s.can_redo());
+}
+
+#[test]
+fn an_empty_or_failed_group_leaves_nothing_to_undo_and_groups_nest() {
+    let mut s = session(1);
+    let root = s.root();
+    s.grouped(|s| {
+        assert!(s.make_dir(root, b"bad/name").is_err());
+    });
+    assert!(
+        !s.can_undo(),
+        "a group with no successful edit is not a step"
+    );
+
+    // Nested: only the outermost counts.
+    s.begin_group();
+    s.make_dir(root, b"A").unwrap();
+    s.grouped(|s| {
+        s.make_dir(root, b"B").unwrap();
+    });
+    s.make_dir(root, b"C").unwrap();
+    s.end_group();
+    assert!(s.undo());
+    assert!(!s.can_undo(), "three edits in nested groups were one step");
+
+    // Undo inside an open group closes it: the next edit is a step of its own.
+    s.begin_group();
+    s.make_dir(root, b"D").unwrap();
+    assert!(s.undo());
+    s.make_dir(root, b"E").unwrap();
+    s.make_dir(root, b"F").unwrap();
+    assert!(s.undo());
+    assert!(
+        s.can_undo(),
+        "E and F were separate steps once the group closed"
+    );
+    assert_clean(s.bytes(), "after grouped edits");
+}
+
+#[test]
+fn saving_over_the_original_keeps_it_as_a_backup_first() {
+    // D-020: Save on a disk that was opened writes over it after the person
+    // confirms, and the untouched original is kept beside it.
+    let scratch = Scratch::new("over");
+    let original = scratch.0.join("disk.adf");
+    std::fs::write(&original, blank(3)).unwrap();
+    let pristine = std::fs::read(&original).unwrap();
+
+    let mut s = Session::open(&original).unwrap();
+    s.set_clock(Some(WHEN));
+    let root = s.root();
+    s.make_dir(root, b"First").unwrap();
+    let made = s.save_over_original(true).unwrap();
+    let backup = scratch.0.join("disk.adf.orig");
+    assert_eq!(made.as_deref(), Some(backup.as_path()));
+    assert_eq!(
+        std::fs::read(&backup).unwrap(),
+        pristine,
+        "the backup is the original"
+    );
+    assert_eq!(
+        std::fs::read(&original).unwrap(),
+        s.bytes(),
+        "the original holds the edit"
+    );
+    assert!(!s.is_dirty());
+    assert_clean(&std::fs::read(&original).unwrap(), "saved over");
+
+    // A second save in the same session: no second backup.
+    s.make_dir(root, b"Second").unwrap();
+    assert_eq!(s.save_over_original(true).unwrap(), None);
+    assert_eq!(std::fs::read(&backup).unwrap(), pristine);
+    assert_eq!(std::fs::read(&original).unwrap(), s.bytes());
+
+    // A later session never overwrites the earlier backup.
+    let mut later = Session::open(&original).unwrap();
+    later.make_dir(root, b"Third").unwrap();
+    let second = later.save_over_original(true).unwrap().unwrap();
+    assert_eq!(second, scratch.0.join("disk.adf.orig-2"));
+    assert_eq!(std::fs::read(&backup).unwrap(), pristine);
+
+    // Save As still refuses the original: it always makes a new file.
+    assert!(matches!(
+        later.save_as(&original),
+        Err(EditError::WouldOverwriteOriginal)
+    ));
+    let leftovers: Vec<_> = std::fs::read_dir(&scratch.0)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|n| {
+            std::path::Path::new(n)
+                .extension()
+                .is_some_and(|e| e == "tmp")
+        })
+        .collect();
+    assert!(leftovers.is_empty(), "{leftovers:?}");
+}
+
+#[test]
+fn a_file_changed_behind_the_session_is_not_saved_over() {
+    let scratch = Scratch::new("changed");
+    let original = scratch.0.join("disk.adf");
+    std::fs::write(&original, blank(3)).unwrap();
+    let mut s = Session::open(&original).unwrap();
+    let root = s.root();
+    s.make_dir(root, b"Mine").unwrap();
+
+    // Somebody else writes the file after it was opened.
+    let mut theirs = blank(1);
+    theirs[100_000] = 0x55;
+    std::fs::write(&original, &theirs).unwrap();
+    assert!(matches!(
+        s.save_over_original(true),
+        Err(EditError::ChangedOnDisk)
+    ));
+    assert_eq!(
+        std::fs::read(&original).unwrap(),
+        theirs,
+        "their file is untouched"
+    );
+    assert!(
+        !scratch.0.join("disk.adf.orig").exists(),
+        "and no backup was made of it"
+    );
+
+    // Without a backup, for a disk the front end made itself.
+    let made = scratch.0.join("made.adf");
+    std::fs::write(&made, blank(3)).unwrap();
+    let mut s = Session::open(&made).unwrap();
+    s.make_dir(root, b"X").unwrap();
+    assert_eq!(s.save_over_original(false).unwrap(), None);
+    assert!(!scratch.0.join("made.adf.orig").exists());
+    assert_eq!(std::fs::read(&made).unwrap(), s.bytes());
+
+    // A session not opened from a file has no original.
+    let mut loose = Session::from_bytes(blank(3)).unwrap();
+    assert!(matches!(
+        loose.save_over_original(true),
+        Err(EditError::NoOriginal)
+    ));
+}
