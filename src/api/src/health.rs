@@ -368,7 +368,82 @@ fn scan_tree(volume: &Volume<'_>, findings: &mut Vec<Finding>) -> TreeScan {
     }
 
     scan_dircaches(volume, &walked, &mut scan, findings);
+    scan_hash_slots(volume, &walked, findings);
     scan
+}
+
+/// How many misplaced entries to report before saying so in one line.
+const MAX_SLOT_FINDINGS: usize = 20;
+
+/// Entries filed under a hash slot their name does not hash to (IMP-012).
+///
+/// A walk visits every slot, so such an entry is listed — by ADE, and by
+/// ADFlib's `unadf -l` — but a lookup by name hashes the name and looks in
+/// one slot, so AmigaDOS cannot open it — confirmed against ADFlib, whose
+/// `unadf -p` cannot find one by name either. Measured 2026-10-23 over the
+/// corpus: 30 entries on 6 of 3,606 volumes, every one consistent with a hand
+/// edit or damage (a stale duplicate of a renamed file, directory-art names,
+/// names holding NUL bytes) and none with the C-006 mistake of hashing with
+/// the wrong function. An entry reachable from its right slot as well as a
+/// wrong one — two chains merged — is found by name, and is not reported.
+fn scan_hash_slots(
+    volume: &Volume<'_>,
+    walked: &ade_filesystem::volume::Walk,
+    findings: &mut Vec<Finding>,
+) {
+    let directories = core::iter::once((String::new(), volume.root())).chain(
+        walked
+            .entries
+            .iter()
+            .filter(|(_, e)| e.kind == EntryKind::Directory)
+            .map(|(path, e)| (path.clone(), e.block)),
+    );
+    let mut reported = 0usize;
+    for (dir_path, dir) in directories {
+        let Ok(found) = volume.misplaced(dir) else {
+            continue;
+        };
+        for m in found {
+            if reported >= MAX_SLOT_FINDINGS {
+                reported = reported.saturating_add(1);
+                continue;
+            }
+            reported = reported.saturating_add(1);
+            let name: String = m.name.iter().map(|&b| char::from(b)).collect();
+            let path = if dir_path.is_empty() {
+                name
+            } else {
+                format!("{dir_path}/{name}")
+            };
+            let mode = if m.other_mode {
+                " It fits the other hash function, which is the mistake C-006 describes."
+            } else {
+                ""
+            };
+            findings.push(
+                Finding::new(
+                    "entry-wrong-slot",
+                    Severity::Warning,
+                    format!(
+                        "{path}: filed under hash slot {}, but its name hashes to {}; it is \
+                         listed, and AmigaDOS cannot open it by name.{mode}",
+                        m.slot, m.expected
+                    ),
+                )
+                .at(m.block),
+            );
+        }
+    }
+    if reported > MAX_SLOT_FINDINGS {
+        findings.push(Finding::new(
+            "entry-wrong-slot",
+            Severity::Warning,
+            format!(
+                "{} more entries are filed under the wrong hash slot",
+                reported.saturating_sub(MAX_SLOT_FINDINGS)
+            ),
+        ));
+    }
 }
 
 /// Read every directory cache and account for the blocks it occupies.

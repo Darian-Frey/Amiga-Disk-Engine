@@ -11,17 +11,29 @@ Effort vocabulary: trivial | small | medium | large.
 
 ## Suggested
 
-### IMP-012 The health report does not check that each entry sits in the hash slot its name hashes to
+### IMP-016 Two entries with the same name in one directory are not reported
 **Status:** suggested
 **Effort:** small
 
 **Where:** [src/api/src/health.rs](../src/api/src/health.rs).
 
-**What is missing.** An entry filed under the wrong slot is invisible to every reader that *walks* a directory — ADE's listing, `ade check`, and `unadf -r` all visit every slot — and unreachable by every reader that *looks a name up*, which is AmigaDOS itself. Found 2026-10-11 by mutation: F-031's writer with its hash function inverted passed every test, including the health report, until the test learned to read the slot directly and to ask ADFlib for files by name.
+**What is missing.** AmigaDOS cannot create two entries with one name in a directory — a name is how it finds them — but disks carry them. Found 2026-10-23 measuring IMP-012: 1869, Typhoon and Valhalla each hold a correctly filed file and a stale misplaced one of the same name (one of them 508 bytes against 536, so they differ), and TeleEpic II holds four entries named `T_____________`. Only one same-named entry can be opened by name; the rest are listed and unreachable, and nothing says which is which. IMP-012's check reports the misplaced ones; a duplicate filed in its *right* slot, behind another of the same name in the same chain, is reported by nothing.
 
-**What would be better.** For each entry reached in a listing, check that `hash_name(name, ht, mode)` is the slot it was found under, and report `entry-wrong-slot` (warning) where it is not. It is the same check C-006 is about, applied to what is on the disk rather than to how ADE reads it.
+**What would be better.** For each directory, group the listing by name under the volume's case folding (`names_match`), and report each group of two or more as `duplicate-name` (warning), naming the blocks and which one a lookup by name would reach — the first in its right slot's chain.
 
-**Trade-offs.** A new finding code is a JSON surface change (F-015) and a schema bump. It is also a finding that real disks may carry — written by tools with the dircache trap (C-006) — so the corpus should be measured before deciding its severity, and a non-zero count is an interesting result rather than noise.
+**Trade-offs.** One more pass over each listing, which the walk has already read. The value is that "which `startup-sequence` runs?" has an answer only ADE can give, and the stale one is often the interesting one.
+
+### IMP-015 A root listed in its own hash table appears as an entry, and is not reported
+**Status:** suggested
+**Effort:** small
+
+**Where:** [src/filesystem/src/volume.rs](../src/filesystem/src/volume.rs) `list`, and [src/api/src/health.rs](../src/api/src/health.rs).
+
+**What happens.** Found 2026-10-23 measuring IMP-012: on 8 corpus disks a slot of the root's hash table points back at the rootblock (block 880) — Billiards Simulator, Two-Up, Amiga Poker, Baby Bug, SkyChase, Mach 3, Oo-Topos and one more. The names involved are volume names like `Billiard from NightMaster` and `ACKERLIGHT 'The French Light'`, which reads as a cracker's signature: the volume shows up as an entry inside itself in a directory listing. ADE's `ls` does exactly that — a row of kind `volume` among the files — and `ade check` says nothing. Traversal is safe: the walk marks the root visited and does not descend (AV-001).
+
+**What would be better.** `check` reports it once as `root-in-own-table` (info: it is a curiosity that breaks nothing ADE can see), and `ls` either omits the row or marks it for what it is, so the listing does not look like a disk containing itself by accident.
+
+**Trade-offs.** Omitting the row hides something genuinely on the disk, which a forensic tool should not do quietly; marking it keeps the truth and costs a word. Measuring whether AmigaDOS's own `dir` shows it would settle what users of the time saw, and needs an emulator, which is out of scope.
 
 ### IMP-011 Three JSON documents are built in the CLI, where D-015's inventory cannot see them
 **Status:** suggested
@@ -74,6 +86,24 @@ Two cheap halves suggest themselves before anything ambitious: fill only the vis
 **Not urgent, and the number is misleading on its own.** 3.6 ms is a click, not a corpus: it took selecting 1,478 files in a loop to make it visible at all. Unlike [[imp-008]], which compounded into 35 seconds because it was quadratic in the whole tree, this is linear and bounded by what one person can click. It is recorded because it was measured, not because it hurts.
 
 ## Applied
+
+### IMP-012 The health report does not check that each entry sits in the hash slot its name hashes to
+**Status:** applied
+**Effort:** small
+
+**Where:** [src/api/src/health.rs](../src/api/src/health.rs).
+
+**What is missing.** An entry filed under the wrong slot is invisible to every reader that *walks* a directory — ADE's listing, `ade check`, and `unadf -r` all visit every slot — and unreachable by every reader that *looks a name up*, which is AmigaDOS itself. Found 2026-10-11 by mutation: F-031's writer with its hash function inverted passed every test, including the health report, until the test learned to read the slot directly and to ask ADFlib for files by name.
+
+**What would be better.** For each entry reached in a listing, check that `hash_name(name, ht, mode)` is the slot it was found under, and report `entry-wrong-slot` (warning) where it is not. It is the same check C-006 is about, applied to what is on the disk rather than to how ADE reads it.
+
+**Trade-offs.** A new finding code is a JSON surface change (F-015) and a schema bump. It is also a finding that real disks may carry — written by tools with the dircache trap (C-006) — so the corpus should be measured before deciding its severity, and a non-zero count is an interesting result rather than noise.
+
+**Applied 2026-10-23, measured first, and the measurement changed the story.** The entry guessed that writers with the dircache trap (C-006) would have left entries hashed with the wrong function. Over all 3,606 mounted corpus volumes and 180,761 entries: **30 misplaced entries on 6 disks, and not one fits the other hash function.** What they are instead is hand edits and damage — a stale duplicate left behind by a rename (1869, Typhoon, Valhalla), directory-art entries named `T_____________` (TeleEpic II, 22 of them), names full of NUL bytes (Xenon 2), and two singletons. ADFlib confirms the premise on a disk built for it: a file moved to a wrong slot is listed by `unadf -l` and cannot be fetched by name with `unadf -p`.
+**`entry-wrong-slot`, a warning**: nothing is lost — ADE still reads the file — but on a real Amiga it is listed and cannot be opened. Reported with its path, its slot and the slot it should be in, and the C-006 sentence when the other function fits; capped at 20 a disk with a summary line. Schema **1.11 → 1.12** for the new code.
+**The first version had a false positive, caught by checking a corpus hit against ADFlib.** Emetic Skimmer's `title.ilbm` was flagged as unopenable, and ADFlib opened it: slot 3's chain runs into slot 38's, so the entry sits in a wrong slot *and* down its right one, and a lookup finds it. The check now asks whether the entry's right slot reaches it, not which slot reached it first; a built test puts the duplicate in a lower slot, the order that fooled it, and fails on the old version.
+**Two structures the measurement turned up are not this, and are logged separately**: a root listed in its own hash table (IMP-015) and duplicate names in one directory (IMP-016). `tests/hash_slots.rs` keeps the corpus measurement as a regression check — no C-006 mistakes, and misplacement under 0.1% of entries.
+
 
 ### IMP-014 A drop of twenty files is twenty undo steps
 **Status:** applied

@@ -359,6 +359,8 @@ The Amiga character set is ISO 8859-1. Codes 192–222 are uppercase accented, 2
 
 Traversal must detect cycles (AV-001) — and see the note under **Links** below, because cycles are reachable through legitimate on-disk structures, not only corruption.
 
+**An entry in the wrong slot is listed but cannot be opened by name.** A reader that walks a directory visits every slot and finds it; a lookup hashes the name and looks in one slot, and does not. Confirmed against ADFlib: `unadf -l` lists such an entry, `unadf -p` cannot fetch it. **Chains can merge** — one chain's `hash_chain` pointing into another's — so the test is whether the entry's *right* slot reaches it, not which slot reached it first. Measured 2026-10-23 over 3,606 corpus volumes: 30 misplaced entries on 6 disks, none of them hashed with the wrong function (C-006); all hand edits or damage. The same measurement found 8 disks whose root hash table points back at the rootblock itself, and 4 with two or more entries of one name in a directory (IMP-015, IMP-016).
+
 ## User directory block
 
 As the rootblock, minus the bitmap and volume fields, plus a comment. [FAQ §4.5]

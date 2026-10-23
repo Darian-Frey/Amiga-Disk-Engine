@@ -395,6 +395,100 @@ impl<'a> Volume<'a> {
         Ok(listing)
     }
 
+    /// Entries in a directory that sit in a hash slot their name does not
+    /// hash to (IMP-012).
+    ///
+    /// Invisible to anything that *walks* a directory — every listing visits
+    /// every slot — and unreachable to anything that *looks a name up*, which
+    /// is what AmigaDOS does: such a file is listed and cannot be opened by
+    /// name. The likely causes are a writer that got C-006 wrong, hashing an
+    /// international volume with the plain function or the reverse, and
+    /// damage to a name after it was filed.
+    ///
+    /// When the bootblock carried no dostype the hashing mode is unknown, so
+    /// an entry is reported only if neither function puts it where it is: a
+    /// guess about the mode must not manufacture a finding.
+    ///
+    /// # Errors
+    /// As [`Self::list`].
+    pub fn misplaced(&self, dir: u32) -> Result<Vec<Misplaced>, FsError> {
+        let block = self.read_block(dir)?;
+        let ht = self.hash_table_size();
+
+        // Which slots' chains reach each entry. Chains can merge — one
+        // chain's `hash_chain` pointing into another's — so an entry found in
+        // a wrong slot may still be reachable from its right one, and then a
+        // lookup by name finds it. Each chain is walked on its own, with its
+        // own visited set (AV-001) and validation before every read (AV-004);
+        // a fault ends that chain, and `list` is where faults are reported.
+        // In first-seen order, with an index by block, so a directory of tens
+        // of thousands of entries costs linear time rather than quadratic.
+        let mut reached: Vec<(u32, Vec<u32>, Entry)> = Vec::new();
+        let mut index: std::collections::HashMap<u32, usize> = std::collections::HashMap::new();
+        for slot in 0..ht {
+            let offset = 24usize.saturating_add((slot as usize).saturating_mul(4));
+            let mut next = ade_endian::u32_at(&block, offset).unwrap_or(0);
+            let mut seen: HashSet<u32> = HashSet::new();
+            while next != 0 && seen.insert(next) {
+                if self.geometry.validate(BlockIndex(u64::from(next))).is_err() {
+                    break;
+                }
+                let Ok(raw) = self.read_block(next) else {
+                    break;
+                };
+                let Ok(entry) = Entry::parse(&raw, next) else {
+                    break;
+                };
+                if !entry.looks_like_an_entry() {
+                    break;
+                }
+                let chain = entry.hash_chain;
+                if let Some((_, slots, _)) = index.get(&next).and_then(|&i| reached.get_mut(i)) {
+                    slots.push(slot);
+                } else {
+                    index.insert(next, reached.len());
+                    reached.push((next, vec![slot], entry));
+                }
+                next = chain;
+            }
+        }
+
+        let mut out = Vec::new();
+        for (block, slots, entry) in reached {
+            // A rootblock in a hash chain is a different structure — on eight
+            // corpus disks the root's own table points back at the root — and
+            // not a name filed in the wrong place.
+            if entry.kind == EntryKind::Root {
+                continue;
+            }
+            let international = crate::hash::hash_name(&entry.name, ht, true);
+            let plain = crate::hash::hash_name(&entry.name, ht, false);
+            let fits = match self.dostype {
+                Some(d) if d.is_international() => slots.contains(&international),
+                Some(_) => slots.contains(&plain),
+                None => slots.contains(&international) || slots.contains(&plain),
+            };
+            if fits {
+                continue;
+            }
+            let (expected, other) = if self.is_international() {
+                (international, plain)
+            } else {
+                (plain, international)
+            };
+            out.push(Misplaced {
+                block,
+                name: entry.name,
+                slot: slots.first().copied().unwrap_or(0),
+                expected,
+                // Whether the *other* hash function would have put it where it
+                // is: the signature of a C-006 mistake.
+                other_mode: slots.contains(&other),
+            });
+        }
+        Ok(out)
+    }
+
     /// Resolve a slash-separated path from the volume root.
     ///
     /// Comparison is case-insensitive and uses the volume's hashing mode, so
@@ -820,6 +914,22 @@ impl<'a> Volume<'a> {
             hit_limit,
         })
     }
+}
+
+/// An entry filed under a hash slot its name does not hash to (IMP-012).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Misplaced {
+    /// The entry's block.
+    pub block: u32,
+    /// Its name, as stored.
+    pub name: Vec<u8>,
+    /// The slot it was found in.
+    pub slot: u32,
+    /// The slot the volume's hash function gives its name.
+    pub expected: u32,
+    /// Whether the volume's *other* hash function — plain on an international
+    /// volume, international on a plain one — gives the slot it is in.
+    pub other_mode: bool,
 }
 
 /// The result of listing a directory: what was found, and what went wrong.

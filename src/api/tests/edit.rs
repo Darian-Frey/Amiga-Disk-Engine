@@ -218,7 +218,7 @@ fn a_directory_appears_on_every_filesystem() {
         let scratch = Scratch::new(&format!("mkdir{flags}"));
         let path = scratch.0.join("d.adf");
         std::fs::write(&path, s.bytes()).unwrap();
-        if let Some((ok, text)) = unadf(&["-r"], &path) {
+        if let Some((ok, text)) = unadf(&["-l", "-r"], &path) {
             assert!(ok, "DOS\\{flags}: ADFlib should list it: {text}");
             assert!(text.contains("Drawer/"), "DOS\\{flags}: {text}");
         }
