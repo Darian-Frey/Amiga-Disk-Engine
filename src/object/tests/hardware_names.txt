@@ -1,0 +1,375 @@
+# Every address ADE names on an Amiga, with its meaning (F-032, IMP-018).
+# Reviewed against the Hardware Reference Manual (3rd ed.), Appendix A and the
+# CIA chapter, and the M68000 PRM for the vectors. Regenerate with
+# ADE_BLESS=1 cargo test -p ade-object --lib hardware, and review the diff.
+$dff000  BLTDDAT                     blitter destination data (blitter DMA only)
+$dff002  DMACONR                     DMA control and blitter status (read)
+$dff004  VPOSR                       beam vertical position, high bit, and the long-frame bit (read)
+$dff006  VHPOSR                      beam position, vertical and horizontal (read)
+$dff008  DSKDATR                     disk data (disk DMA only)
+$dff00a  JOY0DAT                     mouse/joystick counters, port 1
+$dff00c  JOY1DAT                     mouse/joystick counters, port 2
+$dff00e  CLXDAT                      collision detection (read)
+$dff010  ADKCONR                     audio and disk control (read)
+$dff012  POT0DAT                     potentiometer counters, port 1
+$dff014  POT1DAT                     potentiometer counters, port 2
+$dff016  POTGOR                      pot port data and right mouse button (read)
+$dff018  SERDATR                     serial port data and status (read)
+$dff01a  DSKBYTR                     disk data byte and status (read)
+$dff01c  INTENAR                     interrupt enable bits (read)
+$dff01e  INTREQR                     interrupt request bits (read)
+$dff020  DSKPTH                      disk DMA pointer, high word
+$dff022  DSKPTL                      disk DMA pointer, low word
+$dff024  DSKLEN                      disk DMA length; writing it twice starts a transfer
+$dff026  DSKDAT                      disk DMA data (write)
+$dff028  REFPTR                      refresh pointer
+$dff02a  VPOSW                       beam vertical position (write)
+$dff02c  VHPOSW                      beam position (write)
+$dff02e  COPCON                      copper control: may the copper touch the blitter
+$dff030  SERDAT                      serial port data (write)
+$dff032  SERPER                      serial port speed
+$dff034  POTGO                       pot port control
+$dff036  JOYTEST                     write to all mouse/joystick counters
+$dff038  STREQU                      strobe: horizontal sync during vertical blank and equalisation
+$dff03a  STRVBL                      strobe: horizontal sync during vertical blank
+$dff03c  STRHOR                      strobe: horizontal sync
+$dff03e  STRLONG                     strobe: long horizontal line
+$dff040  BLTCON0                     blitter control 0: channels and logic function
+$dff042  BLTCON1                     blitter control 1: shift, line and fill modes
+$dff044  BLTAFWM                     blitter first-word mask, source A
+$dff046  BLTALWM                     blitter last-word mask, source A
+$dff048  BLTCPTH                     blitter pointer, source C, high word
+$dff04a  BLTCPTL                     blitter pointer, source C, low word
+$dff04c  BLTBPTH                     blitter pointer, source B, high word
+$dff04e  BLTBPTL                     blitter pointer, source B, low word
+$dff050  BLTAPTH                     blitter pointer, source A, high word
+$dff052  BLTAPTL                     blitter pointer, source A, low word
+$dff054  BLTDPTH                     blitter pointer, destination, high word
+$dff056  BLTDPTL                     blitter pointer, destination, low word
+$dff058  BLTSIZE                     blit size; writing it starts the blit
+$dff05a  BLTCON0L                    blitter logic function only (ECS)
+$dff05c  BLTSIZV                     blit height (ECS)
+$dff05e  BLTSIZH                     blit width; writing it starts the blit (ECS)
+$dff060  BLTCMOD                     blitter modulo, source C
+$dff062  BLTBMOD                     blitter modulo, source B
+$dff064  BLTAMOD                     blitter modulo, source A
+$dff066  BLTDMOD                     blitter modulo, destination
+$dff068  -
+$dff06a  -
+$dff06c  -
+$dff06e  -
+$dff070  BLTCDAT                     blitter data, source C
+$dff072  BLTBDAT                     blitter data, source B
+$dff074  BLTADAT                     blitter data, source A
+$dff076  -
+$dff078  SPRHDAT                     ext. logic UHRES sprite pointer and data (ECS)
+$dff07a  -
+$dff07c  DENISEID                    display chip revision (ECS/AGA, read)
+$dff07e  DSKSYNC                     disk sync word the controller waits for
+$dff080  COP1LCH                     copper list 1 address, high word
+$dff082  COP1LCL                     copper list 1 address, low word
+$dff084  COP2LCH                     copper list 2 address, high word
+$dff086  COP2LCL                     copper list 2 address, low word
+$dff088  COPJMP1                     strobe: restart the copper at list 1
+$dff08a  COPJMP2                     strobe: restart the copper at list 2
+$dff08c  COPINS                      copper instruction fetch
+$dff08e  DIWSTRT                     display window start
+$dff090  DIWSTOP                     display window stop
+$dff092  DDFSTRT                     display data fetch start
+$dff094  DDFSTOP                     display data fetch stop
+$dff096  DMACON                      DMA control: switch DMA channels on and off
+$dff098  CLXCON                      collision control
+$dff09a  INTENA                      interrupt enable
+$dff09c  INTREQ                      interrupt request: acknowledge or raise
+$dff09e  ADKCON                      audio and disk control
+$dff0a0  AUD0LCH                     audio sample address, high word
+$dff0a2  AUD0LCL                     audio sample address, low word
+$dff0a4  AUD0LEN                     audio sample length in words
+$dff0a6  AUD0PER                     audio period (pitch)
+$dff0a8  AUD0VOL                     audio volume, 0-64
+$dff0aa  AUD0DAT                     audio data
+$dff0ac  -
+$dff0ae  -
+$dff0b0  AUD1LCH                     audio sample address, high word
+$dff0b2  AUD1LCL                     audio sample address, low word
+$dff0b4  AUD1LEN                     audio sample length in words
+$dff0b6  AUD1PER                     audio period (pitch)
+$dff0b8  AUD1VOL                     audio volume, 0-64
+$dff0ba  AUD1DAT                     audio data
+$dff0bc  -
+$dff0be  -
+$dff0c0  AUD2LCH                     audio sample address, high word
+$dff0c2  AUD2LCL                     audio sample address, low word
+$dff0c4  AUD2LEN                     audio sample length in words
+$dff0c6  AUD2PER                     audio period (pitch)
+$dff0c8  AUD2VOL                     audio volume, 0-64
+$dff0ca  AUD2DAT                     audio data
+$dff0cc  -
+$dff0ce  -
+$dff0d0  AUD3LCH                     audio sample address, high word
+$dff0d2  AUD3LCL                     audio sample address, low word
+$dff0d4  AUD3LEN                     audio sample length in words
+$dff0d6  AUD3PER                     audio period (pitch)
+$dff0d8  AUD3VOL                     audio volume, 0-64
+$dff0da  AUD3DAT                     audio data
+$dff0dc  -
+$dff0de  -
+$dff0e0  BPL1PTH                     bitplane address, high word
+$dff0e2  BPL1PTL                     bitplane address, low word
+$dff0e4  BPL2PTH                     bitplane address, high word
+$dff0e6  BPL2PTL                     bitplane address, low word
+$dff0e8  BPL3PTH                     bitplane address, high word
+$dff0ea  BPL3PTL                     bitplane address, low word
+$dff0ec  BPL4PTH                     bitplane address, high word
+$dff0ee  BPL4PTL                     bitplane address, low word
+$dff0f0  BPL5PTH                     bitplane address, high word
+$dff0f2  BPL5PTL                     bitplane address, low word
+$dff0f4  BPL6PTH                     bitplane address, high word
+$dff0f6  BPL6PTL                     bitplane address, low word
+$dff0f8  BPL7PTH                     bitplane address, high word (AGA)
+$dff0fa  BPL7PTL                     bitplane address, low word (AGA)
+$dff0fc  BPL8PTH                     bitplane address, high word (AGA)
+$dff0fe  BPL8PTL                     bitplane address, low word (AGA)
+$dff100  BPLCON0                     bitplane control: number of planes, resolution
+$dff102  BPLCON1                     bitplane control: horizontal scroll
+$dff104  BPLCON2                     bitplane control: sprite/playfield priority
+$dff106  BPLCON3                     bitplane control 3 (ECS/AGA)
+$dff108  BPL1MOD                     bitplane modulo, odd planes
+$dff10a  BPL2MOD                     bitplane modulo, even planes
+$dff10c  BPLCON4                     bitplane control 4 (AGA)
+$dff10e  CLXCON2                     collision control 2 (AGA)
+$dff110  BPL1DAT                     bitplane data
+$dff112  BPL2DAT                     bitplane data
+$dff114  BPL3DAT                     bitplane data
+$dff116  BPL4DAT                     bitplane data
+$dff118  BPL5DAT                     bitplane data
+$dff11a  BPL6DAT                     bitplane data
+$dff11c  BPL7DAT                     bitplane data (AGA)
+$dff11e  BPL8DAT                     bitplane data (AGA)
+$dff120  SPR0PTH                     sprite data address, high word
+$dff122  SPR0PTL                     sprite data address, low word
+$dff124  SPR1PTH                     sprite data address, high word
+$dff126  SPR1PTL                     sprite data address, low word
+$dff128  SPR2PTH                     sprite data address, high word
+$dff12a  SPR2PTL                     sprite data address, low word
+$dff12c  SPR3PTH                     sprite data address, high word
+$dff12e  SPR3PTL                     sprite data address, low word
+$dff130  SPR4PTH                     sprite data address, high word
+$dff132  SPR4PTL                     sprite data address, low word
+$dff134  SPR5PTH                     sprite data address, high word
+$dff136  SPR5PTL                     sprite data address, low word
+$dff138  SPR6PTH                     sprite data address, high word
+$dff13a  SPR6PTL                     sprite data address, low word
+$dff13c  SPR7PTH                     sprite data address, high word
+$dff13e  SPR7PTL                     sprite data address, low word
+$dff140  SPR0POS                     sprite start position
+$dff142  SPR0CTL                     sprite stop position and control
+$dff144  SPR0DATA                    sprite image data, plane A
+$dff146  SPR0DATB                    sprite image data, plane B
+$dff148  SPR1POS                     sprite start position
+$dff14a  SPR1CTL                     sprite stop position and control
+$dff14c  SPR1DATA                    sprite image data, plane A
+$dff14e  SPR1DATB                    sprite image data, plane B
+$dff150  SPR2POS                     sprite start position
+$dff152  SPR2CTL                     sprite stop position and control
+$dff154  SPR2DATA                    sprite image data, plane A
+$dff156  SPR2DATB                    sprite image data, plane B
+$dff158  SPR3POS                     sprite start position
+$dff15a  SPR3CTL                     sprite stop position and control
+$dff15c  SPR3DATA                    sprite image data, plane A
+$dff15e  SPR3DATB                    sprite image data, plane B
+$dff160  SPR4POS                     sprite start position
+$dff162  SPR4CTL                     sprite stop position and control
+$dff164  SPR4DATA                    sprite image data, plane A
+$dff166  SPR4DATB                    sprite image data, plane B
+$dff168  SPR5POS                     sprite start position
+$dff16a  SPR5CTL                     sprite stop position and control
+$dff16c  SPR5DATA                    sprite image data, plane A
+$dff16e  SPR5DATB                    sprite image data, plane B
+$dff170  SPR6POS                     sprite start position
+$dff172  SPR6CTL                     sprite stop position and control
+$dff174  SPR6DATA                    sprite image data, plane A
+$dff176  SPR6DATB                    sprite image data, plane B
+$dff178  SPR7POS                     sprite start position
+$dff17a  SPR7CTL                     sprite stop position and control
+$dff17c  SPR7DATA                    sprite image data, plane A
+$dff17e  SPR7DATB                    sprite image data, plane B
+$dff180  COLOR00                     colour register 0: the background
+$dff182  COLOR01                     colour register
+$dff184  COLOR02                     colour register
+$dff186  COLOR03                     colour register
+$dff188  COLOR04                     colour register
+$dff18a  COLOR05                     colour register
+$dff18c  COLOR06                     colour register
+$dff18e  COLOR07                     colour register
+$dff190  COLOR08                     colour register
+$dff192  COLOR09                     colour register
+$dff194  COLOR10                     colour register
+$dff196  COLOR11                     colour register
+$dff198  COLOR12                     colour register
+$dff19a  COLOR13                     colour register
+$dff19c  COLOR14                     colour register
+$dff19e  COLOR15                     colour register
+$dff1a0  COLOR16                     colour register
+$dff1a2  COLOR17                     colour register
+$dff1a4  COLOR18                     colour register
+$dff1a6  COLOR19                     colour register
+$dff1a8  COLOR20                     colour register
+$dff1aa  COLOR21                     colour register
+$dff1ac  COLOR22                     colour register
+$dff1ae  COLOR23                     colour register
+$dff1b0  COLOR24                     colour register
+$dff1b2  COLOR25                     colour register
+$dff1b4  COLOR26                     colour register
+$dff1b6  COLOR27                     colour register
+$dff1b8  COLOR28                     colour register
+$dff1ba  COLOR29                     colour register
+$dff1bc  COLOR30                     colour register
+$dff1be  COLOR31                     colour register
+$dff1c0  HTOTAL                      horizontal line length (ECS)
+$dff1c2  HSSTOP                      horizontal sync stop (ECS)
+$dff1c4  HBSTRT                      horizontal blank start (ECS)
+$dff1c6  HBSTOP                      horizontal blank stop (ECS)
+$dff1c8  VTOTAL                      lines per frame (ECS)
+$dff1ca  VSSTOP                      vertical sync stop (ECS)
+$dff1cc  VBSTRT                      vertical blank start (ECS)
+$dff1ce  VBSTOP                      vertical blank stop (ECS)
+$dff1d0  SPRHSTRT                    UHRES sprite vertical start (ECS)
+$dff1d2  SPRHSTOP                    UHRES sprite vertical stop (ECS)
+$dff1d4  BPLHSTRT                    UHRES bitplane vertical start (ECS)
+$dff1d6  BPLHSTOP                    UHRES bitplane vertical stop (ECS)
+$dff1d8  HHPOSW                      DUAL mode horizontal position (ECS, write)
+$dff1da  HHPOSR                      DUAL mode horizontal position (ECS, read)
+$dff1dc  BEAMCON0                    beam control: PAL/NTSC and sync (ECS)
+$dff1de  HSSTRT                      horizontal sync start (ECS)
+$dff1e0  VSSTRT                      vertical sync start (ECS)
+$dff1e2  HCENTER                     horizontal position of vsync (ECS)
+$dff1e4  DIWHIGH                     display window high bits (ECS)
+$dff1e6  -
+$dff1e8  -
+$dff1ea  -
+$dff1ec  -
+$dff1ee  -
+$dff1f0  -
+$dff1f2  -
+$dff1f4  -
+$dff1f6  -
+$dff1f8  -
+$dff1fa  -
+$dff1fc  FMODE                       memory fetch mode (AGA)
+$dff1fe  -
+$bfe001  CIAA PRA                    CIA-A port A: fire buttons, disk status, LED, ROM overlay
+$bfe101  CIAA PRB                    CIA-A port B: parallel port data
+$bfe201  CIAA DDRA                   CIA-A port A direction
+$bfe301  CIAA DDRB                   CIA-A port B direction
+$bfe401  CIAA TALO                   CIA-A timer A, low byte
+$bfe501  CIAA TAHI                   CIA-A timer A, high byte
+$bfe601  CIAA TBLO                   CIA-A timer B, low byte
+$bfe701  CIAA TBHI                   CIA-A timer B, high byte
+$bfe801  CIAA TODLO                  CIA-A event counter (50/60 Hz ticks), low byte
+$bfe901  CIAA TODMID                 CIA-A event counter, middle byte
+$bfea01  CIAA TODHI                  CIA-A event counter, high byte
+$bfeb01  CIAA                        CIA-A unused register
+$bfec01  CIAA SDR                    CIA-A serial data: the keyboard
+$bfed01  CIAA ICR                    CIA-A interrupt control
+$bfee01  CIAA CRA                    CIA-A control register A
+$bfef01  CIAA CRB                    CIA-A control register B
+$bfd000  CIAB PRA                    CIA-B port A: serial and parallel control lines
+$bfd100  CIAB PRB                    CIA-B port B: floppy drive control (motor, select, side, step)
+$bfd200  CIAB DDRA                   CIA-B port A direction
+$bfd300  CIAB DDRB                   CIA-B port B direction
+$bfd400  CIAB TALO                   CIA-B timer A, low byte
+$bfd500  CIAB TAHI                   CIA-B timer A, high byte
+$bfd600  CIAB TBLO                   CIA-B timer B, low byte
+$bfd700  CIAB TBHI                   CIA-B timer B, high byte
+$bfd800  CIAB TODLO                  CIA-B event counter (horizontal syncs), low byte
+$bfd900  CIAB TODMID                 CIA-B event counter, middle byte
+$bfda00  CIAB TODHI                  CIA-B event counter, high byte
+$bfdb00  CIAB                        CIA-B unused register
+$bfdc00  CIAB SDR                    CIA-B serial data
+$bfdd00  CIAB ICR                    CIA-B interrupt control
+$bfde00  CIAB CRA                    CIA-B control register A
+$bfdf00  CIAB CRB                    CIA-B control register B
+$000000  -
+$000004  ExecBase                    pointer to exec.library, the one fixed address in AmigaOS
+$000008  bus error vector            68000 exception vector
+$00000c  address error vector        68000 exception vector
+$000010  illegal instruction vector  68000 exception vector
+$000014  divide by zero vector       68000 exception vector
+$000018  CHK vector                  68000 exception vector
+$00001c  TRAPV vector                68000 exception vector
+$000020  privilege violation vector  68000 exception vector
+$000024  trace vector                68000 exception vector
+$000028  line-A vector               68000 exception vector
+$00002c  line-F vector               68000 exception vector
+$000030  -
+$000034  -
+$000038  -
+$00003c  -
+$000040  -
+$000044  -
+$000048  -
+$00004c  -
+$000050  -
+$000054  -
+$000058  -
+$00005c  -
+$000060  spurious interrupt vector   68000 exception vector
+$000064  level 1 interrupt vector    serial out, disk block done, software
+$000068  level 2 interrupt vector    CIA-A: keyboard, timers
+$00006c  level 3 interrupt vector    vertical blank, copper, blitter
+$000070  level 4 interrupt vector    audio channels
+$000074  level 5 interrupt vector    serial in, disk sync
+$000078  level 6 interrupt vector    CIA-B: timers, external
+$00007c  level 7 interrupt vector    non-maskable (unused on an Amiga)
+$000080  TRAP #0 vector              68000 exception vector
+$000084  TRAP #1 vector              68000 exception vector
+$000088  TRAP #2 vector              68000 exception vector
+$00008c  TRAP #3 vector              68000 exception vector
+$000090  TRAP #4 vector              68000 exception vector
+$000094  TRAP #5 vector              68000 exception vector
+$000098  TRAP #6 vector              68000 exception vector
+$00009c  TRAP #7 vector              68000 exception vector
+$0000a0  TRAP #8 vector              68000 exception vector
+$0000a4  TRAP #9 vector              68000 exception vector
+$0000a8  TRAP #10 vector             68000 exception vector
+$0000ac  TRAP #11 vector             68000 exception vector
+$0000b0  TRAP #12 vector             68000 exception vector
+$0000b4  TRAP #13 vector             68000 exception vector
+$0000b8  TRAP #14 vector             68000 exception vector
+$0000bc  TRAP #15 vector             68000 exception vector
+$0000c0  -
+$0000c4  -
+$0000c8  -
+$0000cc  -
+$0000d0  -
+$0000d4  -
+$0000d8  -
+$0000dc  -
+$0000e0  -
+$0000e4  -
+$0000e8  -
+$0000ec  -
+$0000f0  -
+$0000f4  -
+$0000f8  -
+$0000fc  -
+$bfe001  bit 0                       OVL: ROM overlay at address 0
+$bfe001  bit 1                       LED: power light dim/filter off
+$bfe001  bit 2                       /CHNG: disk changed
+$bfe001  bit 3                       /WPRO: disk write-protected
+$bfe001  bit 4                       /TK0: drive head at track 0
+$bfe001  bit 5                       /RDY: drive ready
+$bfe001  bit 6                       /FIR0: port 1 fire button (left mouse button)
+$bfe001  bit 7                       /FIR1: port 2 fire button (joystick fire)
+$bfd100  bit 0                       /STEP: step the drive heads
+$bfd100  bit 1                       /DIR: step direction (0 = inwards)
+$bfd100  bit 2                       /SIDE: disk side (0 = upper head)
+$bfd100  bit 3                       /SEL0: select drive 0 (internal)
+$bfd100  bit 4                       /SEL1: select drive 1
+$bfd100  bit 5                       /SEL2: select drive 2
+$bfd100  bit 6                       /SEL3: select drive 3
+$bfd100  bit 7                       /MTR: drive motor (0 = on, latched at select)
+$dff000  base                        the base of the custom chip registers
+$bfe001  base                        the base of CIA-A's registers
+$bfd000  base                        the base of CIA-B's registers

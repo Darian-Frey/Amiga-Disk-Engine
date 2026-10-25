@@ -68,18 +68,30 @@ fn custom(address: u32) -> Option<Named> {
     match offset {
         0xA0..=0xDF => return audio(offset),
         0xE0..=0xFF => return bitplane_pointer(offset),
-        0x110..=0x11F => return n(BPLDAT.get(index(offset, 0x110, 2)?)?, "bitplane data"),
+        0x110..=0x11F => {
+            let i = index(offset, 0x110, 2)?;
+            // Planes 7 and 8 exist only on AGA.
+            let meaning = if i >= 6 {
+                "bitplane data (AGA)"
+            } else {
+                "bitplane data"
+            };
+            return n(BPLDAT.get(i)?, meaning);
+        }
         0x120..=0x13F => return sprite_pointer(offset),
         0x140..=0x17F => return sprite_control(offset),
         0x180..=0x1BF => return colour(offset),
         _ => {}
     }
     match offset {
-        0x000 => n("BLTDDAT", "blitter destination data (read)"),
+        0x000 => n("BLTDDAT", "blitter destination data (blitter DMA only)"),
         0x002 => n("DMACONR", "DMA control and blitter status (read)"),
-        0x004 => n("VPOSR", "beam vertical position, high bit (read)"),
+        0x004 => n(
+            "VPOSR",
+            "beam vertical position, high bit, and the long-frame bit (read)",
+        ),
         0x006 => n("VHPOSR", "beam position, vertical and horizontal (read)"),
-        0x008 => n("DSKDATR", "disk data (read)"),
+        0x008 => n("DSKDATR", "disk data (disk DMA only)"),
         0x00A => n("JOY0DAT", "mouse/joystick counters, port 1"),
         0x00C => n("JOY1DAT", "mouse/joystick counters, port 2"),
         0x00E => n("CLXDAT", "collision detection (read)"),
@@ -106,8 +118,11 @@ fn custom(address: u32) -> Option<Named> {
         0x032 => n("SERPER", "serial port speed"),
         0x034 => n("POTGO", "pot port control"),
         0x036 => n("JOYTEST", "write to all mouse/joystick counters"),
-        0x038 => n("STREQU", "strobe: short frame vertical blank"),
-        0x03A => n("STRVBL", "strobe: vertical blank"),
+        0x038 => n(
+            "STREQU",
+            "strobe: horizontal sync during vertical blank and equalisation",
+        ),
+        0x03A => n("STRVBL", "strobe: horizontal sync during vertical blank"),
         0x03C => n("STRHOR", "strobe: horizontal sync"),
         0x03E => n("STRLONG", "strobe: long horizontal line"),
         0x040 => n("BLTCON0", "blitter control 0: channels and logic function"),
@@ -237,10 +252,12 @@ fn bitplane_pointer(offset: u32) -> Option<Named> {
     let i = index(offset, 0xE0, 2)?;
     Some(Named {
         name: NAMES.get(i)?,
-        meaning: if i % 2 == 0 {
-            "bitplane address, high word"
-        } else {
-            "bitplane address, low word"
+        // Planes 7 and 8 exist only on AGA.
+        meaning: match (i >= 12, i % 2 == 0) {
+            (false, true) => "bitplane address, high word",
+            (false, false) => "bitplane address, low word",
+            (true, true) => "bitplane address, high word (AGA)",
+            (true, false) => "bitplane address, low word (AGA)",
         },
     })
 }
@@ -324,7 +341,7 @@ fn cia(address: u32) -> Option<Named> {
         ("CIAA TBHI", "CIA-A timer B, high byte"),
         (
             "CIAA TODLO",
-            "CIA-A event counter (vertical blanks), low byte",
+            "CIA-A event counter (50/60 Hz ticks), low byte",
         ),
         ("CIAA TODMID", "CIA-A event counter, middle byte"),
         ("CIAA TODHI", "CIA-A event counter, high byte"),
@@ -527,5 +544,65 @@ mod tests {
             "odd offsets are not audio registers"
         );
         assert_eq!(port_bit(0x00BF_E001, 8), None);
+    }
+
+    /// Every answer these tables give, one per line, including the custom
+    /// offsets that have no name, so a gap is reviewed as well as a name.
+    fn table() -> String {
+        use core::fmt::Write as _;
+        let mut out = String::from(
+            "# Every address ADE names on an Amiga, with its meaning (F-032, IMP-018).\n\
+             # Reviewed against the Hardware Reference Manual (3rd ed.), Appendix A and the\n\
+             # CIA chapter, and the M68000 PRM for the vectors. Regenerate with\n\
+             # ADE_BLESS=1 cargo test -p ade-object --lib hardware, and review the diff.\n",
+        );
+        let mut line = |address: u32| {
+            let _ = match name(address) {
+                Some(n) => writeln!(out, "${address:06x}  {:<28}{}", n.name, n.meaning),
+                None => writeln!(out, "${address:06x}  -"),
+            };
+        };
+        (CUSTOM..CUSTOM | 0x200).step_by(2).for_each(&mut line);
+        (0x00BF_E001..=0x00BF_EF01)
+            .step_by(0x100)
+            .for_each(&mut line);
+        (0x00BF_D000..=0x00BF_DF00)
+            .step_by(0x100)
+            .for_each(&mut line);
+        (0..0x100).step_by(4).for_each(line);
+        for address in [0x00BF_E001, 0x00BF_D100] {
+            for bit in 0..8 {
+                if let Some(meaning) = port_bit(address, bit) {
+                    let _ = writeln!(out, "${address:06x}  {:<28}{meaning}", format!("bit {bit}"));
+                }
+            }
+        }
+        for address in [CUSTOM, 0x00BF_E001, 0x00BF_D000] {
+            if let Some(what) = base(address) {
+                let _ = writeln!(out, "${address:06x}  {:<28}{what}", "base");
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn every_hardware_name_is_as_reviewed() {
+        let path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/hardware_names.txt");
+        let now = table();
+        if std::env::var("ADE_BLESS").is_ok() {
+            std::fs::write(&path, &now).unwrap();
+            return;
+        }
+        let reviewed = std::fs::read_to_string(&path).unwrap_or_default();
+        let old: Vec<&str> = reviewed.lines().collect();
+        let changed: Vec<&str> = now.lines().filter(|l| !old.contains(l)).collect();
+        assert!(
+            reviewed == now,
+            "{} hardware names differ from the reviewed table. Review them, then regenerate \
+             with ADE_BLESS=1.\n{}",
+            changed.len(),
+            changed.join("\n")
+        );
     }
 }
