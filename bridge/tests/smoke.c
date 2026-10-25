@@ -206,6 +206,16 @@ int main(int argc, char **argv) {
                       ade_decoded_field(plain, 0, &field) == ADE_NOT_FOUND,
                   "a file ADE does not decode says why");
             ade_decoded_free(plain);
+
+            /* Deleting and renaming (F-031): the root is not an entry, so both
+               are refused before anything is written; NULL is tolerated. */
+            AdeBytes newname = {(const uint8_t *)"x", 1};
+            check(ade_edit_delete(image, ade_image_root_block(image), false, NULL) ==
+                          ADE_REFUSED &&
+                      ade_edit_rename(image, ade_image_root_block(image), newname, NULL) ==
+                          ADE_REFUSED &&
+                      ade_edit_delete(NULL, 0, true, NULL) == ADE_NULL_ARGUMENT,
+                  "the root cannot be deleted or renamed");
         }
         AdeDisasm *boot = ade_disasm_bootblock(image);
         check(boot != NULL && ade_disasm_count(boot) > 0, "the bootblock lists");

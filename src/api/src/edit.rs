@@ -258,6 +258,108 @@ impl Session {
         Ok(entry.block)
     }
 
+    /// The entry at a slash-separated path, as a block to delete or rename.
+    ///
+    /// Resolved as AmigaDOS resolves it (BUG-013), so a name held twice gives
+    /// the copy an Amiga would open.
+    ///
+    /// # Errors
+    /// [`EditError::Lookup`] if it does not resolve.
+    pub fn entry(&self, path: &str) -> Result<u32, EditError> {
+        let image = crate::Image::from_bytes(self.bytes.clone())
+            .map_err(|e| EditError::NotEditable(e.to_string()))?;
+        let volume = image.volume().map_err(EditError::Lookup)?;
+        Ok(volume.lookup(path).map_err(EditError::Lookup)?.block)
+    }
+
+    /// Delete the entry at `block`: a file, a soft link, or an empty
+    /// directory. Its blocks are freed and left as they were, as AmigaDOS
+    /// leaves them, so the carver can still find it (SPEC §Deletion).
+    ///
+    /// # Errors
+    /// See [`EditError`]. A refused edit leaves the session as it was.
+    pub fn delete(&mut self, block: u32) -> Result<(), EditError> {
+        let geometry = self.geometry;
+        let when = self.now();
+        self.edit(|bytes| fs_edit::delete(bytes, geometry, block, when).map(|()| block))
+            .map(|_| ())
+    }
+
+    /// Delete the entry at `block` and, if it is a directory, everything in
+    /// it — deepest first, as one step for undo (IMP-014). Returns how many
+    /// entries went.
+    ///
+    /// Each removal is checked like any other edit. If one is refused, the
+    /// ones already made are undone and the session is as it was.
+    ///
+    /// # Errors
+    /// The first refusal.
+    pub fn delete_tree(&mut self, block: u32) -> Result<usize, EditError> {
+        let order = self.deletion_order(block)?;
+        let before = self.bytes.clone();
+        let (undo_depth, redo, dirty, baseline) = (
+            self.undo.len(),
+            self.redo.clone(),
+            self.dirty,
+            self.baseline.clone(),
+        );
+        let result = self.grouped(|s| {
+            for &b in &order {
+                s.delete(b)?;
+            }
+            Ok(order.len())
+        });
+        if result.is_err() {
+            // All or nothing: a half-deleted folder is not what was asked for.
+            self.bytes = before;
+            self.undo.truncate(undo_depth);
+            self.redo = redo;
+            self.dirty = dirty;
+            self.baseline = baseline;
+        }
+        result
+    }
+
+    /// The entries under `block`, children before their directory, and
+    /// `block` last. Hard links to directories are not followed: they are
+    /// entries to delete, not trees to descend (AV-001).
+    fn deletion_order(&self, block: u32) -> Result<Vec<u32>, EditError> {
+        let image = crate::Image::from_bytes(self.bytes.clone())
+            .map_err(|e| EditError::NotEditable(e.to_string()))?;
+        let volume = image.volume().map_err(EditError::Lookup)?;
+        let mut order = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        let mut stack: Vec<(u32, bool)> = vec![(block, false)];
+        while let Some((b, expanded)) = stack.pop() {
+            if expanded {
+                order.push(b);
+                continue;
+            }
+            if !seen.insert(b) {
+                continue;
+            }
+            stack.push((b, true));
+            let entry = volume.entry_at(b).map_err(EditError::Lookup)?;
+            if entry.kind == ade_filesystem::entry::EntryKind::Directory {
+                for child in volume.list(b).map_err(EditError::Lookup)?.entries {
+                    stack.push((child.block, false));
+                }
+            }
+        }
+        Ok(order)
+    }
+
+    /// Rename the entry at `block`, keeping it in the same directory.
+    ///
+    /// # Errors
+    /// See [`EditError`]. A refused edit leaves the session as it was.
+    pub fn rename(&mut self, block: u32, name: &[u8]) -> Result<(), EditError> {
+        let geometry = self.geometry;
+        let when = self.now();
+        self.edit(|bytes| fs_edit::rename(bytes, geometry, block, name, when).map(|()| block))
+            .map(|_| ())
+    }
+
     /// Make an empty directory in the directory at `parent`.
     ///
     /// # Errors

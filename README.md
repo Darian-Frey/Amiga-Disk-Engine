@@ -43,7 +43,7 @@ cmake -S gui -B gui/build -DCMAKE_BUILD_TYPE=Release && cmake --build gui/build
 
 Add `--format=json` to any of them for machine-readable output; the field names and fault codes are a stability commitment (F-015). On a partitioned hard disk, add `--partition=DH0` — a device holds no volume of its own.
 
-ADE writes to an image in three ways, each on stated terms. `create` makes a new disk and never overwrites (F-019). Edits — a new folder, a copied-in file — happen in memory and are kept only if ADE's own health check finds nothing new (D-018); the CLI saves them only to a new file, and the window's Save asks before writing over the disk that was opened, keeping the original beside it as `.orig` (D-020). Nothing else writes: the bitmap rebuild is still computed and reported, never applied. See [BUILD.md](Docs/BUILD.md).
+ADE writes to an image in three ways, each on stated terms. `create` makes a new disk and never overwrites (F-019). Edits — a new folder, a copied-in file, a deletion, a rename — happen in memory and are kept only if ADE's own health check finds nothing new (D-018); the CLI saves them only to a new file, and the window's Save asks before writing over the disk that was opened, keeping the original beside it as `.orig` (D-020). Nothing else writes: the bitmap rebuild is still computed and reported, never applied. See [BUILD.md](Docs/BUILD.md).
 
 ## Status
 

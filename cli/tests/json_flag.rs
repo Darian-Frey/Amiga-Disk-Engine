@@ -238,6 +238,10 @@ enum Json {
 }
 
 #[test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one row per command; splitting the table would hide the one that is missing"
+)]
 fn every_command_either_emits_json_or_refuses_it() {
     // BUG-007 and BUG-012 were the same bug twice: a command added without
     // thinking about the flag accepted it, printed prose and exited 0. This
@@ -295,6 +299,25 @@ fn every_command_either_emits_json_or_refuses_it() {
         ("consolidate", vec![d.clone(), d.clone()], Json::Emits),
         ("disasm", vec![d.clone()], Json::Refuses),
         ("decode", vec![d.clone(), "startup".into()], Json::Refuses),
+        (
+            "rm",
+            vec![
+                d.clone(),
+                "X".into(),
+                format!("--output={}", out_path("rm.adf")),
+            ],
+            Json::Refuses,
+        ),
+        (
+            "rename",
+            vec![
+                d.clone(),
+                "X".into(),
+                "Y".into(),
+                format!("--output={}", out_path("rn.adf")),
+            ],
+            Json::Refuses,
+        ),
         (
             "mkdir",
             vec![

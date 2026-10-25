@@ -1800,6 +1800,75 @@ fn the_root_met_as_an_entry_is_the_volume_not_a_folder() {
 }
 
 #[test]
+fn an_entry_is_renamed_and_deleted_through_the_abi() {
+    let (path, c_path) = fixture("rmren", &blank_disk());
+    let bytes = |b: &[u8]| ade::AdeBytes {
+        data: b.as_ptr(),
+        len: b.len(),
+    };
+    // SAFETY: a valid path; every handle and message is freed once.
+    unsafe {
+        let image = ade::ade_image_open(c_path.as_ptr(), std::ptr::null(), std::ptr::null_mut());
+        let root = ade::ade_image_root_block(image);
+        let (name, data) = (b"draft", b"contents");
+        let mut block = 0u32;
+        assert_eq!(
+            ade::ade_edit_add_file(
+                image,
+                root,
+                bytes(name),
+                bytes(data),
+                &raw mut block,
+                std::ptr::null_mut()
+            ),
+            AdeResult::Ok
+        );
+        let names = |image| {
+            let listing = ade::ade_dir_open(image, ade::ADE_WHOLE_IMAGE, root);
+            let mut out = Vec::new();
+            for i in 0..ade::ade_listing_count(listing) {
+                let mut entry = std::mem::zeroed::<AdeEntry>();
+                ade::ade_listing_entry(listing, i, &raw mut entry);
+                out.push(std::slice::from_raw_parts(entry.name.data, entry.name.len).to_vec());
+            }
+            ade::ade_listing_free(listing);
+            out
+        };
+
+        assert_eq!(
+            ade::ade_edit_rename(image, block, bytes(b"final"), std::ptr::null_mut()),
+            AdeResult::Ok
+        );
+        assert_eq!(names(image), vec![b"final".to_vec()]);
+
+        // The root is not an entry, and says why.
+        let mut why: *mut std::ffi::c_char = std::ptr::null_mut();
+        assert_eq!(
+            ade::ade_edit_delete(image, root, false, &raw mut why),
+            AdeResult::Refused
+        );
+        assert!(!why.is_null());
+        ade::ade_string_free(why);
+
+        assert_eq!(
+            ade::ade_edit_delete(image, block, false, std::ptr::null_mut()),
+            AdeResult::Ok
+        );
+        assert_eq!(names(image), Vec::<Vec<u8>>::new());
+        assert_eq!(ade::ade_edit_undo(image), AdeResult::Ok);
+        assert_eq!(names(image), vec![b"final".to_vec()], "undo brings it back");
+
+        // Null is tolerated.
+        assert_eq!(
+            ade::ade_edit_delete(std::ptr::null_mut(), 0, false, std::ptr::null_mut()),
+            AdeResult::NullArgument
+        );
+        ade::ade_image_free(image);
+    }
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
 fn a_group_opened_before_the_first_edit_still_undoes_as_one() {
     // The session is created lazily, by the first edit; a group opened before
     // then must still cover it (IMP-014).

@@ -478,6 +478,8 @@ This is C-005, and it has a forensic consequence beyond capacity: **OFS offers t
 
 Deleting a file clears only its pointer from the directory hash chain and updates the bitmap. Header, extension, and data blocks are left intact, so undelete is straightforward until the blocks are reused. Reuse is not random: allocation resumes from the first free block searched from the rootblock outward, so freed blocks near the rootblock are reclaimed early. [FAQ §4.4, §8] Salvage tooling should therefore treat recency of deletion as a strong recoverability signal (F-012).
 
+**ADE deletes the same way (F-031), with one difference.** The entry leaves its parent's hash chain and, on `DOS\4`/`DOS\5`, its cache record goes too, the cache being laid out again from the records that remain (and dropped entirely when none do, as a new directory has none); its blocks are marked free and left exactly as they were, which is what lets `ade carve` bring an OFS file back byte for byte. The difference: a block another entry also uses is **not** freed. On a cross-linked disk AmigaDOS would free it and the next write would land in the other file; measured on the corpus (Championship Golf, block 1687).
+
 ## Bitmap
 
 **A set bit means the block is FREE; a cleared bit means allocated.** [FAQ §4.3] This is the opposite of the common convention and worth a test of its own.

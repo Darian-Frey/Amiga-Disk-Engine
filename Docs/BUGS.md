@@ -10,7 +10,19 @@ Severity vocabulary: low | medium | high.
 
 ## Open
 
-_None._
+### BUG-014 The health report misses a cross-link between two entries of one name
+**Severity:** low
+**Status:** open
+**Found:** 2026-10-25, renaming files across the corpus for F-031.
+**Where:** [src/api/src/health.rs](../src/api/src/health.rs) `scan_file`, which records each block's owner by **path** and reports `cross-linked-block` only when a second, *different* path claims it.
+
+**What is wrong.** Two entries of one name in one directory have one path. When they share blocks — Typhoon's two `tubes` headers, 968 and 957, share a data chain — the second claim looks like the first file again, and nothing is reported. The disk is cross-linked and `ade check` says nothing about it.
+
+**How it showed.** Renaming header 968 to `ADE-renamed` gave the two entries different paths, and the cross-link that was always there appeared as a *new* finding, so the session refused the rename as damage it had caused (D-018 part 4). The refusal is safe — nothing was written — but it is wrong about whose damage it is, and it makes the stale copy impossible to rename.
+
+**Correct behaviour.** Key the owner map by the entry's header block, not its path, so two entries are two owners whatever they are called; name both in the finding by path, and by block when the paths are equal. The corpus rename test (`corpus_files_rename_and_delete_and_the_disk_stays_sound`) accepts this one refusal, on a disk that already reports `duplicate-name`, and should stop accepting it when this is fixed.
+
+**Not fixed here** because the write suite found it rather than caused it (Maintenance Rule 8).
 
 ## Fixed
 

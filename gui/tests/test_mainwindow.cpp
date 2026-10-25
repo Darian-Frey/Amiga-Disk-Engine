@@ -110,6 +110,7 @@ private slots:
     void aFileThatIsNotAProgramSaysWhyAndCanBeDecodedAnyway();
     void preferencesReadInWordsInTheDecodedView();
     void theVolumeListedInItsOwnTableIsMarkedAndCannotBeOpened();
+    void entriesAreRenamedAndDeletedAndUndoBringsThemBack();
     void aFileTheDecodedViewDoesNotKnowSaysWhatItDoes();
     void theDiskRowShowsItsBootCodeAndAFolderSaysItHasNone();
     void anImageIsARootWithItsEntriesBeneath();
@@ -2455,6 +2456,79 @@ void TestMainWindow::theVolumeListedInItsOwnTableIsMarkedAndCannotBeOpened() {
     QVERIFY(!echo->data(0, tree::RoleIsDir).toBool());
     QVERIFY(echo->childIndicatorPolicy() != QTreeWidgetItem::ShowIndicator);
     QVERIFY(!echo->toolTip(0).isEmpty());
+}
+
+// Deleting and renaming in the window (F-031).
+void TestMainWindow::entriesAreRenamedAndDeletedAndUndoBringsThemBack() {
+    QTemporaryDir dir;
+    const QString disk = blankDisk(dir, QStringLiteral("edit.adf"));
+    const QString note = dir.filePath(QStringLiteral("note"));
+    writeFile(note, QByteArray("a note"));
+    const QString folder = dir.filePath(QStringLiteral("Box"));
+    QVERIFY(QDir().mkpath(folder));
+    writeFile(folder + QStringLiteral("/inside"), QByteArray("in the box"));
+
+    MainWindow window;
+    window.setDiscardConfirmation([](const QString &) { return true; });
+    window.openImage(disk);
+    auto *tree = browser(window);
+    QTreeWidgetItem *root = tree->topLevelItem(0);
+    QCOMPARE(window.addFiles(root, {note, folder}), 3);
+    root = tree->topLevelItem(0);
+
+    // The actions follow the selection: on for an entry, off for the disk.
+    auto action = [&window](const QString &text) {
+        for (QAction *a : window.findChildren<QAction *>()) {
+            if (a->text() == text) return a;
+        }
+        return static_cast<QAction *>(nullptr);
+    };
+    QAction *del = action(QStringLiteral("&Delete"));
+    QAction *ren = action(QStringLiteral("Re&name..."));
+    QVERIFY(del && ren);
+    tree->setCurrentItem(root, 0, QItemSelectionModel::ClearAndSelect);
+    QVERIFY(!del->isEnabled() && !ren->isEnabled());
+    QTreeWidgetItem *file = childNamed(root, QStringLiteral("note"));
+    QVERIFY(file);
+    tree->setCurrentItem(file, 0, QItemSelectionModel::ClearAndSelect);
+    QVERIFY(del->isEnabled() && ren->isEnabled());
+
+    // Rename.
+    QVERIFY(window.renameItem(file, QStringLiteral("letter")));
+    root = tree->topLevelItem(0);
+    QVERIFY(!childNamed(root, QStringLiteral("note")));
+    file = childNamed(root, QStringLiteral("letter"));
+    QVERIFY(file);
+
+    // Delete a file: no question, since Undo brings it back.
+    QVERIFY(window.deleteItem(file));
+    root = tree->topLevelItem(0);
+    QVERIFY(!childNamed(root, QStringLiteral("letter")));
+
+    // A folder that holds something is deleted only when the answer is yes.
+    QString asked;
+    window.setDeleteConfirmation([&asked](const QString &q) {
+        asked = q;
+        return false;
+    });
+    QTreeWidgetItem *box = childNamed(root, QStringLiteral("Box"));
+    QVERIFY(box);
+    QVERIFY(!window.deleteItem(box));
+    QVERIFY(asked.contains(QStringLiteral("everything in it")));
+    root = tree->topLevelItem(0);
+    QVERIFY(childNamed(root, QStringLiteral("Box")));
+    window.setDeleteConfirmation([](const QString &) { return true; });
+    QVERIFY(window.deleteItem(childNamed(root, QStringLiteral("Box"))));
+    root = tree->topLevelItem(0);
+    QVERIFY(!childNamed(root, QStringLiteral("Box")));
+
+    // One Undo brings the whole folder back, with what was in it.
+    QVERIFY(window.undoEdit());
+    root = tree->topLevelItem(0);
+    box = childNamed(root, QStringLiteral("Box"));
+    QVERIFY(box);
+    tree->expandItem(box);
+    QVERIFY(childNamed(box, QStringLiteral("inside")));
 }
 
 void TestMainWindow::oneDropIsOneUndo() {

@@ -515,11 +515,27 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
         "Make a folder in the selected folder, or on the selected disk.\n"
         "To copy files on, drop them onto the disk or a folder in the tree."));
     connect(m_newFolder, &QAction::triggered, this, &MainWindow::newFolder);
+    m_rename = edit->addAction(QStringLiteral("Re&name..."));
+    m_rename->setShortcut(QKeySequence(Qt::Key_F2));
+    m_rename->setEnabled(false);
+    connect(m_rename, &QAction::triggered, this, &MainWindow::renameSelected);
+    m_delete = edit->addAction(QStringLiteral("&Delete"));
+    m_delete->setShortcut(QKeySequence::Delete);
+    m_delete->setEnabled(false);
+    m_delete->setToolTip(QStringLiteral(
+        "Delete the selected file or folder. Like AmigaDOS, ADE frees its blocks without\n"
+        "erasing them, so Carve can still find it; Undo brings it back until you save."));
+    connect(m_delete, &QAction::triggered, this, &MainWindow::deleteSelected);
 
     m_confirmSave = [this](const QString &question) {
         return QMessageBox::question(this, QStringLiteral("Save changes"), question,
                                      QMessageBox::Save | QMessageBox::Cancel,
                                      QMessageBox::Save) == QMessageBox::Save;
+    };
+    m_confirmDelete = [this](const QString &question) {
+        return QMessageBox::question(this, QStringLiteral("Delete"), question,
+                                     QMessageBox::Yes | QMessageBox::Cancel,
+                                     QMessageBox::Cancel) == QMessageBox::Yes;
     };
     m_confirmDiscard = [this](const QString &question) {
         return QMessageBox::question(this, QStringLiteral("Unsaved changes"), question,
@@ -1964,6 +1980,80 @@ bool MainWindow::makeFolder(QTreeWidgetItem *target, const QString &name) {
     return true;
 }
 
+// Whether `item` is an entry ADE can delete or rename: a row inside a plain
+// image's tree, not a disk's own row, a search hit or a row in a partition.
+static bool isEditableEntry(const QTreeWidgetItem *item, const QTreeWidget *tree) {
+    return item && item->treeWidget() == tree && item->parent() &&
+           item->data(0, RoleBlock).isValid() &&
+           item->data(0, RolePartition).toUInt() == ADE_WHOLE_IMAGE;
+}
+
+bool MainWindow::deleteItem(QTreeWidgetItem *item) {
+    Open *open = imageFor(item);
+    if (!open || !isEditableEntry(item, m_tree)) return false;
+    const QString name = item->text(ColName);
+    const bool folder = item->data(0, RoleIsDir).toBool();
+    // A folder is deleted with what is in it. Asked first only when it holds
+    // something: a file, or an empty folder, comes back with Undo.
+    if (folder) {
+        const ade::Listing inside =
+            open->image.list(ADE_WHOLE_IMAGE, item->data(0, RoleBlock).toUInt());
+        if (inside && inside.count() > 0 && m_confirmDelete &&
+            !m_confirmDelete(QStringLiteral("Delete the folder %1 and everything in it?\n\n"
+                                            "Undo brings it back until you save the disk.")
+                                 .arg(name))) {
+            return false;
+        }
+    }
+    const ade::EditResult r =
+        open->image.deleteEntry(item->data(0, RoleBlock).toUInt(), folder);
+    m_lastEdited = open->index;
+    if (!r.ok()) {
+        emit errorOccurred(QStringLiteral("Could not delete %1: %2").arg(name, r.message));
+        return false;
+    }
+    reloadImage(*open);
+    statusBar()->showMessage(
+        QStringLiteral("Deleted %1 from %2 — not saved yet").arg(name, open->name));
+    return true;
+}
+
+bool MainWindow::renameItem(QTreeWidgetItem *item, const QString &name) {
+    Open *open = imageFor(item);
+    if (!open || !isEditableEntry(item, m_tree)) return false;
+    QByteArray amiga;
+    if (!ade::amigaName(name, &amiga)) {
+        emit errorOccurred(QStringLiteral("%1: an Amiga name is Latin-1, and this has a "
+                                          "character outside it.")
+                               .arg(name));
+        return false;
+    }
+    const QString old = item->text(ColName);
+    const ade::EditResult r = open->image.renameEntry(item->data(0, RoleBlock).toUInt(), amiga);
+    m_lastEdited = open->index;
+    if (!r.ok()) {
+        emit errorOccurred(QStringLiteral("Could not rename %1: %2").arg(old, r.message));
+        return false;
+    }
+    reloadImage(*open);
+    statusBar()->showMessage(
+        QStringLiteral("Renamed %1 to %2 — not saved yet").arg(old, name));
+    return true;
+}
+
+void MainWindow::deleteSelected() { deleteItem(m_selected); }
+
+void MainWindow::renameSelected() {
+    QTreeWidgetItem *item = m_selected;
+    if (!isEditableEntry(item, m_tree)) return;
+    bool ok = false;
+    const QString name =
+        QInputDialog::getText(this, QStringLiteral("Rename"), QStringLiteral("New name"),
+                              QLineEdit::Normal, item->text(ColName), &ok);
+    if (!ok || name.isEmpty() || name == item->text(ColName)) return;
+    renameItem(item, name);
+}
+
 bool MainWindow::saveImageAs(QTreeWidgetItem *item, const QString &path) {
     Open *open = item ? imageFor(item) : editTarget();
     if (!open || path.isEmpty()) return false;
@@ -2151,6 +2241,9 @@ void MainWindow::updateEditActions() {
                        (!m_selected || m_selected->data(0, RolePartition).toUInt() ==
                                            ADE_WHOLE_IMAGE);
     if (m_newFolder) m_newFolder->setEnabled(plain);
+    const bool entry = plain && isEditableEntry(m_selected, m_tree);
+    if (m_delete) m_delete->setEnabled(entry);
+    if (m_rename) m_rename->setEnabled(entry);
     if (m_undo) m_undo->setEnabled(open && open->image.canUndo());
     if (m_redo) m_redo->setEnabled(open && open->image.canRedo());
     if (m_save) m_save->setEnabled(open && open->image.isModified());

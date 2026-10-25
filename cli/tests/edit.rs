@@ -273,3 +273,125 @@ fn extracting_onto_an_existing_file_is_refused() {
     assert_eq!(stdout, "from the host\n");
     let _ = fs::remove_dir_all(&dir);
 }
+
+#[test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one story, from a blank disk to a carved file, told in order"
+)]
+fn rm_and_rename_write_new_images_and_a_deleted_file_carves_back() {
+    let dir = scratch("rm-rename");
+    let blank = dir.join("ofs.adf");
+    let (_, err, code) = run(&[
+        "create",
+        blank.to_str().unwrap(),
+        "--name=Work",
+        "--type=ofs",
+    ]);
+    assert_eq!(code, Some(0), "{err}");
+    let host = dir.join("note.txt");
+    fs::write(&host, b"a file to lose and find\n").unwrap();
+    let one = dir.join("one.adf");
+    let (_, err, code) = run(&[
+        "put",
+        blank.to_str().unwrap(),
+        host.to_str().unwrap(),
+        "Drawer",
+        &format!("--output={}", one.display()),
+    ]);
+    // `Drawer` does not exist, so it is the file's new name.
+    assert_eq!(code, Some(0), "{err}");
+    let two = dir.join("two.adf");
+    let (_, err, code) = run(&[
+        "mkdir",
+        one.to_str().unwrap(),
+        "Box",
+        &format!("--output={}", two.display()),
+    ]);
+    assert_eq!(code, Some(0), "{err}");
+    let three = dir.join("three.adf");
+    let (_, err, code) = run(&[
+        "put",
+        two.to_str().unwrap(),
+        host.to_str().unwrap(),
+        "Box",
+        &format!("--output={}", three.display()),
+    ]);
+    assert_eq!(code, Some(0), "{err}");
+
+    // Rename, and the file is found by its new name only.
+    let renamed = dir.join("renamed.adf");
+    let (out, err, code) = run(&[
+        "rename",
+        three.to_str().unwrap(),
+        "Drawer",
+        "Kept",
+        &format!("--output={}", renamed.display()),
+    ]);
+    assert_eq!(code, Some(0), "{err}");
+    assert!(out.contains("renamed Drawer to Kept"), "{out}");
+    let (listing, _, _) = run(&["ls", renamed.to_str().unwrap()]);
+    assert!(
+        listing.contains("Kept") && !listing.contains("Drawer"),
+        "{listing}"
+    );
+
+    // A folder with something in it needs --all.
+    let refused = dir.join("refused.adf");
+    let (_, err, code) = run(&[
+        "rm",
+        renamed.to_str().unwrap(),
+        "Box",
+        &format!("--output={}", refused.display()),
+    ]);
+    assert_eq!(code, Some(2), "{err}");
+    assert!(err.contains("delete them first"), "{err}");
+    assert!(!refused.exists(), "a refused edit saves nothing");
+    let emptied = dir.join("emptied.adf");
+    let (out, err, code) = run(&[
+        "rm",
+        renamed.to_str().unwrap(),
+        "Box",
+        "--all",
+        &format!("--output={}", emptied.display()),
+    ]);
+    assert_eq!(code, Some(0), "{err}");
+    assert!(out.contains("2 entries"), "{out}");
+
+    // Delete the file, and carve it back out of the saved image.
+    let gone = dir.join("gone.adf");
+    let (_, err, code) = run(&[
+        "rm",
+        emptied.to_str().unwrap(),
+        "Kept",
+        &format!("--output={}", gone.display()),
+    ]);
+    assert_eq!(code, Some(0), "{err}");
+    let (listing, _, _) = run(&["ls", gone.to_str().unwrap()]);
+    assert!(
+        listing.starts_with("0 entries") || listing.trim().ends_with("0 entries"),
+        "{listing}"
+    );
+    let (check, _, code) = run(&["check", gone.to_str().unwrap()]);
+    assert_eq!(code, Some(0), "the result passes `ade check`: {check}");
+    let recovered = dir.join("recovered");
+    let (out, err, code) = run(&[
+        "carve",
+        gone.to_str().unwrap(),
+        "--all",
+        recovered.to_str().unwrap(),
+    ]);
+    // Exit 1, because the deleted folder `Box` is found and, being a
+    // directory, not written: carve says when not everything came back.
+    assert_eq!(code, Some(1), "{out}{err}");
+    assert!(out.contains("not written"), "{out}");
+    let found: Vec<_> = fs::read_dir(&recovered)
+        .unwrap()
+        .map(|e| fs::read(e.unwrap().path()).unwrap())
+        .collect();
+    assert!(
+        found.iter().any(|b| b == b"a file to lose and find\n"),
+        "the deleted file carves back byte for byte"
+    );
+    let _ = fs::remove_dir_all(&dir);
+}

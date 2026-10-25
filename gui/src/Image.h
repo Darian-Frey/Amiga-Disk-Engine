@@ -512,6 +512,23 @@ public:
         r.message = take(why);
         return r;
     }
+    // `all` deletes a folder with everything in it, as one undo step.
+    EditResult deleteEntry(quint32 block, bool all) {
+        EditResult r;
+        char *why = nullptr;
+        r.code = ade_edit_delete(m_raw, block, all, &why);
+        r.message = take(why);
+        r.block = block;
+        return r;
+    }
+    EditResult renameEntry(quint32 block, const QByteArray &name) {
+        EditResult r;
+        char *why = nullptr;
+        r.code = ade_edit_rename(m_raw, block, view(name), &why);
+        r.message = take(why);
+        r.block = block;
+        return r;
+    }
     bool isModified() const { return ade_image_is_modified(m_raw); }
     bool canUndo() const { return ade_edit_can_undo(m_raw); }
     bool canRedo() const { return ade_edit_can_redo(m_raw); }

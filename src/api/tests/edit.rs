@@ -908,3 +908,437 @@ fn a_file_changed_behind_the_session_is_not_saved_over() {
         Err(EditError::NoOriginal)
     ));
 }
+
+// --- Deleting and renaming (F-031) ------------------------------------------
+
+/// Blocks the bitmap marks in use.
+fn used(bytes: &[u8]) -> usize {
+    ade_core::health::examine(bytes.to_vec())
+        .bitmap
+        .unwrap()
+        .marked_used
+}
+
+#[test]
+fn a_deleted_file_is_gone_and_its_blocks_are_free_on_every_filesystem() {
+    for flags in FLAGS {
+        let mut s = session(flags);
+        let root = s.root();
+        let drawer = s.make_dir(root, b"Drawer").unwrap();
+        let mut want = BTreeMap::new();
+        for (i, (name, len)) in [("keep", 700), ("small", 30)].into_iter().enumerate() {
+            let data = pattern(len, i as u8);
+            s.add_file(root, name.as_bytes(), &data).unwrap();
+            want.insert(name.to_owned(), data);
+        }
+        let inner = pattern(5000, 7);
+        s.add_file(drawer, b"inner", &inner).unwrap();
+        want.insert("Drawer/inner".to_owned(), inner);
+        let before = used(s.bytes());
+
+        // Large enough for extension blocks on OFS: 72 data blocks of 488
+        // bytes fill the header's table.
+        let doomed = pattern(40_000, 3);
+        let block = s.add_file(drawer, b"doomed", &doomed).unwrap();
+        assert!(used(s.bytes()) > before);
+        s.delete(block).unwrap();
+
+        assert_eq!(
+            used(s.bytes()),
+            before,
+            "DOS\\{flags}: every block the file took is free again"
+        );
+        assert!(s.entry("Drawer/doomed").is_err());
+        assert_both_agree(s.bytes(), &want, &format!("DOS\\{flags} delete"));
+        // On a cached volume the record goes too: `-c` lists from the cache.
+        let scratch = Scratch::new(&format!("delc{flags}"));
+        let path = scratch.0.join("d.adf");
+        std::fs::write(&path, s.bytes()).unwrap();
+        if flags >= 4
+            && let Some((ok, text)) = unadf(&["-l", "-c"], &path)
+        {
+            assert!(ok, "DOS\\{flags}: {text}");
+            assert!(
+                !text.contains("doomed"),
+                "DOS\\{flags} from the cache: {text}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_deleted_file_carves_back_byte_for_byte() {
+    // The round trip F-030 was waiting for: deleted by ADE, recovered by ADE.
+    // OFS data blocks name their header and are checksummed, so the carve is
+    // confirmed block by block; FFS data blocks carry nothing, so the most an
+    // honest carver can say there is that a header survives.
+    for flags in FLAGS {
+        let mut s = session(flags);
+        let root = s.root();
+        let data = pattern(9_000, 11);
+        let block = s.add_file(root, b"lost-and-found", &data).unwrap();
+        s.delete(block).unwrap();
+
+        let image = ade_core::Image::from_bytes(s.bytes().to_vec()).unwrap();
+        let found = ade_core::carve::carve(&image);
+        let carved = found
+            .iter()
+            .find(|c| c.block == block)
+            .unwrap_or_else(|| panic!("DOS\\{flags}: the deleted header is found"));
+        assert_eq!(carved.name, "lost-and-found");
+        let ofs = flags % 2 == 0;
+        assert_eq!(
+            ade_core::carve::is_recoverable(carved),
+            ofs,
+            "DOS\\{flags}: {:?}",
+            carved.evidence
+        );
+        if ofs {
+            assert!(
+                ade_core::carve::contents(&image, carved) == data,
+                "DOS\\{flags}: the carved bytes are the file's"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_directory_is_deleted_only_when_empty_or_as_a_whole_tree() {
+    for flags in FLAGS {
+        let mut s = session(flags);
+        let root = s.root();
+        let before = used(s.bytes());
+        let top = s.make_dir(root, b"Top").unwrap();
+        let mid = s.make_dir(top, b"Mid").unwrap();
+        s.add_file(mid, b"a", &pattern(2000, 1)).unwrap();
+        s.add_file(top, b"b", &pattern(100, 2)).unwrap();
+        let full = s.bytes().to_vec();
+
+        // Not empty: refused, and nothing changed.
+        let refused = s.delete(top).unwrap_err();
+        assert!(
+            matches!(refused, EditError::Refused(FsEditError::NotRemovable(_))),
+            "{refused}"
+        );
+        assert!(
+            s.bytes() == full.as_slice(),
+            "a refused delete changes nothing"
+        );
+
+        // The whole tree: gone, every block free, one undo brings it back.
+        assert_eq!(s.delete_tree(top).unwrap(), 4);
+        assert_eq!(used(s.bytes()), before, "DOS\\{flags}");
+        assert_both_agree(s.bytes(), &BTreeMap::new(), &format!("DOS\\{flags} tree"));
+        assert!(s.undo());
+        assert!(
+            s.bytes() == full.as_slice(),
+            "DOS\\{flags}: one undo restores it all"
+        );
+    }
+}
+
+#[test]
+fn the_root_and_hard_links_are_not_deleted() {
+    let mut s = session(1);
+    let root = s.root();
+    assert!(matches!(
+        s.delete(root),
+        Err(EditError::Refused(FsEditError::NotRemovable(_)))
+    ));
+    assert!(matches!(
+        s.rename(root, b"New"),
+        Err(EditError::Refused(FsEditError::NotRemovable(_)))
+    ));
+
+    // A link, and the file it points at: removing either end means
+    // rewriting the link chain, which ADE does not do yet.
+    let mut v = ade_fixtures::Volume::dd(1).named("Links");
+    let target = v.add_file("target", b"linked to");
+    let link = v.add_hardlink("link", target, false);
+    let mut s = Session::from_bytes(v.build()).unwrap();
+    for block in [target, link] {
+        let e = s.delete(block).unwrap_err();
+        assert!(
+            matches!(e, EditError::Refused(FsEditError::NotRemovable(_))),
+            "{e}"
+        );
+    }
+    assert!(!s.is_dirty());
+}
+
+#[test]
+fn a_renamed_entry_is_found_by_its_new_name_on_every_filesystem() {
+    use ade_core::layers::filesystem::hash::hash_name;
+    for flags in FLAGS {
+        let international = flags >= 2;
+        let mut s = session(flags);
+        let root = s.root();
+        let data = pattern(3_000, 5);
+        let file = s.add_file(root, b"old-name", &data).unwrap();
+        let dir = s.make_dir(root, b"Folder").unwrap();
+        s.add_file(dir, b"inside", b"still here").unwrap();
+        let used_before = used(s.bytes());
+
+        // An accented name, so a wrong hash function would file it where no
+        // lookup looks (C-006); and a folder, whose children must follow it.
+        let new: &[u8] = b"nouveau-r\xE9sum\xE9";
+        s.rename(file, new).unwrap();
+        s.rename(dir, b"Renamed").unwrap();
+        assert_eq!(used(s.bytes()), used_before, "a rename takes no blocks");
+        assert_eq!(
+            slot_of(s.bytes(), root, file),
+            Some(hash_name(new, 72, international) as usize),
+            "DOS\\{flags}: filed under its new name's slot"
+        );
+
+        let mut want = BTreeMap::new();
+        want.insert("Renamed/inside".to_owned(), b"still here".to_vec());
+        want.insert("nouveau-r\u{e9}sum\u{e9}".to_owned(), data.clone());
+        // ADE's reading; ADFlib's is checked by name below, because its
+        // extraction writes Latin-1 names that do not round-trip as UTF-8.
+        assert_clean(s.bytes(), &format!("DOS\\{flags} rename"));
+        assert_eq!(ade_files(s.bytes()), want, "DOS\\{flags} rename");
+
+        // ADFlib finds it **by name**, which goes through the hash.
+        let scratch = Scratch::new(&format!("ren{flags}"));
+        let image = scratch.0.join("r.adf");
+        std::fs::write(&image, s.bytes()).unwrap();
+        let script = "ulimit -v 1048576; exec timeout 20 unadf -p \"$1\" \"$2\"";
+        let out = Command::new("sh")
+            .arg("-c")
+            .arg(script)
+            .arg("sh")
+            .arg(&image)
+            .arg(std::ffi::OsStr::from_bytes(new))
+            .output();
+        if let Ok(out) = out
+            && (!out.stdout.is_empty() || out.status.success())
+        {
+            assert!(
+                out.stdout == data,
+                "DOS\\{flags}: ADFlib finds the new name"
+            );
+        }
+        if flags >= 4
+            && let Some((ok, text)) = unadf(&["-l", "-c"], &image)
+        {
+            assert!(ok, "{text}");
+            assert!(
+                text.contains("Renamed/") && !text.contains("Folder"),
+                "DOS\\{flags} from the cache: {text}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_rename_onto_a_taken_name_is_refused_but_a_change_of_case_is_not() {
+    let mut s = session(3);
+    let root = s.root();
+    let a = s.add_file(root, b"alpha", b"a").unwrap();
+    s.add_file(root, b"beta", b"b").unwrap();
+    let before = s.bytes().to_vec();
+    assert!(matches!(
+        s.rename(a, b"BETA"),
+        Err(EditError::Refused(FsEditError::Exists { .. }))
+    ));
+    assert!(
+        s.bytes() == before.as_slice(),
+        "a refused rename changes nothing"
+    );
+    // The same name in other letters is the entry itself.
+    s.rename(a, b"Alpha").unwrap();
+    let image = ade_core::Image::from_bytes(s.bytes().to_vec()).unwrap();
+    let volume = image.volume().unwrap();
+    assert_eq!(volume.lookup("alpha").unwrap().name, b"Alpha");
+    // And a shorter name leaves nothing of the longer one behind it.
+    s.rename(a, b"A").unwrap();
+    let raw = &s.bytes()[a as usize * 512..(a as usize + 1) * 512];
+    assert_eq!(&raw[512 - 80..512 - 80 + 7], b"\x01A\0\0\0\0\0");
+}
+
+#[test]
+fn deleting_from_a_crowded_cached_directory_gives_cache_blocks_back() {
+    // Enough files on DOS\5 to need several cache blocks; deleting them all
+    // must free those blocks and leave the directory with no cache, as a new
+    // one has.
+    let mut s = session(5);
+    let root = s.root();
+    let before = used(s.bytes());
+    let blocks: Vec<u32> = (0..60)
+        .map(|i| {
+            s.add_file(root, format!("file-{i:02}").as_bytes(), b"x")
+                .unwrap()
+        })
+        .collect();
+    for (i, block) in blocks.iter().enumerate() {
+        s.delete(*block).unwrap();
+        assert_clean(s.bytes(), &format!("after deleting {i}"));
+    }
+    assert_eq!(used(s.bytes()), before, "files and cache blocks all free");
+    assert_both_agree(s.bytes(), &BTreeMap::new(), "emptied cached root");
+}
+
+#[test]
+fn corpus_files_rename_and_delete_and_the_disk_stays_sound() {
+    // Real disks, real files: rename one, check ADFlib finds it by its new
+    // name with the bytes it found under the old one, then delete it. ADFlib
+    // against ADFlib, not against ADE: on a damaged file the two readers
+    // differ for their own reasons (a TOSEC bad dump showed 488 bytes of it),
+    // and that is not what a rename must preserve. Only intact files are
+    // compared at all — see below. Every step goes through the
+    // session's health check, so a write that leaves anything new for `ade
+    // check` to report fails here. ADE_EDIT_CORPUS=all for every disk.
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../disks");
+    let Ok(read) = std::fs::read_dir(&dir) else {
+        eprintln!("skipping: no corpus");
+        return;
+    };
+    let step = if std::env::var("ADE_EDIT_CORPUS").as_deref() == Ok("all") {
+        1
+    } else {
+        25
+    };
+    let mut paths: Vec<PathBuf> = read.map(|e| e.unwrap().path()).collect();
+    paths.sort();
+    let (mut renamed, mut deleted, mut checked) = (0usize, 0usize, 0usize);
+    let mut refused: BTreeMap<String, usize> = BTreeMap::new();
+    for path in paths.iter().step_by(step) {
+        let Ok(mut s) = Session::open(path) else {
+            continue;
+        };
+        // The first plain file in the root that is not part of a link.
+        let image = ade_core::Image::from_bytes(s.bytes().to_vec()).unwrap();
+        let volume = image.volume().unwrap();
+        let Ok(listing) = volume.list(volume.root()) else {
+            continue;
+        };
+        let Some(file) = listing.entries.into_iter().find(|e| {
+            e.kind == ade_core::layers::filesystem::entry::EntryKind::File && e.next_link == 0
+        }) else {
+            continue;
+        };
+        let Ok(contents) = volume.read_file(&file) else {
+            continue;
+        };
+        // A damaged file is renamed and deleted like any other, but not used
+        // to judge ADFlib's reading: on one, `unadf -p` gives different bytes
+        // on every run (measured on Beverly Hills Cop_DiskB, three runs,
+        // three digests), so there is nothing stable to compare.
+        // And a name that begins with `-` is read by unadf as an option
+        // (Bograts' `-S-.info`), so ADFlib cannot be asked about it.
+        let intact = contents.is_complete() && file.name.first() != Some(&b'-');
+        drop(volume);
+        // What ADFlib reads under the old name, before anything changes.
+        let fetch = |bytes: &[u8], name: &[u8], tag: &str| -> Option<Vec<u8>> {
+            let scratch = Scratch::new(tag);
+            let image = scratch.0.join("d.adf");
+            std::fs::write(&image, bytes).unwrap();
+            let out = Command::new("sh")
+                .arg("-c")
+                .arg("ulimit -v 1048576; exec timeout 20 unadf -p \"$1\" \"$2\"")
+                .arg("sh")
+                .arg(&image)
+                .arg(std::ffi::OsStr::from_bytes(name))
+                .output()
+                .ok()?;
+            (out.status.success() && !out.stdout.is_empty()).then_some(out.stdout)
+        };
+        let before = intact
+            .then(|| fetch(s.bytes(), &file.name, "corpus-before"))
+            .flatten();
+
+        match s.rename(file.block, b"ADE-renamed") {
+            Ok(()) => renamed += 1,
+            Err(EditError::Refused(e)) => {
+                *refused.entry(refusal_kind(&e)).or_insert(0) += 1;
+                continue;
+            }
+            // BUG-014: the health report looks for cross-links by path, so two
+            // entries of one name sharing blocks look like one file. Renaming
+            // one gives them two paths and the old cross-link appears as new,
+            // and the edit is refused. Safe, and explained only on a disk that
+            // already holds a name twice.
+            Err(EditError::WouldDamage(found))
+                if found.iter().all(|f| f.starts_with("cross-linked-block"))
+                    && ade_core::health::examine(std::fs::read(path).unwrap())
+                        .findings
+                        .iter()
+                        .any(|f| f.code == "duplicate-name") =>
+            {
+                *refused.entry("BUG-014".to_owned()).or_insert(0) += 1;
+                continue;
+            }
+            Err(e) => panic!("{}: rename: {e}", path.display()),
+        }
+        // Only where ADFlib read the file at all before: a disk it chokes on
+        // for its own reasons is not blamed on the rename.
+        if let Some(before) = before {
+            let after = fetch(s.bytes(), b"ADE-renamed", "corpus-after");
+            checked += 1;
+            assert!(
+                after.as_deref() == Some(before.as_slice()),
+                "{}: ADFlib found {:?} bytes under the new name, {} under the old",
+                path.display(),
+                after.as_ref().map(Vec::len),
+                before.len()
+            );
+        }
+        match s.delete(file.block) {
+            Ok(()) => deleted += 1,
+            Err(EditError::Refused(e)) => {
+                *refused.entry(refusal_kind(&e)).or_insert(0) += 1;
+            }
+            Err(e) => panic!("{}: delete: {e}", path.display()),
+        }
+    }
+    eprintln!(
+        "renamed {renamed}, ADFlib confirmed {checked}, deleted {deleted}, refused {refused:?}"
+    );
+}
+
+#[test]
+fn a_block_another_file_shares_stays_allocated_when_one_is_deleted() {
+    // A cross-linked disk: file `b`'s table names `a`'s data block. Freeing
+    // every block of a deleted `a` — as AmigaDOS would — leaves `b` reading a
+    // block the next write can take. Found on Championship Golf.
+    use ade_core::layers::endian::{put_u32, u32_at};
+    let mut s = session(1);
+    let root = s.root();
+    let a = s.add_file(root, b"a", &pattern(400, 1)).unwrap();
+    let b = s.add_file(root, b"b", &pattern(400, 2)).unwrap();
+    let mut bytes = s.bytes().to_vec();
+    let at = |block: u32| block as usize * 512;
+    // A one-block file keeps its data pointer in the table's last slot.
+    let a_data = u32_at(&bytes, at(a) + 24 + 71 * 4).unwrap();
+    put_u32(&mut bytes, at(b) + 24 + 71 * 4, a_data).unwrap();
+    put_u32(&mut bytes, at(b) + 16, a_data).unwrap();
+    put_u32(&mut bytes, at(b) + 20, 0).unwrap();
+    let sum = ade_core::layers::block::checksum::normal_at(&bytes[at(b)..at(b) + 512], 20).unwrap();
+    put_u32(&mut bytes, at(b) + 20, sum).unwrap();
+    let health = ade_core::health::examine(bytes.clone());
+    assert!(
+        health
+            .findings
+            .iter()
+            .any(|f| f.code == "cross-linked-block"),
+        "the disk is cross-linked to begin with"
+    );
+
+    let mut s = Session::from_bytes(bytes).unwrap();
+    s.set_clock(Some(WHEN));
+    s.delete(a).unwrap();
+    let after = ade_core::health::examine(s.bytes().to_vec());
+    assert_eq!(
+        after.bitmap.unwrap().referenced_but_free,
+        0,
+        "b's block is still in use"
+    );
+    let image = ade_core::Image::from_bytes(s.bytes().to_vec()).unwrap();
+    let volume = image.volume().unwrap();
+    let left = volume.lookup("b").unwrap();
+    assert!(
+        volume.read_file(&left).unwrap().into_bytes() == pattern(400, 1),
+        "b still reads the block it shared"
+    );
+}

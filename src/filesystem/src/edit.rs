@@ -1,4 +1,5 @@
-//! Writing into an existing volume: making a directory, adding a file.
+//! Writing into an existing volume: making a directory, adding a file,
+//! deleting an entry, renaming one.
 //!
 //! # The terms are D-018's
 //!
@@ -44,6 +45,16 @@
 //! - A parent directory whose listing or cache is damaged. Inserting into a
 //!   broken chain extends the damage to the new entry.
 //! - A name that already exists, compared the way the volume compares names.
+//! - Deleting the root, a directory that is not empty, or anything a hard link
+//!   is part of — a link or a file a link points at. Removing one end of a
+//!   link chain means relinking the other, which ADE does not write yet.
+//!
+//! # Deleting leaves the blocks where they are
+//!
+//! As AmigaDOS does (SPEC §Deletion): the entry is taken out of its parent's
+//! hash chain and cache, and its blocks are marked free, but nothing in them
+//! is erased. That is what makes a deleted file recoverable until its blocks
+//! are reused, and what ADE's own carver reads (F-030).
 
 use std::collections::{BTreeMap, HashSet};
 
@@ -95,6 +106,8 @@ pub enum EditError {
         /// The offending byte.
         byte: u8,
     },
+    /// The entry cannot be deleted or renamed, and why.
+    NotRemovable(String),
     /// Something in the parent already has that name.
     Exists {
         /// The name, as stored on the disk.
@@ -124,9 +137,10 @@ pub enum EditError {
 impl core::fmt::Display for EditError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
-            Self::Unsupported(why) | Self::BitmapUntrusted(why) | Self::Damaged(why) => {
-                f.write_str(why)
-            }
+            Self::Unsupported(why)
+            | Self::BitmapUntrusted(why)
+            | Self::Damaged(why)
+            | Self::NotRemovable(why) => f.write_str(why),
             Self::NotADirectory { block } => {
                 write!(f, "block {block} is not a directory ADE can write into")
             }
@@ -315,6 +329,172 @@ pub fn add_file(
     Ok(plan.1)
 }
 
+/// Delete the entry at `block`: a file, a soft link, or an empty directory.
+///
+/// The entry leaves its parent's hash chain and cache, and every block it
+/// occupied is marked free — but none is erased (SPEC §Deletion).
+///
+/// # Errors
+/// [`EditError::NotRemovable`] for the root, a directory with anything in it,
+/// or an entry a hard link is part of; otherwise as [`make_dir`]. The image
+/// is unchanged whenever one is returned.
+pub fn delete(
+    image: &mut [u8],
+    geometry: Geometry,
+    block: u32,
+    when: Stamp,
+) -> Result<(), EditError> {
+    let writes = {
+        let source = Slice { image, geometry };
+        let (entry, parent) = removable(&source, block)?;
+        let mut plan = Plan::open(&source, parent)?;
+        let blocks = match entry.kind {
+            EntryKind::File => plan.volume.file_blocks(&entry)?,
+            EntryKind::Directory => {
+                let listing = plan.volume.list(block)?;
+                if !listing.entries.is_empty() {
+                    return Err(EditError::NotRemovable(format!(
+                        "{} is a directory with {} entries in it; delete them first",
+                        entry.name_lossy(),
+                        listing.entries.len()
+                    )));
+                }
+                let mut blocks = vec![block];
+                // An empty directory can still own a cache chain.
+                if plan.volume.has_dircache() && entry.extension != 0 {
+                    blocks.extend(plan.volume.dircache(block)?.block_numbers());
+                }
+                blocks
+            }
+            _ => vec![block],
+        };
+        // A block another entry also uses stays allocated. AmigaDOS would
+        // free it, and the next write would land in the other file — on a
+        // cross-linked corpus disk (Championship Golf, block 1687) that is
+        // exactly what ADE's own health check refused.
+        let shared = plan.blocks_used_elsewhere(block)?;
+        let blocks: Vec<u32> = blocks.into_iter().filter(|b| !shared.contains(b)).collect();
+        plan.unlink(block)?;
+        if plan.volume.has_dircache() {
+            plan.rewrite_cache(|records| records.retain(|r| r.header != block))?;
+        }
+        plan.touch(when)?;
+        plan.release(&blocks);
+        plan.finish()
+    };
+    apply(image, geometry, &writes);
+    Ok(())
+}
+
+/// Rename the entry at `block` to `name`, in the same directory.
+///
+/// The entry moves to the hash slot its new name falls in, and its cache
+/// record, if any, takes the new name. Its own datestamp is kept: the file
+/// did not change, its directory did.
+///
+/// # Errors
+/// [`EditError::NotRemovable`] for the root; [`EditError::Exists`] when
+/// another entry has the name; otherwise as [`make_dir`]. The image is
+/// unchanged whenever one is returned.
+pub fn rename(
+    image: &mut [u8],
+    geometry: Geometry,
+    block: u32,
+    name: &[u8],
+    when: Stamp,
+) -> Result<(), EditError> {
+    check_name(name)?;
+    let writes = {
+        let source = Slice { image, geometry };
+        let (_, parent) = removable_for_rename(&source, block)?;
+        let mut plan = Plan::open(&source, parent)?;
+        // Taken by anything but this entry: changing only a name's case is a
+        // rename of the entry to itself, and allowed.
+        if let Some(existing) = plan
+            .volume
+            .list(parent)?
+            .entries
+            .iter()
+            .find(|e| e.block != block && plan.volume.names_match(&e.name, name))
+        {
+            return Err(EditError::Exists {
+                name: existing.name_lossy(),
+            });
+        }
+        plan.unlink(block)?;
+        let mut raw = plan.read(block)?;
+        // The old name's bytes past the new length are cleared, so a shorter
+        // name leaves no tail of the longer one behind it in the block.
+        let at = from_end(&raw, 80);
+        if let Some(field) = raw.get_mut(at..at.saturating_add(MAX_NAME.saturating_add(1))) {
+            field.fill(0);
+        }
+        put_name(&mut raw, name);
+        seal(&mut raw);
+        plan.put(block, raw);
+        plan.insert(block, name)?;
+        if plan.volume.has_dircache() {
+            plan.rewrite_cache(|records| {
+                for r in records.iter_mut().filter(|r| r.header == block) {
+                    r.name = name.to_vec();
+                }
+            })?;
+        }
+        plan.touch(when)?;
+        plan.finish()
+    };
+    apply(image, geometry, &writes);
+    Ok(())
+}
+
+/// The entry at `block` and its parent, if it is one ADE will delete.
+fn removable(
+    source: &dyn BlockSource,
+    block: u32,
+) -> Result<(crate::entry::Entry, u32), EditError> {
+    let (entry, parent) = removable_for_rename(source, block)?;
+    match entry.kind {
+        EntryKind::HardLinkFile | EntryKind::HardLinkDir => Err(EditError::NotRemovable(format!(
+            "{} is a hard link; ADE does not yet rewrite link chains, so it will not remove one",
+            entry.name_lossy()
+        ))),
+        _ if entry.next_link != 0 => Err(EditError::NotRemovable(format!(
+            "a hard link points at {}; ADE does not yet rewrite link chains, so it will not \
+             delete it",
+            entry.name_lossy()
+        ))),
+        EntryKind::File | EntryKind::Directory | EntryKind::SoftLink => Ok((entry, parent)),
+        _ => Err(EditError::NotRemovable(format!(
+            "{} is not an entry ADE knows how to delete",
+            entry.name_lossy()
+        ))),
+    }
+}
+
+/// The entry at `block` and its parent, if it is an entry at all and not the
+/// root.
+fn removable_for_rename(
+    source: &dyn BlockSource,
+    block: u32,
+) -> Result<(crate::entry::Entry, u32), EditError> {
+    let volume = Volume::mount(source)?;
+    if block == volume.root() {
+        return Err(EditError::NotRemovable(
+            "that is the volume itself, not an entry in it".to_owned(),
+        ));
+    }
+    let entry = volume
+        .entry_at(block)
+        .map_err(|_| EditError::NotRemovable(format!("block {block} is not a directory entry")))?;
+    if entry.kind == EntryKind::Root {
+        return Err(EditError::NotRemovable(
+            "that is the volume itself, not an entry in it".to_owned(),
+        ));
+    }
+    let parent = entry.parent;
+    Ok((entry, parent))
+}
+
 /// A volume's bytes, read as blocks.
 struct Slice<'a> {
     image: &'a [u8],
@@ -366,10 +546,28 @@ struct Plan<'a> {
 }
 
 impl<'a> Plan<'a> {
-    /// Mount, and check everything that does not depend on what is being
-    /// added: the volume, the parent, the bitmap and the name.
+    /// Mount, and check everything an addition depends on: the volume, the
+    /// parent, the bitmap, and that the name is valid and free.
     fn new(source: &'a dyn BlockSource, parent: u32, name: &[u8]) -> Result<Self, EditError> {
         check_name(name)?;
+        let plan = Self::open(source, parent)?;
+        if let Some(existing) = plan
+            .volume
+            .list(parent)?
+            .entries
+            .iter()
+            .find(|e| plan.volume.names_match(&e.name, name))
+        {
+            return Err(EditError::Exists {
+                name: existing.name_lossy(),
+            });
+        }
+        Ok(plan)
+    }
+
+    /// Mount, and check what every edit of `parent` depends on: the volume,
+    /// the parent, its listing and the bitmap.
+    fn open(source: &'a dyn BlockSource, parent: u32) -> Result<Self, EditError> {
         let volume = Volume::mount(source)?;
         let Some(dostype) = volume.dostype() else {
             return Err(EditError::Unsupported(
@@ -402,15 +600,6 @@ impl<'a> Plan<'a> {
             return Err(EditError::Damaged(format!(
                 "the directory is damaged ({fault}); ADE will not write into it"
             )));
-        }
-        if let Some(existing) = listing
-            .entries
-            .iter()
-            .find(|e| volume.names_match(&e.name, name))
-        {
-            return Err(EditError::Exists {
-                name: existing.name_lossy(),
-            });
         }
 
         let bitmap = Bitmap::read(source, &geometry, volume.rootblock())?;
@@ -578,6 +767,28 @@ impl<'a> Plan<'a> {
         sec_type: u32,
         when: Stamp,
     ) -> Result<(), EditError> {
+        self.insert(block, name)?;
+        self.touch(when)?;
+        if self.volume.has_dircache() {
+            let record = Record {
+                header: block,
+                size,
+                protection: Protection(0),
+                uid: 0,
+                gid: 0,
+                altered: crate::datestamp::Datestamp::new(when.days, when.mins, when.ticks),
+                // The record holds the secondary type as one signed byte.
+                secondary_type: if sec_type == ST_FILE { -3 } else { 2 },
+                name: name.to_vec(),
+                comment: Vec::new(),
+            };
+            self.rewrite_cache(|records| records.push(record))?;
+        }
+        Ok(())
+    }
+
+    /// Put `block` into the parent's hash chain for `name`, in block order.
+    fn insert(&mut self, block: u32, name: &[u8]) -> Result<(), EditError> {
         let international = self.volume.is_international();
         let ht = u32::try_from(self.ht).unwrap_or(0);
         let slot = hash_name(name, ht, international) as usize;
@@ -619,9 +830,85 @@ impl<'a> Plan<'a> {
         };
         seal(&mut raw);
         self.put(owner, raw);
+        Ok(())
+    }
 
-        // The parent changed, and so did the volume. On the root those are
-        // two fields of one block; anywhere else, two blocks.
+    /// Take `block` out of the parent's hash table: whatever points at it —
+    /// a slot, or the entry before it in a chain — points past it instead.
+    ///
+    /// Every slot is searched, not only the one its name hashes to, so an
+    /// entry filed under a wrong slot (IMP-012) can still be removed. One that
+    /// two chains reach, or none, is refused: the table is not what ADE
+    /// would be editing.
+    fn unlink(&mut self, block: u32) -> Result<(), EditError> {
+        let parent_raw = self.read(self.parent)?;
+        let mut pointers: Vec<(u32, Option<usize>)> = Vec::new();
+        for slot in 0..self.ht {
+            let slot_at = 24usize.saturating_add(slot.saturating_mul(4));
+            let mut owner: (u32, Option<usize>) = (self.parent, Some(slot_at));
+            let mut next = u32_at(&parent_raw, slot_at).unwrap_or(0);
+            let mut seen: HashSet<u32> = HashSet::new();
+            while next != 0 && seen.insert(next) {
+                if next == block {
+                    pointers.push(owner);
+                    break;
+                }
+                let raw = self.read(next)?;
+                owner = (next, None);
+                next = u32_at(&raw, from_end(&raw, 16)).unwrap_or(0);
+            }
+        }
+        let [(owner, at)] = pointers.as_slice() else {
+            return Err(EditError::Damaged(format!(
+                "block {block} is reached from {} places in its directory's hash table, not \
+                 one; ADE will not edit it",
+                pointers.len()
+            )));
+        };
+        let entry_raw = self.read(block)?;
+        let after = u32_at(&entry_raw, from_end(&entry_raw, 16)).unwrap_or(0);
+        let mut raw = self.read(*owner)?;
+        let _ = match at {
+            Some(at) => put_u32(&mut raw, *at, after),
+            None => put_back(&mut raw, 16, after),
+        };
+        seal(&mut raw);
+        self.put(*owner, raw);
+        Ok(())
+    }
+
+    /// Every block some entry other than `block` uses: headers, file blocks,
+    /// and directory caches, across the whole volume.
+    fn blocks_used_elsewhere(&self, block: u32) -> Result<HashSet<u32>, EditError> {
+        let root = self.volume.root();
+        let mut used = HashSet::from([root]);
+        if self.volume.has_dircache() {
+            used.extend(self.volume.dircache(root)?.block_numbers());
+        }
+        for (_, entry) in self.volume.walk(root)?.entries {
+            if entry.block == block {
+                continue;
+            }
+            used.insert(entry.block);
+            if entry.kind == EntryKind::File {
+                used.extend(self.volume.file_blocks(&entry)?);
+            }
+            if entry.kind == EntryKind::Directory && self.volume.has_dircache() {
+                used.extend(self.volume.dircache(entry.block)?.block_numbers());
+            }
+        }
+        Ok(used)
+    }
+
+    /// Give blocks back to the free map. Their contents stay as they are.
+    fn release(&mut self, blocks: &[u32]) {
+        self.released.extend(blocks.iter().copied());
+    }
+
+    /// The parent changed, and so did the volume: move both datestamps.
+    fn touch(&mut self, when: Stamp) -> Result<(), EditError> {
+        // On the root those are two fields of one block; anywhere else, two
+        // blocks.
         let root = self.volume.root();
         let mut raw = self.read(self.parent)?;
         put_stamp(&mut raw, 92, when);
@@ -636,33 +923,18 @@ impl<'a> Plan<'a> {
             seal(&mut raw);
             self.put(root, raw);
         }
-
-        if self.volume.has_dircache() {
-            let record = Record {
-                header: block,
-                size,
-                protection: Protection(0),
-                uid: 0,
-                gid: 0,
-                altered: crate::datestamp::Datestamp::new(when.days, when.mins, when.ticks),
-                // The record holds the secondary type as one signed byte.
-                secondary_type: if sec_type == ST_FILE { -3 } else { 2 },
-                name: name.to_vec(),
-                comment: Vec::new(),
-            };
-            self.cache(record)?;
-        }
         Ok(())
     }
 
-    /// Add a record to the parent's directory cache.
+    /// Change the parent's directory cache by `change`, and lay it out again.
     ///
-    /// The cache is laid out again from its existing records plus the new
-    /// one, reusing its blocks in order and taking one more only when they
-    /// are full. Existing records are kept exactly as they were: the cache is
-    /// AmigaDOS's description of the directory, and rewriting it from ADE's
-    /// reading of the entries would replace that witness with ADE's opinion.
-    fn cache(&mut self, record: Record) -> Result<(), EditError> {
+    /// The cache is rebuilt from its existing records as changed, reusing its
+    /// blocks in order, taking one more only when they are full and giving
+    /// back any no longer needed. Records `change` does not touch are kept
+    /// exactly as they were: the cache is AmigaDOS's description of the
+    /// directory, and rewriting it from ADE's reading of the entries would
+    /// replace that witness with ADE's opinion.
+    fn rewrite_cache(&mut self, change: impl FnOnce(&mut Vec<Record>)) -> Result<(), EditError> {
         let chain = self.volume.dircache(self.parent)?;
         if let Some(fault) = chain.faults.first() {
             return Err(EditError::Damaged(format!(
@@ -670,13 +942,18 @@ impl<'a> Plan<'a> {
             )));
         }
         let mut records: Vec<Record> = chain.records().into_iter().cloned().collect();
-        records.push(record);
+        change(&mut records);
         let old_blocks = chain.block_numbers();
 
         // Pack records into blocks. A record never spans two (SPEC §Directory
-        // cache blocks), so a block ends early when the next will not fit.
+        // cache blocks), so a block ends early when the next will not fit. No
+        // records means no cache at all, as a new directory has.
         let room = (self.geometry.block_size() as usize).saturating_sub(DIRCACHE_HEADER);
-        let mut packed: Vec<Vec<Vec<u8>>> = vec![Vec::new()];
+        let mut packed: Vec<Vec<Vec<u8>>> = if records.is_empty() {
+            Vec::new()
+        } else {
+            vec![Vec::new()]
+        };
         let mut used = 0usize;
         for r in &records {
             let bytes = encode_record(r);
@@ -696,8 +973,7 @@ impl<'a> Plan<'a> {
         while blocks.len() < packed.len() {
             blocks.push(self.allocate()?);
         }
-        // A chain can only shrink if records were lost, which this never
-        // does, but the arithmetic does not know that.
+        // A deletion can leave fewer blocks needed than there were.
         self.released
             .extend(old_blocks.iter().copied().skip(packed.len()));
 

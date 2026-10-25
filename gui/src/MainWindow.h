@@ -103,6 +103,12 @@ public:
     int addFiles(QTreeWidgetItem *target, const QStringList &paths);
     /// Make a directory, placed as `addFiles` places things.
     bool makeFolder(QTreeWidgetItem *target, const QString &name);
+    /// Delete the entry `item` is: a file, or a folder with everything in it.
+    /// A folder that holds anything is deleted only if the delete
+    /// confirmation agrees. Undo brings it back until the disk is saved.
+    bool deleteItem(QTreeWidgetItem *item);
+    /// Rename the entry `item` is, in the folder it is in.
+    bool renameItem(QTreeWidgetItem *item, const QString &name);
     /// Save the disk `item` belongs to as a new file. Never the file it was
     /// opened from; never over another existing file.
     bool saveImageAs(QTreeWidgetItem *item, const QString &path);
@@ -125,6 +131,8 @@ public:
     void setDiscardConfirmation(Confirm confirm) { m_confirmDiscard = std::move(confirm); }
     /// How the window asks whether to save over the disk that was opened.
     void setSaveConfirmation(Confirm confirm) { m_confirmSave = std::move(confirm); }
+    /// How the window asks before deleting a folder that holds anything.
+    void setDeleteConfirmation(Confirm confirm) { m_confirmDelete = std::move(confirm); }
 
     // How many images are open. Several can be, which is what makes
     // cross-image search meaningful.
@@ -150,6 +158,8 @@ private slots:
     void save();
     void saveAs();
     void newFolder();
+    void deleteSelected();
+    void renameSelected();
     void filesDropped(QTreeWidgetItem *target, const QList<QUrl> &urls);
     void extractSelected();
     void search();
@@ -301,4 +311,7 @@ private:
     size_t m_lastEdited = static_cast<size_t>(-1);
     Confirm m_confirmDiscard;
     Confirm m_confirmSave;
+    Confirm m_confirmDelete;
+    QAction *m_delete = nullptr;
+    QAction *m_rename = nullptr;
 };

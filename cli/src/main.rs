@@ -310,7 +310,7 @@ fn main() -> ExitCode {
         ("extract", 2 | 3) => extract(&args),
         ("convert", 2) => convert(Path::new(p(0)), Path::new(p(1)), args.raw, args.format),
         ("create", 1) => create(&args),
-        ("mkdir" | "put", _) => edit_command(&args),
+        ("mkdir" | "put" | "rm" | "rename", _) => edit_command(&args),
         ("disasm", 1 | 2) => disasm(&args),
         ("decode", 2) => decode(&args),
         ("scan", 1) => scan(Path::new(p(0)), args.format),
@@ -375,6 +375,11 @@ fn usage() {
         "    ade mkdir <image> <path> --output=<new>     make a directory, saved as a new image"
             .to_owned(),
         "    ade put <image> <file> [path] --output=<new> add a file, saved as a new image"
+            .to_owned(),
+        "    ade rm <image> <path> [--all] --output=<new>  delete a file or empty folder; --all \
+         a whole folder"
+            .to_owned(),
+        "    ade rename <image> <path> <name> --output=<new> rename an entry in its folder"
             .to_owned(),
         "    ade disasm <image> [path]          a program's 68000 code; no path: the bootblock"
             .to_owned(),
@@ -479,7 +484,8 @@ fn edit_and_save(
     ExitCode::from(EXIT_CLEAN)
 }
 
-/// `mkdir` and `put`, the commands that write into a disk (D-018).
+/// `mkdir`, `put`, `rm` and `rename`, the commands that write into a disk
+/// (D-018).
 fn edit_command(args: &Args) -> ExitCode {
     // Refused rather than ignored: a script passing the flag must be able to
     // tell an unsupported command from a successful one (BUG-007).
@@ -494,6 +500,8 @@ fn edit_command(args: &Args) -> ExitCode {
     let output = args.output.as_deref();
     match (args.command.as_str(), args.positional.len()) {
         ("mkdir", 2) => make_dir(Path::new(p(0)), p(1), output),
+        ("rm", 2) => remove(Path::new(p(0)), p(1), args.all, output),
+        ("rename", 3) => rename(Path::new(p(0)), p(1), p(2), output),
         ("put", 2 | 3) => put(
             Path::new(p(0)),
             Path::new(p(1)),
@@ -505,6 +513,39 @@ fn edit_command(args: &Args) -> ExitCode {
             ExitCode::from(EXIT_USAGE)
         }
     }
+}
+
+/// `ade rm`: delete a file, a soft link or an empty directory; with `all`, a
+/// directory and everything in it. The blocks are freed and left as they
+/// were, as AmigaDOS leaves them, so `ade carve` can still find the file.
+fn remove(image: &Path, path: &str, all: bool, output: Option<&Path>) -> ExitCode {
+    edit_and_save(image, output, |session| {
+        let block = session.entry(path)?;
+        let what = path.trim_end_matches('/');
+        if all {
+            let n = session.delete_tree(block)?;
+            Ok(format!(
+                "deleted {what} ({n} {})",
+                if n == 1 { "entry" } else { "entries" }
+            ))
+        } else {
+            session.delete(block)?;
+            Ok(format!("deleted {what}"))
+        }
+    })
+}
+
+/// `ade rename`: give an entry a new name in the directory it is in.
+fn rename(image: &Path, path: &str, name: &str, output: Option<&Path>) -> ExitCode {
+    let Ok(amiga) = ade_core::edit::amiga_name(name) else {
+        eprintln!("ade: {name:?}: an Amiga name is Latin-1, and this has a character outside it");
+        return ExitCode::from(EXIT_USAGE);
+    };
+    edit_and_save(image, output, |session| {
+        let block = session.entry(path)?;
+        session.rename(block, &amiga)?;
+        Ok(format!("renamed {} to {name}", path.trim_end_matches('/')))
+    })
 }
 
 /// `ade mkdir`: make one directory, whose parent must already exist.

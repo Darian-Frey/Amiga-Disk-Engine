@@ -610,6 +610,19 @@ AdeResult ade_edit_mkdir(AdeImage *image, uint32_t parent, AdeBytes name,
 AdeResult ade_edit_add_file(AdeImage *image, uint32_t parent, AdeBytes name,
                             AdeBytes data, uint32_t *out_block, char **out_message);
 
+/* Delete the entry at `block`: a file, a soft link or an empty directory; with
+ * `all`, a directory and everything in it, as one undo step. Its blocks are
+ * freed and left as they were, as AmigaDOS leaves them, so a carve can still
+ * find the file. A block another file shares stays allocated.
+ *
+ * ADE_REFUSED for the root, a directory with entries when `all` is false, or
+ * anything a hard link is part of (ADE does not rewrite link chains yet). */
+AdeResult ade_edit_delete(AdeImage *image, uint32_t block, bool all, char **out_message);
+/* Rename the entry at `block`, in the directory it is in. `name` as for
+ * ade_edit_mkdir. ADE_ALREADY_EXISTS when another entry has the name; a change
+ * of case alone is allowed. ADE_REFUSED for the root. */
+AdeResult ade_edit_rename(AdeImage *image, uint32_t block, AdeBytes name, char **out_message);
+
 /* Group edits a person sees as one action -- a drop of twenty files -- so
  * one undo takes them all back. Groups nest and only the outermost counts; a
  * group in which nothing succeeded leaves nothing to undo; undo and redo close

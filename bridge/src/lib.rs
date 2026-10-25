@@ -2187,6 +2187,49 @@ pub unsafe extern "C" fn ade_edit_add_file(
     })
 }
 
+/// Delete the entry at `block`: a file, a soft link or an empty directory —
+/// or, with `all`, a directory and everything in it, as one step for undo.
+/// The blocks are freed and left as they were (SPEC §Deletion).
+///
+/// # Safety
+/// `image` must be a live handle or null; `out_message` as for
+/// [`ade_edit_mkdir`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ade_edit_delete(
+    image: *mut AdeImage,
+    block: u32,
+    all: bool,
+    out_message: *mut *mut c_char,
+) -> AdeResult {
+    edit(image, std::ptr::null_mut(), out_message, |s| {
+        if all {
+            s.delete_tree(block).map(|_| block)
+        } else {
+            s.delete(block).map(|()| block)
+        }
+    })
+}
+
+/// Rename the entry at `block` to `name`, in the directory it is in.
+///
+/// # Safety
+/// As [`ade_edit_mkdir`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ade_edit_rename(
+    image: *mut AdeImage,
+    block: u32,
+    name: AdeBytes,
+    out_message: *mut *mut c_char,
+) -> AdeResult {
+    // SAFETY: the caller's contract.
+    let Some(name) = (unsafe { borrowed(name) }) else {
+        return AdeResult::NullArgument;
+    };
+    edit(image, std::ptr::null_mut(), out_message, |s| {
+        s.rename(block, name).map(|()| block)
+    })
+}
+
 /// Open a group: every edit until the matching [`ade_edit_group_end`] undoes
 /// and redoes as one step (IMP-014). Groups nest; only the outermost counts.
 /// Undo and redo close any open group.
