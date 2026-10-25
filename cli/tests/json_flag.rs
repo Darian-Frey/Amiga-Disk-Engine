@@ -294,6 +294,7 @@ fn every_command_either_emits_json_or_refuses_it() {
         ("diff", vec![d.clone(), d.clone()], Json::Emits),
         ("consolidate", vec![d.clone(), d.clone()], Json::Emits),
         ("disasm", vec![d.clone()], Json::Refuses),
+        ("decode", vec![d.clone(), "startup".into()], Json::Refuses),
         (
             "mkdir",
             vec![

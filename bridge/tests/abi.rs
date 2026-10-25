@@ -1667,6 +1667,108 @@ fn a_program_on_the_disk_lists_and_a_text_file_says_why_not() {
 }
 
 #[test]
+fn preferences_on_the_disk_decode_and_anything_else_says_why_not() {
+    use ade_core::layers::filesystem::edit;
+    let when = ade_core::layers::filesystem::format::Stamp {
+        days: 17_000,
+        mins: 1,
+        ticks: 0,
+    };
+    let mut disk = blank_disk();
+    // Topaz 8, a white Workbench background, and the pointer's top-left
+    // pixel in colour 1, which is red.
+    let mut prefs = vec![0u8; 232];
+    prefs[0] = 8;
+    prefs[32] = 0x80;
+    prefs[102..104].copy_from_slice(&[0x0F, 0x00]);
+    prefs[110..112].copy_from_slice(&[0x0F, 0xFF]);
+    let config = edit::add_file(
+        &mut disk,
+        ade_core::layers::block::Geometry::DD_FLOPPY,
+        880,
+        b"system-configuration",
+        &prefs,
+        when,
+    )
+    .unwrap();
+    let plain = edit::add_file(
+        &mut disk,
+        ade_core::layers::block::Geometry::DD_FLOPPY,
+        880,
+        b"notes",
+        b"plain",
+        when,
+    )
+    .unwrap();
+    let (path, c_path) = fixture("decoded", &disk);
+
+    // SAFETY: a valid path; every handle is freed once.
+    unsafe {
+        let image = ade::ade_image_open(c_path.as_ptr(), std::ptr::null(), std::ptr::null_mut());
+        assert!(!image.is_null());
+        let text = |b: ade::AdeBytes| {
+            std::str::from_utf8(std::slice::from_raw_parts(b.data, b.len))
+                .unwrap()
+                .to_owned()
+        };
+
+        let decoded = ade::ade_decoded_open(image, ade::ADE_WHOLE_IMAGE, config);
+        assert!(!decoded.is_null());
+        assert_eq!(ade::ade_decoded_refusal(decoded).len, 0);
+        assert!(text(ade::ade_decoded_title(decoded)).starts_with("Preferences"));
+        let mut field = std::mem::zeroed::<ade::AdeDecodedField>();
+        let (mut font, mut background) = (String::new(), -2);
+        for i in 0..ade::ade_decoded_count(decoded) {
+            assert_eq!(
+                ade::ade_decoded_field(decoded, i, &raw mut field),
+                AdeResult::Ok
+            );
+            match text(field.label).as_str() {
+                "Text size" => font = text(field.value),
+                "Colour 0 (background)" => background = field.colour,
+                _ => {}
+            }
+        }
+        assert_eq!(font, "80 columns (Topaz 8)");
+        assert_eq!(background, 0x00FF_FFFF);
+        let count = ade::ade_decoded_count(decoded);
+        assert_eq!(
+            ade::ade_decoded_field(decoded, count, &raw mut field),
+            AdeResult::NotFound
+        );
+        let (mut w, mut h) = (0u32, 0u32);
+        let pixels = ade::ade_decoded_picture(decoded, &raw mut w, &raw mut h);
+        assert_eq!((w, h), (16, 16));
+        let pixels = std::slice::from_raw_parts(pixels, 256);
+        assert_eq!(pixels[0], 0xFFFF_0000, "colour 17, opaque");
+        assert_eq!(pixels[1], 0, "transparent");
+        assert!(text(ade::ade_decoded_picture_caption(decoded)).contains("pointer"));
+        ade::ade_decoded_free(decoded);
+
+        // A text file is not one ADE decodes: a reason, no fields, no picture.
+        let refused = ade::ade_decoded_open(image, ade::ADE_WHOLE_IMAGE, plain);
+        assert!(!refused.is_null());
+        assert_eq!(ade::ade_decoded_count(refused), 0);
+        assert!(text(ade::ade_decoded_refusal(refused)).contains("system-configuration"));
+        assert!(ade::ade_decoded_picture(refused, &raw mut w, &raw mut h).is_null());
+        assert_eq!((w, h), (0, 0));
+        ade::ade_decoded_free(refused);
+
+        // Null is tolerated.
+        assert!(ade::ade_decoded_open(std::ptr::null(), 0, 0).is_null());
+        assert_eq!(ade::ade_decoded_count(std::ptr::null()), 0);
+        assert_eq!(ade::ade_decoded_title(std::ptr::null()).len, 0);
+        assert!(
+            ade::ade_decoded_picture(std::ptr::null(), std::ptr::null_mut(), std::ptr::null_mut())
+                .is_null()
+        );
+        ade::ade_decoded_free(std::ptr::null_mut());
+        ade::ade_image_free(image);
+    }
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
 fn a_group_opened_before_the_first_edit_still_undoes_as_one() {
     // The session is created lazily, by the first edit; a group opened before
     // then must still cover it (IMP-014).

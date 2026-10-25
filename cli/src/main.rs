@@ -312,6 +312,7 @@ fn main() -> ExitCode {
         ("create", 1) => create(&args),
         ("mkdir" | "put", _) => edit_command(&args),
         ("disasm", 1 | 2) => disasm(&args),
+        ("decode", 2) => decode(&args),
         ("scan", 1) => scan(Path::new(p(0)), args.format),
         ("find", 2) => find(
             Path::new(p(0)),
@@ -377,6 +378,7 @@ fn usage() {
             .to_owned(),
         "    ade disasm <image> [path]          a program's 68000 code; no path: the bootblock"
             .to_owned(),
+        "    ade decode <image> <path>          what a file says, in words (F-033)".to_owned(),
         "    ade scan <image>                   find known content by its magic (F-020)".to_owned(),
         "    ade find <image> <pattern>         search the image for text or hex (F-021)"
             .to_owned(),
@@ -626,6 +628,62 @@ fn disasm(args: &Args) -> ExitCode {
             if inner.is_some() && !raw {
                 eprintln!("ade: --raw decodes it anyway, from its first byte");
             }
+            ExitCode::from(EXIT_FAULTS)
+        }
+    }
+}
+
+/// `ade decode`: what a file says, in words (F-033).
+fn decode(args: &Args) -> ExitCode {
+    let path = Path::new(args.positional.first().map_or("", String::as_str));
+    let inner = args.positional.get(1).map_or("", String::as_str);
+    // Refused rather than ignored (BUG-007), as `disasm` does.
+    if args.format == Format::Json {
+        eprintln!("ade: decode has no JSON output; it reports in text only");
+        return ExitCode::from(EXIT_USAGE);
+    }
+    let image = match Image::open(path) {
+        Ok(i) => i,
+        Err(e) => {
+            eprintln!("ade: {}: {e}", path.display());
+            return ExitCode::from(EXIT_UNREADABLE);
+        }
+    };
+    let window = match select_partition(&image, args.partition.as_deref()) {
+        Ok(w) => w,
+        Err(e) => {
+            eprintln!("ade: {}: {e}", path.display());
+            return ExitCode::from(EXIT_NO_VOLUME);
+        }
+    };
+    let mounted = match &window {
+        Some(w) => Volume::mount(w),
+        None => image.volume(),
+    };
+    let volume = match mounted {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("ade: {}: {e}", path.display());
+            return ExitCode::from(EXIT_NO_VOLUME);
+        }
+    };
+    let found = volume
+        .lookup(inner)
+        .and_then(|e| volume.read_file(&e).map(|data| (e.name.clone(), data)));
+    let (name, bytes) = match found {
+        Ok((name, data)) => (name, data.into_bytes()),
+        Err(e) => {
+            eprintln!("ade: {inner}: {e}");
+            return ExitCode::from(EXIT_FAULTS);
+        }
+    };
+    match ade_core::decode::file(&name, &bytes) {
+        Ok(decoded) => {
+            emit_lines(&mut std::io::stdout().lock(), &decoded.lines());
+            ExitCode::from(EXIT_CLEAN)
+        }
+        Err(e) => {
+            eprintln!("ade: {inner}: {e}");
             ExitCode::from(EXIT_FAULTS)
         }
     }

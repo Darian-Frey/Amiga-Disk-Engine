@@ -566,3 +566,32 @@ fn fuzz_the_executable_parser_and_listing() {
         });
     }
 }
+
+#[test]
+fn fuzz_the_preferences_decoder() {
+    // F-033. A fixed 232 bytes, every field read through a bounds check: the
+    // decoder must give an answer for any of them, and refuse any other
+    // length, with every byte value in every field — the codes it has a name
+    // for and the ones it reports as unknown.
+    let mut rng = Rng::new(0x5EED_0F33);
+    for i in 0..iterations(20_000) {
+        let seed = u64::from(i);
+        let mut buf = vec![0u8; 232];
+        for b in &mut buf {
+            *b = rng.nasty_byte();
+        }
+        for _ in 0..=rng.below(6) {
+            mutate(&mut buf, &mut rng);
+        }
+        if rng.below(8) == 0 {
+            buf.truncate(rng.below(buf.len() + 1));
+        }
+        timed(seed, "preferences decoder", || {
+            let decoded = ade_core::decode::file(b"system-configuration", &buf);
+            assert_eq!(decoded.is_ok(), buf.len() == 232, "seed {seed}");
+            if let Ok(d) = decoded {
+                let _ = d.lines();
+            }
+        });
+    }
+}

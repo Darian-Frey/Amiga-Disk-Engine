@@ -343,9 +343,18 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
     asmLayout->addLayout(asmBar);
     asmLayout->addWidget(m_asm);
     m_views->addTab(m_asmTab, QStringLiteral("Assembly"));
+
+    // The Decoded view (F-033): a file ADE recognises, in words. Built only
+    // while it is showing, like the Assembly view.
+    m_decoded = new QTextBrowser(this);
+    m_decoded->setObjectName(QStringLiteral("decoded"));
+    m_decoded->setOpenLinks(false);
+    m_views->addTab(m_decoded, QStringLiteral("Decoded"));
+
     connect(m_views, &QTabWidget::currentChanged, this, [this] {
         fillVisiblePreview();
         if (m_views->currentWidget() == m_asmTab) refreshAssembly();
+        if (m_views->currentWidget() == m_decoded) refreshDecoded();
     });
 
     m_views->addTab(m_results, QStringLiteral("Search"));
@@ -1669,6 +1678,8 @@ void MainWindow::showEntry(QTreeWidgetItem *item) {
     m_asmStale = true;
     m_asmForceRaw = false;
     if (m_views && m_views->currentWidget() == m_asmTab) refreshAssembly();
+    m_decodedStale = true;
+    if (m_views && m_views->currentWidget() == m_decoded) refreshDecoded();
     // Extracting everything needs a disk, not a file: any row of any image
     // will do, because the whole disk is what it takes.
     if (m_extractAll) m_extractAll->setEnabled(imageFor(item) != nullptr);
@@ -2173,6 +2184,112 @@ void MainWindow::filesDropped(QTreeWidgetItem *target, const QList<QUrl> &urls) 
         return;
     }
     for (const QString &path : paths) openImage(path);
+}
+
+// ---------------------------------------------------------------------------
+// The Decoded view (F-033)
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// The picture as crisp pixel art over a checkerboard, so its transparent
+// pixels read as transparent rather than as the page.
+QImage pixelArt(const QImage &picture, const QPalette &palette) {
+    constexpr int Scale = 8;
+    QImage out(picture.width() * Scale, picture.height() * Scale, QImage::Format_ARGB32);
+    const QColor base = palette.color(QPalette::Base);
+    const QColor shade = base.lightness() > 128 ? base.darker(112) : base.lighter(135);
+    for (int y = 0; y < out.height(); ++y) {
+        for (int x = 0; x < out.width(); ++x) {
+            const QRgb px = picture.pixel(x / Scale, y / Scale);
+            const bool check = ((x / (Scale / 2)) + (y / (Scale / 2))) % 2 != 0;
+            out.setPixel(x, y, qAlpha(px) ? px : (check ? shade : base).rgb());
+        }
+    }
+    return out;
+}
+
+// A colour as a framed swatch: a span's background has no border, and a
+// white colour on a white page would be no swatch at all.
+QImage swatch(QRgb colour, const QPalette &palette) {
+    QImage out(18, 12, QImage::Format_RGB32);
+    out.fill(colour);
+    const QRgb frame = palette.color(QPalette::Text).rgb();
+    for (int x = 0; x < out.width(); ++x) {
+        out.setPixel(x, 0, frame);
+        out.setPixel(x, out.height() - 1, frame);
+    }
+    for (int y = 0; y < out.height(); ++y) {
+        out.setPixel(0, y, frame);
+        out.setPixel(out.width() - 1, y, frame);
+    }
+    return out;
+}
+
+}  // namespace
+
+void MainWindow::refreshDecoded() {
+    if (!m_decodedStale || !m_decoded) return;
+    m_decodedStale = false;
+    const auto say = [this](const QString &why) {
+        m_decoded->setHtml(QStringLiteral("<p>%1</p>").arg(why.toHtmlEscaped()));
+    };
+
+    QTreeWidgetItem *item = m_selected;
+    const Open *open = imageFor(item);
+    if (!open || !item->parent() || item->data(0, RoleOffset).isValid() ||
+        item->data(0, RoleIsDir).toBool() || !item->data(0, RoleBlock).isValid()) {
+        say(QStringLiteral("Select a file to see what it says. ADE decodes Intuition's "
+                           "Preferences (devs/system-configuration)."));
+        return;
+    }
+    const ade::Decoded decoded = open->image.decode(item->data(0, RolePartition).toUInt(),
+                                                    item->data(0, RoleBlock).toUInt());
+    const QString name = item->text(ColName);
+    if (!decoded.read) {
+        say(QStringLiteral("%1 could not be read.").arg(name));
+        return;
+    }
+    if (!decoded.refusal.isEmpty()) {
+        say(QStringLiteral("%1 is %2").arg(name, decoded.refusal));
+        return;
+    }
+
+    // Laid out by the engine's groups, in its order: the GUI adds the
+    // swatches and the picture, and decides nothing about the format. One
+    // table, so the values line up from group to group.
+    QString html = QStringLiteral("<h3>%1</h3>").arg(decoded.title.toHtmlEscaped());
+    if (!decoded.picture.isNull()) {
+        const QUrl url(QStringLiteral("ade-decoded:picture"));
+        m_decoded->document()->addResource(QTextDocument::ImageResource, url,
+                                           pixelArt(decoded.picture, m_decoded->palette()));
+        html += QStringLiteral("<p><img src='%1'><br>%2</p>")
+                    .arg(url.toString(), decoded.caption.toHtmlEscaped());
+    }
+    html += QStringLiteral("<table cellspacing='0' cellpadding='2'>");
+    QString group;
+    for (const ade::DecodedField &field : decoded.fields) {
+        if (field.group != group) {
+            group = field.group;
+            html += QStringLiteral("<tr><td colspan='2' style='padding-top:10px'><b>%1</b>"
+                                   "</td></tr>")
+                        .arg(group.toHtmlEscaped());
+        }
+        QString value = field.value.toHtmlEscaped();
+        if (field.colour >= 0) {
+            const QString hex = QStringLiteral("%1").arg(field.colour, 6, 16, QLatin1Char('0'));
+            const QUrl url(QStringLiteral("ade-decoded:swatch/") + hex);
+            m_decoded->document()->addResource(
+                QTextDocument::ImageResource, url,
+                swatch(0xFF000000u | static_cast<QRgb>(field.colour), m_decoded->palette()));
+            value = QStringLiteral("<img src='%1' title='#%2'>&nbsp;%3")
+                        .arg(url.toString(), hex, value);
+        }
+        html += QStringLiteral("<tr><td style='padding-right:16px'>%1</td><td>%2</td></tr>")
+                    .arg(field.label.toHtmlEscaped(), value);
+    }
+    html += QStringLiteral("</table>");
+    m_decoded->setHtml(html);
 }
 
 // ---------------------------------------------------------------------------

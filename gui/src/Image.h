@@ -12,6 +12,7 @@
 #include "HexView.h"
 
 #include <QByteArray>
+#include <QImage>
 #include <QString>
 #include <QVector>
 
@@ -92,6 +93,58 @@ inline Disassembly takeDisassembly(AdeDisasm *raw) {
                                  QString::fromUtf8(bytes(line.comment))});
     }
     ade_disasm_free(raw);
+    return out;
+}
+
+/// One decoded setting (F-033).
+struct DecodedField {
+    QString group;
+    QString label;
+    QString value;
+    /// `0xRRGGBB` for a colour setting, or -1.
+    int colour = -1;
+};
+
+/// A file in words, or why it is not (F-033).
+struct Decoded {
+    /// Empty when the file was decoded.
+    QString refusal;
+    QString title;
+    QVector<DecodedField> fields;
+    /// Null when the file holds no picture.
+    QImage picture;
+    QString caption;
+    /// False when the file could not be read at all.
+    bool read = false;
+};
+
+/// Take an engine decoding into Qt types, freeing it.
+inline Decoded takeDecoded(AdeDecoded *raw) {
+    Decoded out;
+    if (!raw) return out;
+    out.read = true;
+    out.refusal = QString::fromUtf8(bytes(ade_decoded_refusal(raw)));
+    out.title = QString::fromUtf8(bytes(ade_decoded_title(raw)));
+    const size_t count = ade_decoded_count(raw);
+    for (size_t i = 0; i < count; ++i) {
+        AdeDecodedField field{};
+        if (ade_decoded_field(raw, i, &field) != ADE_OK) continue;
+        out.fields.append(DecodedField{QString::fromUtf8(bytes(field.group)),
+                                       QString::fromUtf8(bytes(field.label)),
+                                       QString::fromUtf8(bytes(field.value)), field.colour});
+    }
+    uint32_t width = 0;
+    uint32_t height = 0;
+    const uint32_t *pixels = ade_decoded_picture(raw, &width, &height);
+    if (pixels && width > 0 && height > 0) {
+        // Copied: the pixels belong to the handle, which is freed below.
+        out.picture = QImage(reinterpret_cast<const uchar *>(pixels), static_cast<int>(width),
+                             static_cast<int>(height), static_cast<int>(width * 4),
+                             QImage::Format_ARGB32)
+                          .copy();
+        out.caption = QString::fromUtf8(bytes(ade_decoded_picture_caption(raw)));
+    }
+    ade_decoded_free(raw);
     return out;
 }
 
@@ -410,6 +463,11 @@ public:
     }
     /// The disk's boot code.
     Disassembly bootCode() const { return takeDisassembly(ade_disasm_bootblock(m_raw)); }
+
+    /// What a file says, in words, if ADE recognises it (F-033).
+    Decoded decode(quint32 partition, quint32 block) const {
+        return takeDecoded(ade_decoded_open(m_raw, partition, block));
+    }
 
     /// Raw bytes of the mounted image, for a hex view of the disk itself.
     Buffer readRange(quint64 offset, quint64 length) const {

@@ -23,4 +23,5 @@ pub mod hardware;
 pub mod hunk;
 pub mod listing;
 pub mod m68k;
+pub mod prefs;
 pub mod signature;

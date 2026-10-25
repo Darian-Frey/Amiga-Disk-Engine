@@ -193,6 +193,19 @@ int main(int argc, char **argv) {
             check(ade_disasm_line(guess, ade_disasm_count(guess), &line) == ADE_NOT_FOUND,
                   "past the end is NOT_FOUND");
             ade_disasm_free(guess);
+
+            /* Decoded files (F-033): the fixture has no Preferences, so the
+               answer is a reason, with no fields and no picture. */
+            AdeDecoded *plain = ade_decoded_open(image, ADE_WHOLE_IMAGE, file_block);
+            uint32_t w = 1, h = 1;
+            AdeDecodedField field;
+            check(plain && ade_decoded_count(plain) == 0 &&
+                      ade_decoded_refusal(plain).len > 0 &&
+                      ade_decoded_title(plain).len == 0 &&
+                      ade_decoded_picture(plain, &w, &h) == NULL && w == 0 && h == 0 &&
+                      ade_decoded_field(plain, 0, &field) == ADE_NOT_FOUND,
+                  "a file ADE does not decode says why");
+            ade_decoded_free(plain);
         }
         AdeDisasm *boot = ade_disasm_bootblock(image);
         check(boot != NULL && ade_disasm_count(boot) > 0, "the bootblock lists");

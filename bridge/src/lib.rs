@@ -2631,3 +2631,219 @@ pub unsafe extern "C" fn ade_disasm_free(listing: *mut AdeDisasm) {
         drop(unsafe { Box::from_raw(listing) });
     });
 }
+
+/// One decoded field (F-033). The strings borrow from the handle.
+#[repr(C)]
+pub struct AdeDecodedField {
+    /// The part it belongs to, UTF-8: "Screen", "Printer".
+    pub group: AdeBytes,
+    /// What it is, UTF-8.
+    pub label: AdeBytes,
+    /// What it is set to, in words, UTF-8.
+    pub value: AdeBytes,
+    /// The colour the field names as `0xRRGGBB`, or -1 for none.
+    pub colour: i32,
+}
+
+/// A decoded file, or the reason there is none.
+pub struct AdeDecoded {
+    title: Vec<u8>,
+    fields: Vec<ade_core::decode::Field>,
+    picture: Option<ade_core::decode::Picture>,
+    refusal: Vec<u8>,
+}
+
+/// Decode the file at `block` (F-033): what it says, in words. A file ADE
+/// does not recognise gives a handle with no fields and a reason.
+///
+/// Null if the image is null or the file cannot be read.
+///
+/// # Safety
+/// `image` must be a live handle or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ade_decoded_open(
+    image: *const AdeImage,
+    partition: u32,
+    block: u32,
+) -> *mut AdeDecoded {
+    with_image(image, std::ptr::null_mut(), |image| {
+        let file = with_volume(image, partition, |volume| {
+            let entry = volume.entry_at(block).ok()?;
+            let bytes = volume.read_file(&entry).ok()?.into_bytes();
+            Some((entry.name, bytes))
+        });
+        let Some((name, bytes)) = file else {
+            return std::ptr::null_mut();
+        };
+        let handle = match ade_core::decode::file(&name, &bytes) {
+            Ok(d) => AdeDecoded {
+                title: d.title.into_bytes(),
+                fields: d.fields,
+                picture: d.picture,
+                refusal: Vec::new(),
+            },
+            Err(why) => AdeDecoded {
+                title: Vec::new(),
+                fields: Vec::new(),
+                picture: None,
+                refusal: why.0.into_bytes(),
+            },
+        };
+        Box::into_raw(Box::new(handle))
+    })
+}
+
+/// What the file is, UTF-8, borrowed; empty when it was not decoded.
+///
+/// # Safety
+/// `decoded` must be a live handle or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ade_decoded_title(decoded: *const AdeDecoded) -> AdeBytes {
+    if decoded.is_null() {
+        return AdeBytes::empty();
+    }
+    // SAFETY: checked non-null; the caller promises a live handle.
+    guard(AdeBytes::empty(), || {
+        AdeBytes::of(&unsafe { &*decoded }.title)
+    })
+}
+
+/// Why the file was not decoded, UTF-8, borrowed; empty when it was.
+///
+/// # Safety
+/// `decoded` must be a live handle or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ade_decoded_refusal(decoded: *const AdeDecoded) -> AdeBytes {
+    if decoded.is_null() {
+        return AdeBytes::empty();
+    }
+    // SAFETY: checked non-null; the caller promises a live handle.
+    guard(AdeBytes::empty(), || {
+        AdeBytes::of(&unsafe { &*decoded }.refusal)
+    })
+}
+
+/// Fields in the decoded file; zero when there is a reason instead.
+///
+/// # Safety
+/// `decoded` must be a live handle or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ade_decoded_count(decoded: *const AdeDecoded) -> usize {
+    if decoded.is_null() {
+        return 0;
+    }
+    // SAFETY: checked non-null; the caller promises a live handle.
+    guard(0, || unsafe { &*decoded }.fields.len())
+}
+
+/// Copy field `index` into `*out`. [`AdeResult::NotFound`] past the end.
+///
+/// # Safety
+/// `decoded` must be a live handle or null; `out` writable or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ade_decoded_field(
+    decoded: *const AdeDecoded,
+    index: usize,
+    out: *mut AdeDecodedField,
+) -> AdeResult {
+    if decoded.is_null() || out.is_null() {
+        return AdeResult::NullArgument;
+    }
+    guard(AdeResult::Internal, || {
+        // SAFETY: checked non-null; the caller promises a live handle.
+        let decoded = unsafe { &*decoded };
+        let Some(field) = decoded.fields.get(index) else {
+            return AdeResult::NotFound;
+        };
+        // SAFETY: checked non-null; the caller promises it is writable.
+        unsafe {
+            *out = AdeDecodedField {
+                group: AdeBytes::of(field.group.as_bytes()),
+                label: AdeBytes::of(field.label.as_bytes()),
+                value: AdeBytes::of(field.value.as_bytes()),
+                colour: field
+                    .colour
+                    .and_then(|c| i32::try_from(c & 0x00FF_FFFF).ok())
+                    .unwrap_or(-1),
+            };
+        }
+        AdeResult::Ok
+    })
+}
+
+/// The picture the file holds: its size through `width` and `height`, and its
+/// pixels as `width * height` `0xAARRGGBB` values borrowed from the handle.
+/// Null, with both sizes 0, when it holds none.
+///
+/// # Safety
+/// `decoded` must be a live handle or null; `width` and `height` writable or
+/// null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ade_decoded_picture(
+    decoded: *const AdeDecoded,
+    width: *mut u32,
+    height: *mut u32,
+) -> *const u32 {
+    let set = |w: u32, h: u32| {
+        // SAFETY: each checked non-null; the caller promises they are writable.
+        unsafe {
+            if !width.is_null() {
+                *width = w;
+            }
+            if !height.is_null() {
+                *height = h;
+            }
+        }
+    };
+    set(0, 0);
+    if decoded.is_null() {
+        return std::ptr::null();
+    }
+    guard(std::ptr::null(), || {
+        // SAFETY: checked non-null; the caller promises a live handle.
+        let decoded = unsafe { &*decoded };
+        let Some(p) = &decoded.picture else {
+            return std::ptr::null();
+        };
+        let (Ok(w), Ok(h)) = (u32::try_from(p.width), u32::try_from(p.height)) else {
+            return std::ptr::null();
+        };
+        set(w, h);
+        p.argb.as_ptr()
+    })
+}
+
+/// What the picture shows, UTF-8, borrowed; empty when there is none.
+///
+/// # Safety
+/// `decoded` must be a live handle or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ade_decoded_picture_caption(decoded: *const AdeDecoded) -> AdeBytes {
+    if decoded.is_null() {
+        return AdeBytes::empty();
+    }
+    guard(AdeBytes::empty(), || {
+        // SAFETY: checked non-null; the caller promises a live handle.
+        let decoded = unsafe { &*decoded };
+        decoded
+            .picture
+            .as_ref()
+            .map_or_else(AdeBytes::empty, |p| AdeBytes::of(p.caption.as_bytes()))
+    })
+}
+
+/// Release a decoded file.
+///
+/// # Safety
+/// `decoded` must come from `ade_decoded_open` and not have been freed, or be
+/// null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ade_decoded_free(decoded: *mut AdeDecoded) {
+    if decoded.is_null() {
+        return;
+    }
+    guard((), || {
+        // SAFETY: checked non-null; the caller's contract.
+        drop(unsafe { Box::from_raw(decoded) });
+    });
+}

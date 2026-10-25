@@ -540,6 +540,36 @@ AdeResult  ade_disasm_line(const AdeDisasm *listing, size_t index, AdeAsmLine *o
 AdeBytes   ade_disasm_refusal(const AdeDisasm *listing);
 void       ade_disasm_free(AdeDisasm *listing);
 
+/* --- Decoded files (F-033) ----------------------------------------------
+ *
+ * What a file says, in words: labelled fields in groups, and a picture when
+ * the file holds one. Intuition's Preferences (devs/system-configuration) so
+ * far. A file ADE does not recognise gives a handle with no fields and a
+ * reason in ade_decoded_refusal. Free with ade_decoded_free. */
+typedef struct {
+    AdeBytes group;  /* UTF-8, borrowed: "Screen", "Printer" */
+    AdeBytes label;  /* UTF-8, borrowed */
+    AdeBytes value;  /* UTF-8, borrowed: the setting in words */
+    int32_t  colour; /* 0xRRGGBB for a colour setting, or -1 */
+} AdeDecodedField;
+
+typedef struct AdeDecoded AdeDecoded;
+
+/* NULL if the image is NULL or the file cannot be read. */
+AdeDecoded *ade_decoded_open(const AdeImage *image, uint32_t partition, uint32_t block);
+/* What the file is, UTF-8, borrowed; empty when it was not decoded. */
+AdeBytes    ade_decoded_title(const AdeDecoded *decoded);
+/* Why it was not decoded, UTF-8, borrowed; empty when it was. */
+AdeBytes    ade_decoded_refusal(const AdeDecoded *decoded);
+size_t      ade_decoded_count(const AdeDecoded *decoded);
+/* ADE_NOT_FOUND past the end. */
+AdeResult   ade_decoded_field(const AdeDecoded *decoded, size_t index, AdeDecodedField *out);
+/* width * height 0xAARRGGBB pixels, borrowed; NULL with both sizes 0 for none. */
+const uint32_t *ade_decoded_picture(const AdeDecoded *decoded, uint32_t *width,
+                                    uint32_t *height);
+AdeBytes    ade_decoded_picture_caption(const AdeDecoded *decoded);
+void        ade_decoded_free(AdeDecoded *decoded);
+
 /* --- Writing into a disk (D-018) -----------------------------------------
  *
  * Edits change the open image **in memory** and nothing else. Nothing reaches

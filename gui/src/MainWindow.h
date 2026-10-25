@@ -49,6 +49,7 @@ constexpr int RoleOffset = Qt::UserRole + 6;
 
 class MapView;
 class HexPane;
+class QTextBrowser;
 class QPlainTextEdit;
 class QTabWidget;
 class QTreeWidgetItem;
@@ -206,6 +207,8 @@ private:
     void refreshAssembly();
     // Lay out the listing already decoded, with or without its explanations.
     void renderAssembly();
+    // Fill the Decoded view for the selection, if it is showing and stale.
+    void refreshDecoded();
     // Fill whichever of the hex and text panes is showing and not yet filled
     // for the current selection (IMP-009).
     void fillVisiblePreview();
@@ -285,6 +288,9 @@ private:
     /// Whether the selected file is to be decoded even though it is not a
     /// program. Reset whenever the selection changes.
     bool m_asmForceRaw = false;
+    /// The Decoded view (F-033): a recognised file in words.
+    QTextBrowser *m_decoded = nullptr;
+    bool m_decodedStale = true;
     QAction *m_save = nullptr;
     QAction *m_saveAs = nullptr;
     QAction *m_undo = nullptr;

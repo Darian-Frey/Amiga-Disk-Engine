@@ -13,6 +13,7 @@ pub mod carve;
 pub mod consolidate;
 pub mod convert;
 pub mod create;
+pub mod decode;
 pub mod disasm;
 pub mod edit;
 pub mod find;

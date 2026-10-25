@@ -1020,6 +1020,40 @@ Corpus, all 4,652 images (2026-09-01), 8.5 seconds:
 Directories are header-only by construction: a directory header has no data
 blocks to agree with it.
 
+## Intuition Preferences (`devs/system-configuration`)
+
+The file the Kickstart 1.x Preferences tool saves and Intuition loads from `DEVS:` at boot: one `struct Preferences` from `intuition/preferences.h`, **232 bytes**, big-endian, no header and no magic number. ADE decodes it in the Decoded view and `ade decode` (F-033). The offsets were laid out from the declaration and checked field by field against AROS's transcription of the same header (`compiler/include/intuition/preferences.h`, read locally, not committed); `POINTERSIZE` is (1 + 16 + 1) × 2 words, so the structure sums to 232 with no padding, which it could not do with a field misplaced.
+
+| Offset | Field | Notes |
+|---|---|---|
+| 0 | `FontHeight` | 8 = Topaz 8 (80 columns), 9 = Topaz 9 (60) |
+| 1 | `PrinterPort` | 0 parallel, 1 serial |
+| 2 | `BaudRate` | index: 110, 300, 1200, 2400, 4800, 9600, 19200, MIDI |
+| 4, 12, 20 | `KeyRptSpeed`, `KeyRptDelay`, `DoubleClick` | `struct timeval`: seconds, then microseconds |
+| 28 | `PointerMatrix[36]` | sprite words: position/control, 16 rows of two bitplanes, terminator |
+| 100, 101 | `XOffset`, `YOffset` | signed; where the image sits from the pointer's position |
+| 102–106 | `color17`–`color19` | the pointer's colours, `$0RGB` |
+| 108 | `PointerTicks` | mouse speed; 1 is fastest |
+| 110–116 | `color0`–`color3` | the Workbench screen's colours |
+| 118–123 | `ViewXOffset`, `ViewYOffset`, `ViewInitX`, `ViewInitY` | screen centring; the corpus's `ViewInit` is 129, 44 everywhere |
+| 124 | `EnableCLI` | a BOOL on 1.x; 2.0 keeps `SCREEN_DRAG` (bit 14) and `MOUSE_ACCEL` (bit 15) in it |
+| 126 | `PrinterType` | 0 = custom, the driver named at 128; 1–12 a built-in list |
+| 128 | `PrinterFilename[30]` | the printer driver's name |
+| 158–181 | print pitch, quality, spacing, margins, image, aspect, shade, threshold, paper size, length, type | |
+| 182–184 | `SerRWBits`, `SerStopBuf`, `SerParShk` | six nibbles: 8 − read bits, 8 − write bits, stop bits − 1, buffer index, parity, handshake |
+| 185 | `LaceWB` | bit 0: interlaced Workbench |
+| 186 | 30 bytes | **1.x: one name. 2.0: `Pad[12]`, `PrtDevName[16]`, `DefaultPrtUnit`, `DefaultSerUnit`** — see below |
+| 216, 217 | `RowSizeChange`, `ColumnSizeChange` | signed |
+| 218–225 | `PrintFlags`, `PrintMaxWidth`, `PrintMaxHeight`, `PrintDensity`, `PrintXOffset` | sizes in tenths of an inch |
+| 226–230 | `wb_Width`, `wb_Height`, `wb_Depth` | 0 = default |
+| 231 | `ext_size` | extension size in 64-byte blocks; 0 in every corpus file |
+
+**The thirty bytes at 186 are read one way or the other, never both.** 1.x declared them as one 30-byte name, 2.0 split them. Corpus files show 1.x text crossing the 2.0 boundary — `canon_pw1080` continuing as what 2.0 would call a device name `l_LowRes` — so ADE reads them as 2.0 fields only when the twelve padding bytes are all zero, and as the 1.x name otherwise.
+
+**Recognised by name and exact size.** With no magic number there is nothing else. Measured 2026-10-25 over the whole corpus: 1,111 of 4,653 disks hold a `devs/system-configuration`; 1,109 are 232 bytes and decode, two (696 and 256 bytes) are refused with their size. Every field's value across the 1,109 decodes to a named setting except one disk's font height of 0, reported as unknown.
+
+**Not decoded: the hot spot as a pixel.** `XOffset`/`YOffset` are reported as stored. Whether they count sprite pixels or the screen's high-resolution pixels decides where in the image the tip is, and the file does not say.
+
 ## Flux formats
 
 - **Extended-ADF** — see above.

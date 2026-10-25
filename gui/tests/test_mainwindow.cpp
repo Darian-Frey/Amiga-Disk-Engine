@@ -40,6 +40,7 @@
 #include <QScreen>
 #include <QScrollBar>
 #include <QTextBlock>
+#include <QTextBrowser>
 #include <QTextLayout>
 #include <QTreeWidget>
 
@@ -107,6 +108,8 @@ private slots:
     void saveOnAnOpenedDiskAsksThenKeepsTheOriginal();
     void aDiskMadeHereSavesWithoutAskingOrBackup();
     void aFileThatIsNotAProgramSaysWhyAndCanBeDecodedAnyway();
+    void preferencesReadInWordsInTheDecodedView();
+    void aFileTheDecodedViewDoesNotKnowSaysWhatItDoes();
     void theDiskRowShowsItsBootCodeAndAFolderSaysItHasNone();
     void anImageIsARootWithItsEntriesBeneath();
     void aFileSelectionFillsTheHexView();
@@ -2325,6 +2328,91 @@ void TestMainWindow::theDiskRowShowsItsBootCodeAndAFolderSaysItHasNone() {
     QVERIFY(assemblyStatus(window).contains(QStringLiteral("folder")));
     auto *raw = window.findChild<QPushButton *>(QStringLiteral("assemblyRaw"));
     QVERIFY(raw && raw->isHidden());
+}
+
+// The Decoded view (F-033): a file ADE recognises, in words.
+namespace {
+
+QTextBrowser *showDecoded(MainWindow &window, QTreeWidgetItem *item) {
+    auto *tree = browser(window);
+    tree->selectionModel()->select(tree->indexFromItem(item), QItemSelectionModel::ClearAndSelect);
+    bringForward(window, QStringLiteral("Decoded"));
+    return window.findChild<QTextBrowser *>(QStringLiteral("decoded"));
+}
+
+// Preferences as a Kickstart 1.3 Workbench would save them, near enough:
+// Topaz 8, a white background, and the pointer's top-left pixel in colour 17,
+// which is red.
+QByteArray preferences() {
+    QByteArray out(232, '\0');
+    out[0] = 8;
+    out[32] = static_cast<char>(0x80);
+    out[102] = 0x0F;
+    out[110] = 0x0F;
+    out[111] = static_cast<char>(0xFF);
+    return out;
+}
+
+}  // namespace
+
+void TestMainWindow::preferencesReadInWordsInTheDecodedView() {
+    QTemporaryDir dir;
+    const QString disk = blankDisk(dir, QStringLiteral("blank.adf"));
+    const QString host = dir.filePath(QStringLiteral("system-configuration"));
+    writeFile(host, preferences());
+    MainWindow window;
+    window.openImage(disk);
+    QCOMPARE(window.addFiles(browser(window)->topLevelItem(0), {host}), 1);
+    QTreeWidgetItem *row =
+        childNamed(browser(window)->topLevelItem(0), QStringLiteral("system-configuration"));
+    QVERIFY(row);
+
+    QTextBrowser *view = showDecoded(window, row);
+    QVERIFY(view);
+    const QString text = view->toPlainText();
+    QVERIFY2(text.contains(QStringLiteral("Preferences")), qPrintable(text));
+    QVERIFY2(text.contains(QStringLiteral("80 columns (Topaz 8)")), qPrintable(text));
+    QVERIFY2(text.contains(QStringLiteral("Workbench colours")), qPrintable(text));
+    QVERIFY2(text.contains(QStringLiteral("$fff")), qPrintable(text));
+
+    // The colour is shown as a colour, not only named: a framed swatch, so
+    // white shows on a white page.
+    const QImage white = view->document()
+                             ->resource(QTextDocument::ImageResource,
+                                        QUrl(QStringLiteral("ade-decoded:swatch/ffffff")))
+                             .value<QImage>();
+    QVERIFY2(!white.isNull(), "a swatch for colour 0");
+    QCOMPARE(QColor(white.pixel(white.width() / 2, white.height() / 2)), QColor(Qt::white));
+    QCOMPARE(QColor(white.pixel(0, 0)), view->palette().color(QPalette::Text));
+
+    // And the pointer as a picture: scaled up, its first pixel red.
+    const QVariant picture = view->document()->resource(QTextDocument::ImageResource,
+                                                         QUrl(QStringLiteral("ade-decoded:picture")));
+    const QImage image = picture.value<QImage>();
+    QCOMPARE(image.size(), QSize(128, 128));
+    QCOMPARE(QColor(image.pixel(0, 0)), QColor(0xFF, 0, 0));
+
+    // Closing the disk leaves nothing of it behind. Its edit (the file added
+    // above) is discarded without asking.
+    window.setDiscardConfirmation([](const QString &) { return true; });
+    QVERIFY(window.closeAll());
+    QVERIFY2(!view->toPlainText().contains(QStringLiteral("Topaz")), qPrintable(view->toPlainText()));
+}
+
+void TestMainWindow::aFileTheDecodedViewDoesNotKnowSaysWhatItDoes() {
+    MainWindow window;
+    window.openImage(m_image);
+    QTreeWidgetItem *root = browser(window)->topLevelItem(0);
+    QTreeWidgetItem *startup = childNamed(root, QStringLiteral("startup"));
+    QVERIFY(startup);
+    QTextBrowser *view = showDecoded(window, startup);
+    QVERIFY(view);
+    QVERIFY2(view->toPlainText().contains(QStringLiteral("system-configuration")),
+             qPrintable(view->toPlainText()));
+    // The disk's own row is not a file, and says how to get one.
+    showDecoded(window, root);
+    QVERIFY2(view->toPlainText().startsWith(QStringLiteral("Select a file")),
+             qPrintable(view->toPlainText()));
 }
 
 void TestMainWindow::oneDropIsOneUndo() {
