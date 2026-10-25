@@ -109,6 +109,7 @@ private slots:
     void aDiskMadeHereSavesWithoutAskingOrBackup();
     void aFileThatIsNotAProgramSaysWhyAndCanBeDecodedAnyway();
     void preferencesReadInWordsInTheDecodedView();
+    void theVolumeListedInItsOwnTableIsMarkedAndCannotBeOpened();
     void aFileTheDecodedViewDoesNotKnowSaysWhatItDoes();
     void theDiskRowShowsItsBootCodeAndAFolderSaysItHasNone();
     void anImageIsARootWithItsEntriesBeneath();
@@ -2413,6 +2414,47 @@ void TestMainWindow::aFileTheDecodedViewDoesNotKnowSaysWhatItDoes() {
     showDecoded(window, root);
     QVERIFY2(view->toPlainText().startsWith(QStringLiteral("Select a file")),
              qPrintable(view->toPlainText()));
+}
+
+// A disk whose root's hash table leads back to the root (IMP-015). Seven
+// corpus disks do it, under the volume's name. The row is kept and marked,
+// and is never a folder: opened, it would list the disk inside itself.
+void TestMainWindow::theVolumeListedInItsOwnTableIsMarkedAndCannotBeOpened() {
+    QTemporaryDir dir;
+    const QString disk = blankDisk(dir, QStringLiteral("echo.adf"));
+    QFile file(disk);
+    QVERIFY(file.open(QIODevice::ReadWrite));
+    QByteArray bytes = file.readAll();
+    constexpr int Root = 880 * 512;
+    const auto put = [&bytes](int at, quint32 v) {
+        bytes[at] = static_cast<char>(v >> 24);
+        bytes[at + 1] = static_cast<char>(v >> 16);
+        bytes[at + 2] = static_cast<char>(v >> 8);
+        bytes[at + 3] = static_cast<char>(v);
+    };
+    put(Root + 24, 880);
+    // The normal checksum: the block's longs sum to zero.
+    put(Root + 20, 0);
+    quint32 sum = 0;
+    for (int at = Root; at < Root + 512; at += 4) {
+        sum += (quint32(quint8(bytes[at])) << 24) | (quint32(quint8(bytes[at + 1])) << 16) |
+               (quint32(quint8(bytes[at + 2])) << 8) | quint32(quint8(bytes[at + 3]));
+    }
+    put(Root + 20, 0u - sum);
+    file.seek(0);
+    file.write(bytes);
+    file.close();
+
+    MainWindow window;
+    window.openImage(disk);
+    QTreeWidgetItem *root = browser(window)->topLevelItem(0);
+    QVERIFY(root);
+    QTreeWidgetItem *echo = childNamed(root, QStringLiteral("Work"));
+    QVERIFY2(echo, "the row is kept: it is on the disk");
+    QCOMPARE(echo->text(1), QStringLiteral("volume"));
+    QVERIFY(!echo->data(0, tree::RoleIsDir).toBool());
+    QVERIFY(echo->childIndicatorPolicy() != QTreeWidgetItem::ShowIndicator);
+    QVERIFY(!echo->toolTip(0).isEmpty());
 }
 
 void TestMainWindow::oneDropIsOneUndo() {

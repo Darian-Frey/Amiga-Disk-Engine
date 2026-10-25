@@ -1769,6 +1769,37 @@ fn preferences_on_the_disk_decode_and_anything_else_says_why_not() {
 }
 
 #[test]
+fn the_root_met_as_an_entry_is_the_volume_not_a_folder() {
+    // IMP-015: a disk whose root's hash table leads back to the root. The row
+    // is kept, and its kind says it is the disk, so a front end does not
+    // offer to open it — which would list the disk inside itself.
+    let mut disk = blank_disk();
+    let root = 880 * 512;
+    put_u32(&mut disk, root + 24, 880).unwrap();
+    put_u32(&mut disk, root + 20, 0).unwrap();
+    let sum = ade_core::layers::block::checksum::normal_at(&disk[root..root + 512], 20).unwrap();
+    put_u32(&mut disk, root + 20, sum).unwrap();
+    let (path, c_path) = fixture("echo", &disk);
+    // SAFETY: a valid path; every handle is freed once.
+    unsafe {
+        let image = ade::ade_image_open(c_path.as_ptr(), std::ptr::null(), std::ptr::null_mut());
+        assert!(!image.is_null());
+        let listing = ade::ade_dir_open(image, ade::ADE_WHOLE_IMAGE, 880);
+        assert_eq!(ade::ade_listing_count(listing), 1);
+        let mut entry = std::mem::zeroed::<ade::AdeEntry>();
+        assert_eq!(
+            ade::ade_listing_entry(listing, 0, &raw mut entry),
+            AdeResult::Ok
+        );
+        assert_eq!(entry.kind, ade::AdeEntryKind::Volume);
+        assert_eq!(entry.block, 880);
+        ade::ade_listing_free(listing);
+        ade::ade_image_free(image);
+    }
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
 fn a_group_opened_before_the_first_edit_still_undoes_as_one() {
     // The session is created lazily, by the first edit; a group opened before
     // then must still cover it (IMP-014).

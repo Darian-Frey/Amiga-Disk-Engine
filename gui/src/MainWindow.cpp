@@ -854,9 +854,21 @@ void MainWindow::populate(QTreeWidgetItem *parent, const Open &open, quint32 par
 
         const bool isDir =
             entry.kind == ADE_ENTRY_DIRECTORY || entry.kind == ADE_ENTRY_LINK_DIR;
+        // The volume met as an entry of itself (IMP-015): shown, because it
+        // is on the disk, and never a folder — opening it would list the disk
+        // inside itself, one level deeper on every click.
+        const bool isVolume = entry.kind == ADE_ENTRY_VOLUME;
         auto *item = parent ? new QTreeWidgetItem(parent) : new QTreeWidgetItem(m_tree);
         item->setText(ColName, ade::latin1(entry.name));
-        item->setText(ColSize, isDir ? QString{} : QString::number(entry.size));
+        item->setText(ColSize, isDir     ? QString{}
+                               : isVolume ? QStringLiteral("volume")
+                                          : QString::number(entry.size));
+        if (isVolume) {
+            item->setToolTip(ColName,
+                             QStringLiteral("This volume's own rootblock: a hash table leads back to "
+                                            "it, so the disk is listed as an entry of itself. It "
+                                            "holds no file data."));
+        }
         item->setText(ColDate, formatDate(entry.days, entry.mins, entry.ticks));
         item->setText(ColProtection, formatProtection(entry.protection));
         item->setTextAlignment(ColSize, Qt::AlignRight | Qt::AlignVCenter);

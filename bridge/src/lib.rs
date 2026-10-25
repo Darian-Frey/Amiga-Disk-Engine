@@ -122,13 +122,17 @@ pub enum AdeEntryKind {
     SoftLink = 4,
     /// Something else, reported rather than guessed at.
     Unknown = 5,
+    /// The volume's own rootblock, met as an entry: a directory's hash table
+    /// leads back to it (IMP-015). Not a folder to open — it is the disk.
+    Volume = 6,
 }
 
 impl From<EntryKind> for AdeEntryKind {
     fn from(kind: EntryKind) -> Self {
         match kind {
             EntryKind::File => Self::File,
-            EntryKind::Root | EntryKind::Directory => Self::Directory,
+            EntryKind::Directory => Self::Directory,
+            EntryKind::Root => Self::Volume,
             EntryKind::HardLinkFile => Self::LinkFile,
             EntryKind::HardLinkDir => Self::LinkDir,
             EntryKind::SoftLink => Self::SoftLink,

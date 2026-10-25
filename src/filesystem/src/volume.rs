@@ -489,6 +489,43 @@ impl<'a> Volume<'a> {
         Ok(out)
     }
 
+    /// Slots of a directory's hash table whose chain reaches the rootblock
+    /// (IMP-015).
+    ///
+    /// Seven corpus disks list the root in its own table, under the volume's
+    /// name, so a listing shows the volume as an entry of itself. Nothing
+    /// descends into it — the walk has the root marked visited (AV-001) — but
+    /// it is a structure on the disk and is reported, not hidden.
+    ///
+    /// # Errors
+    /// A read error on the directory block.
+    pub fn slots_reaching_root(&self, dir: u32) -> Result<Vec<u32>, FsError> {
+        let block = self.read_block(dir)?;
+        let mut out = Vec::new();
+        for slot in 0..self.hash_table_size() {
+            let offset = 24usize.saturating_add((slot as usize).saturating_mul(4));
+            let mut next = ade_endian::u32_at(&block, offset).unwrap_or(0);
+            let mut seen: HashSet<u32> = HashSet::new();
+            while next != 0 && seen.insert(next) {
+                if next == self.root {
+                    out.push(slot);
+                    break;
+                }
+                if self.geometry.validate(BlockIndex(u64::from(next))).is_err() {
+                    break;
+                }
+                let Ok(raw) = self.read_block(next) else {
+                    break;
+                };
+                let Ok(entry) = Entry::parse(&raw, next) else {
+                    break;
+                };
+                next = entry.hash_chain;
+            }
+        }
+        Ok(out)
+    }
+
     /// Entries in a directory that share a name under the volume's case
     /// folding (IMP-016).
     ///

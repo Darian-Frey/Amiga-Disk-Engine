@@ -370,6 +370,7 @@ fn scan_tree(volume: &Volume<'_>, findings: &mut Vec<Finding>) -> TreeScan {
     scan_dircaches(volume, &walked, &mut scan, findings);
     scan_hash_slots(volume, &walked, findings);
     scan_duplicate_names(volume, &walked, findings);
+    scan_root_in_tables(volume, &walked, findings);
     scan
 }
 
@@ -515,6 +516,54 @@ fn scan_duplicate_names(
                 reported.saturating_sub(MAX_SLOT_FINDINGS)
             ),
         ));
+    }
+}
+
+/// A directory whose hash table leads to the rootblock (IMP-015).
+///
+/// Measured 2026-10-25: 7 of 3,606 corpus volumes, every one the root's own
+/// table listing the root under the volume's name — a cracker's signature,
+/// by the names (`Billiard from NightMaster`, `ACKERLIGHT 'The French
+/// Light'`). It breaks nothing ADE can see: the walk does not descend into it
+/// and it holds no data. Information, so a listing that shows the volume as
+/// an entry of itself is explained rather than mistaken for damage.
+fn scan_root_in_tables(
+    volume: &Volume<'_>,
+    walked: &ade_filesystem::volume::Walk,
+    findings: &mut Vec<Finding>,
+) {
+    let directories = core::iter::once((String::new(), volume.root())).chain(
+        walked
+            .entries
+            .iter()
+            .filter(|(_, e)| e.kind == EntryKind::Directory)
+            .map(|(path, e)| (path.clone(), e.block)),
+    );
+    for (dir_path, dir) in directories {
+        let Ok(slots) = volume.slots_reaching_root(dir) else {
+            continue;
+        };
+        if slots.is_empty() {
+            continue;
+        }
+        let place = if dir_path.is_empty() {
+            "the root's own hash table".to_owned()
+        } else {
+            format!("the hash table of {dir_path}")
+        };
+        let slots: Vec<String> = slots.iter().map(u32::to_string).collect();
+        findings.push(
+            Finding::new(
+                "root-in-hash-table",
+                Severity::Info,
+                format!(
+                    "slot {} of {place} leads to the rootblock, so the volume is listed as an \
+                     entry of itself. It holds no data and nothing descends into it.",
+                    slots.join(", ")
+                ),
+            )
+            .at(dir),
+        );
     }
 }
 

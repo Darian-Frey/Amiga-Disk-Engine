@@ -60,7 +60,10 @@ typedef enum {
     ADE_ENTRY_LINK_FILE = 2,
     ADE_ENTRY_LINK_DIR  = 3,
     ADE_ENTRY_SOFT_LINK = 4,
-    ADE_ENTRY_UNKNOWN   = 5
+    ADE_ENTRY_UNKNOWN   = 5,
+    /* The volume's own rootblock met as an entry: a hash table leads back to
+     * it (IMP-015). Not a folder to open; it is the disk itself. */
+    ADE_ENTRY_VOLUME    = 6
 } AdeEntryKind;
 
 /* One directory entry. `name` borrows from the listing it came from and is

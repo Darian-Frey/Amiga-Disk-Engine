@@ -1213,6 +1213,11 @@ fn list(
                     use std::fmt::Write as _;
                     let _ = write!(line, "   ; {}", e.comment_lossy());
                 }
+                if e.kind == ade_core::layers::filesystem::entry::EntryKind::Root {
+                    // Kept, because it is on the disk; said, because a disk
+                    // listing itself looks like an accident (IMP-015).
+                    line.push_str("   <- this volume itself, listed in a hash table");
+                }
                 if !emit(&mut out, &line) {
                     break;
                 }

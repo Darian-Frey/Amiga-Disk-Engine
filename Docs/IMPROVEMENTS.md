@@ -11,18 +11,6 @@ Effort vocabulary: trivial | small | medium | large.
 
 ## Suggested
 
-### IMP-015 A root listed in its own hash table appears as an entry, and is not reported
-**Status:** suggested
-**Effort:** small
-
-**Where:** [src/filesystem/src/volume.rs](../src/filesystem/src/volume.rs) `list`, and [src/api/src/health.rs](../src/api/src/health.rs).
-
-**What happens.** Found 2026-10-23 measuring IMP-012: on 8 corpus disks a slot of the root's hash table points back at the rootblock (block 880) — Billiards Simulator, Two-Up, Amiga Poker, Baby Bug, SkyChase, Mach 3, Oo-Topos and one more. The names involved are volume names like `Billiard from NightMaster` and `ACKERLIGHT 'The French Light'`, which reads as a cracker's signature: the volume shows up as an entry inside itself in a directory listing. ADE's `ls` does exactly that — a row of kind `volume` among the files — and `ade check` says nothing. Traversal is safe: the walk marks the root visited and does not descend (AV-001).
-
-**What would be better.** `check` reports it once as `root-in-own-table` (info: it is a curiosity that breaks nothing ADE can see), and `ls` either omits the row or marks it for what it is, so the listing does not look like a disk containing itself by accident.
-
-**Trade-offs.** Omitting the row hides something genuinely on the disk, which a forensic tool should not do quietly; marking it keeps the truth and costs a word. Measuring whether AmigaDOS's own `dir` shows it would settle what users of the time saw, and needs an emulator, which is out of scope.
-
 ### IMP-011 Three JSON documents are built in the CLI, where D-015's inventory cannot see them
 **Status:** suggested
 **Effort:** small
@@ -58,6 +46,28 @@ The split is not random and there is a defensible rule inside it — a command t
 **Why it matters now.** [[D-018]] settles the overwrite question for the write suite, and cites this entry: the suite's rule was chosen to be coherent with the *majority* of these paths rather than with all of them, because they do not agree with each other. Whatever is decided here should be decided for all five at once.
 
 ## Applied
+
+### IMP-015 A root listed in its own hash table appears as an entry, and is not reported
+**Status:** applied
+**Effort:** small
+**Found:** 2026-10-23, measuring IMP-012.
+
+**Where:** [src/filesystem/src/volume.rs](../src/filesystem/src/volume.rs) `list`, and [src/api/src/health.rs](../src/api/src/health.rs).
+
+**What happens.** Found 2026-10-23 measuring IMP-012: on 8 corpus disks a slot of the root's hash table points back at the rootblock (block 880) — Billiards Simulator, Two-Up, Amiga Poker, Baby Bug, SkyChase, Mach 3, Oo-Topos and one more. The names involved are volume names like `Billiard from NightMaster` and `ACKERLIGHT 'The French Light'`, which reads as a cracker's signature: the volume shows up as an entry inside itself in a directory listing. ADE's `ls` does exactly that — a row of kind `volume` among the files — and `ade check` says nothing. Traversal is safe: the walk marks the root visited and does not descend (AV-001).
+
+**What would be better.** `check` reports it once as `root-in-own-table` (info: it is a curiosity that breaks nothing ADE can see), and `ls` either omits the row or marks it for what it is, so the listing does not look like a disk containing itself by accident.
+
+**Trade-offs.** Omitting the row hides something genuinely on the disk, which a forensic tool should not do quietly; marking it keeps the truth and costs a word. Measuring whether AmigaDOS's own `dir` shows it would settle what users of the time saw, and needs an emulator, which is out of scope.
+
+**Applied 2026-10-25.** Measured again over every directory of the whole corpus: **7 of 3,606 volumes**, the seven named above — the entry's count of eight had no eighth disk behind it. Every one is the root's own table, never a subdirectory's, the root filed in slot 0 on five disks and 4 and 15 on the others — never the slot its name hashes to, so no lookup by name reaches it either.
+
+- **`ade check`** reports **`root-in-hash-table`** (information), once per directory, naming the slot: *slot 0 of the root's own hash table leads to the rootblock, so the volume is listed as an entry of itself.* Named for the general case rather than `root-in-own-table`, because the check looks at every directory's table, though only the root's has one in the corpus. Schema **1.13 → 1.14** for the new code.
+- **`ade ls` keeps the row and says what it is**: `volume … Come In Spinner   <- this volume itself, listed in a hash table`. Kept, because a forensic tool should not quietly hide something on the disk; marked, so it does not read as an accident. The JSON row was already `"kind":"volume"` and is unchanged.
+- **The window had it as a folder.** The C ABI mapped a root entry to `ADE_ENTRY_DIRECTORY`, so the tree gave the row an expander, and opening it listed the disk inside itself — one level deeper on every click. It is now **`ADE_ENTRY_VOLUME`**, appended so no existing value moves; the row shows *volume* in its size column, a tooltip saying what it is, and no expander.
+
+Tests: built cases for the finding and the listing, an ABI test for the kind, a GUI test for the row, and the corpus measurement held as a regression check. Mapping the root back to a directory fails both the ABI and the GUI test.
+
 
 ### IMP-016 Two entries with the same name in one directory are not reported
 **Status:** applied
