@@ -1333,6 +1333,8 @@ The `RDSK` signature appears in the first 16 blocks of **0** of them. Every imag
 
 The practical consequence: RDB reading is verified against the specification and against ADFlib, not against reality. Where real devices differ from both — as real floppies differ from the FAQ in seven documented ways above — that difference has not been measured and cannot be, until there is a device to measure.
 
+**One real device, 2026-10-25.** Amiga Forever ships three hardfiles for FS-UAE, found on the development machine. `workbench-135.hdf` (3 MB) is an RDB device: `RDSK` at block 0, reserved to block 27, one `DOS\1` partition DH0 at blocks 2020–6059, 512-byte blocks; `workbench-211.hdf` and `workbench-311.hdf` (5 MB each) are raw OFS and FFS hardfiles. ADE and ADFlib agree on all three: the same partition range, the same 365-entry tree on DH0, and **1,427 files byte-identical** across the three volumes, with no `ade check` finding on any (`src/api/tests/hardfiles.rs`, which reads `ADE_HARDFILES` or `disks/hardfiles` and skips without them). One device is not a survey — it is one HDToolBox's idea of a layout — but it is the first time the RDB path has met a disk ADE did not make. Its blocks are 512 bytes, so it says nothing about larger ones.
+
 ### The reference implementation is not a safety benchmark
 
 Running ADFlib's `unadf` over all 4288 images, each capped at 512 MB and 10 s:
