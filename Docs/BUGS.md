@@ -10,10 +10,14 @@ Severity vocabulary: low | medium | high.
 
 ## Open
 
-### BUG-014 The health report misses a cross-link between two entries of one name
+_None._
+
+## Fixed
+
+### BUG-014 The health report missed a cross-link between two entries of one name
 **Severity:** low
-**Status:** open
-**Found:** 2026-10-25, renaming files across the corpus for F-031.
+**Status:** fixed
+**Found:** 2026-10-25, renaming files across the corpus for F-031. **Fixed** 2026-10-25.
 **Where:** [src/api/src/health.rs](../src/api/src/health.rs) `scan_file`, which records each block's owner by **path** and reports `cross-linked-block` only when a second, *different* path claims it.
 
 **What is wrong.** Two entries of one name in one directory have one path. When they share blocks — Typhoon's two `tubes` headers, 968 and 957, share a data chain — the second claim looks like the first file again, and nothing is reported. The disk is cross-linked and `ade check` says nothing about it.
@@ -22,9 +26,7 @@ Severity vocabulary: low | medium | high.
 
 **Correct behaviour.** Key the owner map by the entry's header block, not its path, so two entries are two owners whatever they are called; name both in the finding by path, and by block when the paths are equal. The corpus rename test (`corpus_files_rename_and_delete_and_the_disk_stays_sound`) accepts this one refusal, on a disk that already reports `duplicate-name`, and should stop accepting it when this is fixed.
 
-**Not fixed here** because the write suite found it rather than caused it (Maintenance Rule 8).
-
-## Fixed
+**The fix.** The owner map is keyed by header block; when the two paths are equal, the finding names both headers — *block shared by tubes (header 968) and tubes (header 957)*. Over the corpus it changes one disk: Typhoon now reports the **40** blocks its two `tubes` headers share, which were always shared. TeleEpic II, Xenon 2, 1869 and Valhalla, the other disks holding a name twice, share no blocks between their copies. A built test (`duplicate_names.rs`) gives two byte-identical names one data block and fails with the path-keyed map; and the corpus rename test no longer excuses Typhoon, whose stale copy now renames and deletes like any other file — 3,062 of each.
 
 ### BUG-013 A path lookup took the first matching name in listing order, not the entry AmigaDOS opens
 **Severity:** medium

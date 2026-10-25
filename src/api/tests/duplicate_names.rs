@@ -248,3 +248,41 @@ fn distinct_names_are_not_duplicates() {
         "one entry reached twice is one entry"
     );
 }
+
+#[test]
+fn two_entries_of_one_name_sharing_a_block_are_reported_as_cross_linked() {
+    // BUG-014: cross-links were looked for by path, and two entries of one
+    // name have one path, so a block both used looked like one file's.
+    let (mut bytes, first, second) = twins();
+    // Both down the right chain, as in the first test above.
+    let right = hash_name(b"aaa", HT, false);
+    let stale = hash_name(b"bbb", HT, false);
+    put_u32(&mut bytes, slot_at(stale), 0).unwrap();
+    put_u32(&mut bytes, first as usize * 512 + 496, second).unwrap();
+    reseal(&mut bytes, first as usize);
+    // The stale copy's table names the original's one data block. OFS keeps
+    // the first data block at 16 as well as in the table's last slot.
+    // The same name byte for byte, as Typhoon's two `tubes` are: `aaa` and
+    // `AAA` are one name to AmigaDOS but two paths, which was always caught.
+    bytes[second as usize * 512 + 433..second as usize * 512 + 436].copy_from_slice(b"aaa");
+    let data = u32_at(&bytes, first as usize * 512 + 24 + 71 * 4).unwrap();
+    put_u32(&mut bytes, second as usize * 512 + 24 + 71 * 4, data).unwrap();
+    put_u32(&mut bytes, second as usize * 512 + 16, data).unwrap();
+    reseal(&mut bytes, second as usize);
+    reseal(&mut bytes, 880);
+    let _ = right;
+
+    let crossed: Vec<_> = ade_core::health::examine(bytes)
+        .findings
+        .into_iter()
+        .filter(|f| f.code == "cross-linked-block")
+        .collect();
+    assert_eq!(crossed.len(), 1, "{crossed:?}");
+    assert_eq!(crossed[0].block, Some(data));
+    assert!(
+        crossed[0].message.contains(&format!("header {first}"))
+            && crossed[0].message.contains(&format!("header {second}")),
+        "{}",
+        crossed[0].message
+    );
+}

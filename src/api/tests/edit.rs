@@ -1254,21 +1254,6 @@ fn corpus_files_rename_and_delete_and_the_disk_stays_sound() {
                 *refused.entry(refusal_kind(&e)).or_insert(0) += 1;
                 continue;
             }
-            // BUG-014: the health report looks for cross-links by path, so two
-            // entries of one name sharing blocks look like one file. Renaming
-            // one gives them two paths and the old cross-link appears as new,
-            // and the edit is refused. Safe, and explained only on a disk that
-            // already holds a name twice.
-            Err(EditError::WouldDamage(found))
-                if found.iter().all(|f| f.starts_with("cross-linked-block"))
-                    && ade_core::health::examine(std::fs::read(path).unwrap())
-                        .findings
-                        .iter()
-                        .any(|f| f.code == "duplicate-name") =>
-            {
-                *refused.entry("BUG-014".to_owned()).or_insert(0) += 1;
-                continue;
-            }
             Err(e) => panic!("{}: rename: {e}", path.display()),
         }
         // Only where ADFlib read the file at all before: a disk it chokes on

@@ -350,8 +350,10 @@ fn scan_tree(volume: &Volume<'_>, findings: &mut Vec<Finding>) -> TreeScan {
     }
 
     // A block referenced by two files is cross-linked: writing either corrupts
-    // the other. Tracked by first owner so the report can name both.
-    let mut owner: HashMap<u32, String> = HashMap::new();
+    // the other. Tracked by first owner so the report can name both — by its
+    // header block, not its path: two entries of one name share a path, and
+    // keyed by path their shared blocks looked like one file's (BUG-014).
+    let mut owner: HashMap<u32, (u32, String)> = HashMap::new();
 
     for (path, entry) in &walked.entries {
         if entry.kind.is_directory() {
@@ -660,7 +662,7 @@ fn scan_file(
     volume: &Volume<'_>,
     path: &str,
     entry: &ade_filesystem::entry::Entry,
-    owner: &mut HashMap<u32, String>,
+    owner: &mut HashMap<u32, (u32, String)>,
     scan: &mut TreeScan,
     findings: &mut Vec<Finding>,
 ) {
@@ -678,19 +680,25 @@ fn scan_file(
 
         if let Ok(blocks) = volume.file_blocks(entry) {
             for b in blocks {
-                if let Some(first) = owner.get(&b) {
-                    if first != path {
-                        findings.push(
-                            Finding::new(
-                                "cross-linked-block",
-                                Severity::Error,
-                                format!("block shared by {first} and {path}"),
+                if let Some((first_block, first)) = owner.get(&b) {
+                    if *first_block != entry.block {
+                        // Equal paths are two entries of one name; their
+                        // header blocks are what tells them apart.
+                        let message = if first == path {
+                            format!(
+                                "block shared by {first} (header {first_block}) and {path} \
+                                 (header {})",
+                                entry.block
                             )
-                            .at(b),
+                        } else {
+                            format!("block shared by {first} and {path}")
+                        };
+                        findings.push(
+                            Finding::new("cross-linked-block", Severity::Error, message).at(b),
                         );
                     }
                 } else {
-                    owner.insert(b, path.to_owned());
+                    owner.insert(b, (entry.block, path.to_owned()));
                 }
                 scan.referenced.insert(b);
             }
