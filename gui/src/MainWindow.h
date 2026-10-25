@@ -47,7 +47,6 @@ constexpr int RolePartition = Qt::UserRole + 5;
 constexpr int RoleOffset = Qt::UserRole + 6;
 }  // namespace tree
 
-class HexHighlighter;
 class MapView;
 class HexPane;
 class QPlainTextEdit;
@@ -231,7 +230,6 @@ private:
     ImageTree *m_tree = nullptr;
     ImageTree *m_results = nullptr;
     HexPane *m_hex = nullptr;
-    HexHighlighter *m_paint = nullptr;
     QComboBox *m_mode = nullptr;
     /// The Hex tab's page, so a search hit can bring it to the front.
     QWidget *m_hexTab = nullptr;
@@ -262,13 +260,14 @@ private:
     QAction *m_carve = nullptr;
     QAction *m_specs = nullptr;
     QAction *m_surface = nullptr;
-    /// What the hex and text panes are waiting to show, filled only when
-    /// their tab is in front (IMP-009). Selecting a disk filled both with the
-    /// whole disk — about half a second — whichever tab was showing.
+    /// What the text pane is waiting to show, filled only when its tab is
+    /// in front (IMP-009): a whole disk costs it about 130 ms. The hex pane
+    /// needs no waiting since it paints only what is on screen (IMP-017).
     struct PendingPreview {
-        bool hex = false;
         bool text = false;
         QByteArray bytes;
+        /// For a whole disk, read when the tab is shown rather than before.
+        const Open *disk = nullptr;
     };
     PendingPreview m_pending;
     /// The Assembly view (F-032).

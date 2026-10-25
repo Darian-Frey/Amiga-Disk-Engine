@@ -23,6 +23,7 @@
 #include <QFontMetrics>
 #include <QTemporaryDir>
 #include <QTest>
+#include <QSignalSpy>
 #include <QClipboard>
 #include <QComboBox>
 #include <QItemSelectionModel>
@@ -53,23 +54,15 @@ ImageTree *results(MainWindow &window) {
     return window.findChild<ImageTree *>(QStringLiteral("results"));
 }
 
-// The two panes that preview a file, hex and text. The Assembly pane is
-// excluded: it is built only while its tab is showing (F-032).
-QList<QPlainTextEdit *> previewPanes(MainWindow &window) {
-    QList<QPlainTextEdit *> out;
-    for (auto *view : window.findChildren<QPlainTextEdit *>()) {
-        if (view->objectName() != QStringLiteral("assembly")) out << view;
-    }
-    return out;
-}
-
 // The hex pane and the text pane, told apart by type: `findChildren` does not
 // keep creation order once widgets are moved into layouts and tab stacks, so
-// "the first preview pane" was never a reliable way to name one.
-QPlainTextEdit *hexPane(MainWindow &window) { return window.findChild<HexPane *>(); }
+// "the first preview pane" was never a reliable way to name one. The hex pane
+// paints its own lines (IMP-017); the text pane is the one `QPlainTextEdit`
+// that is not the Assembly view (F-032).
+HexPane *hexPane(MainWindow &window) { return window.findChild<HexPane *>(); }
 QPlainTextEdit *textPane(MainWindow &window) {
-    for (auto *view : previewPanes(window)) {
-        if (!qobject_cast<HexPane *>(view)) return view;
+    for (auto *view : window.findChildren<QPlainTextEdit *>()) {
+        if (view->objectName() != QStringLiteral("assembly")) return view;
     }
     return nullptr;
 }
@@ -135,6 +128,12 @@ private slots:
     void anUnreadableFileIsRejectedNotFatal();
     void nullBytesAreDimmedInTheHexFieldAndNowhereElse();
     void theDimColourFollowsTheTheme();
+    void aDiskIsReadOnlyAsFarAsItIsShown();
+    void aDiskPastTheOldCapIsShownWhole();
+    void copyingAWholeHardDiskIsCutAndSaysSo();
+    void theRegionTintIsPainted();
+    void linesOfDifferentColoursStayInColumn();
+    void aDragHeldPastTheBottomScrollsAndKeepsSelecting();
     void aDragAcrossLinesSelectsOnlyTheFieldItStartedIn();
     void aDragInTheAsciiFieldStaysInTheAsciiField();
     void aDragThatStraysIntoAnotherFieldKeepsGoingInItsOwn();
@@ -224,11 +223,10 @@ void TestMainWindow::aFileSelectionFillsTheHexView() {
     QVERIFY(startup);
     tree->setCurrentItem(startup);
 
-    const auto views = previewPanes(window);
-    QCOMPARE(views.size(), 2);
+    QVERIFY(hexPane(window) && textPane(window));
     // The hex view is the tab in front, so it is filled; the text view is
     // not showing, so it waits (IMP-009) — and fills the moment it is shown.
-    QVERIFY2(!hexPane(window)->toPlainText().isEmpty(), "the showing pane is filled");
+    QVERIFY2(!hexPane(window)->isEmpty(), "the showing pane is filled");
     QVERIFY2(textPane(window)->toPlainText().isEmpty(), "the hidden pane is not built");
     bringForward(window, QStringLiteral("Text"));
     QVERIFY2(textPane(window)->toPlainText().contains(
@@ -327,10 +325,8 @@ void TestMainWindow::searchReportsThePathAndTheImage() {
     auto *tree = browser(window);
     tree->setCurrentItem(childNamed(tree->topLevelItem(0), QStringLiteral("startup")));
     found->setCurrentItem(found->topLevelItem(0));
-    const auto views = previewPanes(window);
-    QCOMPARE(views.size(), 2);
     bringForward(window, QStringLiteral("Hex"));
-    QVERIFY(!hexPane(window)->toPlainText().isEmpty());
+    QVERIFY(!hexPane(window)->isEmpty());
     // Taking the selection means taking it: a row left highlighted in the
     // tree would read as the thing being previewed, and it is not.
     QVERIFY(tree->selectedItems().isEmpty());
@@ -506,13 +502,9 @@ void TestMainWindow::aFileInsideAPartitionPreviewsAndExtracts() {
     QVERIFY(startup);
     tree->setCurrentItem(startup);
 
-    const auto views = previewPanes(window);
-    QCOMPARE(views.size(), 2);
-    bool sawContents = false;
-    for (auto *view : views) {
-        if (view->toPlainText().contains(QStringLiteral("hello from DH0"))) sawContents = true;
-    }
-    QVERIFY2(sawContents, "a file inside a partition should preview");
+    bringForward(window, QStringLiteral("Text"));
+    QVERIFY2(textPane(window)->toPlainText().contains(QStringLiteral("hello from DH0")),
+             "a file inside a partition should preview");
 
     // And drag out, which reads it a second way.
     QScopedPointer<QMimeData> mime(tree->mimeData({startup}));
@@ -551,7 +543,6 @@ void TestMainWindow::searchCoversEveryPartitionNotJustTheFirst() {
 
     // And selecting each gives the file from *that* partition. The two share a
     // name and a path, so nothing but the partition tells them apart.
-    const auto views = previewPanes(window);
     bringForward(window, QStringLiteral("Text"));
     QStringList shown;
     for (int i = 0; i < 2; ++i) {
@@ -627,8 +618,7 @@ void TestMainWindow::theFixedColumnsShowTheirWholeContents() {
 // (the Atari Disk Engine does the same). Two things can go wrong and neither
 // is visible in a screenshot: dimming the wrong columns, and dimming nothing.
 void TestMainWindow::nullBytesAreDimmedInTheHexFieldAndNowhereElse() {
-    QPlainTextEdit pane;
-    HexHighlighter dimmer(pane.document(), &pane);
+    HexPane pane;
 
     // A line whose offset is all zeros, whose first byte is zero, whose ASCII
     // column contains the literal characters `00`, and which also holds a
@@ -637,20 +627,18 @@ void TestMainWindow::nullBytesAreDimmedInTheHexFieldAndNowhereElse() {
     data[0] = '\x00';
     data[1] = '0';
     data[2] = '0';
-    pane.setPlainText(hexview::dump(data));
+    pane.setBytes(data);
 
-    const QTextBlock line = pane.document()->findBlockByNumber(0);
-    QVERIFY(line.isValid());
     QList<int> dimmed;
-    for (const auto &range : line.layout()->formats()) {
-        dimmed.append(range.start);
+    for (const auto &mark : pane.marksOn(0)) {
+        if (mark.kind == HexPane::Mark::Dim) dimmed.append(mark.column);
     }
 
     // The one null byte is dimmed, and it is the only thing that is.
     QCOMPARE(dimmed, QList<int>{hexview::columnOf(0)});
 
     // Which means, specifically:
-    const QString text = line.text();
+    const QString text = pane.lineText(0);
     QVERIFY2(text.startsWith(QStringLiteral("00000000  00 30 30 41")), qPrintable(text));
     QVERIFY2(!dimmed.contains(0), "the offset column is mostly zeros; dimming it "
                                   "would dim every line rather than the data");
@@ -668,14 +656,14 @@ void TestMainWindow::theDimColourFollowsTheTheme() {
     QPalette light;
     light.setColor(QPalette::Text, Qt::black);
     light.setColor(QPalette::Base, Qt::white);
-    const QColor dimLight = HexHighlighter::dimColour(light);
+    const QColor dimLight = HexPane::dimColour(light);
     QVERIFY(dimLight.lightness() > QColor(Qt::black).lightness());
     QVERIFY(dimLight.lightness() < QColor(Qt::white).lightness());
 
     QPalette dark;
     dark.setColor(QPalette::Text, Qt::white);
     dark.setColor(QPalette::Base, QColor(30, 30, 30));
-    const QColor dimDark = HexHighlighter::dimColour(dark);
+    const QColor dimDark = HexPane::dimColour(dark);
     QVERIFY2(dimDark.lightness() < dimLight.lightness(),
              "a dark theme's dim must be darker than a light theme's, not the same grey");
     QVERIFY(dimDark.lightness() > QColor(30, 30, 30).lightness());
@@ -696,29 +684,21 @@ HexPane *dumpPane(int lines) {
     }
     auto *pane = new HexPane;
     pane->setFont(QFont(QStringLiteral("monospace"), 10));
-    pane->setLineWrapMode(QPlainTextEdit::NoWrap);
-    pane->setPlainText(hexview::dump(data));
+    pane->setBytes(data);
     pane->resize(700, 300);
-    // Shown, or the document has no layout and every point maps to the same
-    // cursor — the drag would then select nothing and the test would pass or
-    // fail for reasons unrelated to the clamping.
+    // Shown, so the viewport has its real size and the points below are
+    // where a person would click.
     pane->show();
     return pane;
 }
 
 // The viewport point at (line, column) of the dump.
-QPoint at(HexPane *pane, int line, int column) {
-    const QTextBlock block = pane->document()->findBlockByNumber(line);
-    QTextCursor cursor(block);
-    cursor.setPosition(block.position() + column);
-    const QRect r = pane->cursorRect(cursor);
-    return QPoint(r.left() + 1, r.center().y());
-}
+QPoint at(HexPane *pane, int line, int column) { return pane->pointOf(line, column); }
 
 // Press at one point, drag to another, release.
 void drag(HexPane *pane, QPoint from, QPoint to) {
     // To the viewport, not the frame: a scroll area's mouse events arrive
-    // there, and `cursorRect` gives viewport coordinates to match.
+    // there, and `pointOf` gives viewport coordinates to match.
     QMouseEvent press(QEvent::MouseButtonPress, from, pane->mapToGlobal(from), Qt::LeftButton,
                       Qt::LeftButton, Qt::NoModifier);
     QApplication::sendEvent(pane->viewport(), &press);
@@ -731,6 +711,184 @@ void drag(HexPane *pane, QPoint from, QPoint to) {
 }
 
 }  // namespace
+
+// The pane paints only what is on screen (IMP-017). It was a QPlainTextEdit
+// holding the whole dump, and selecting a floppy spent 401 ms laying out
+// 56,000 lines for the forty anybody could see.
+namespace {
+
+// A source of `size` bytes, each the low byte of its offset, that counts what
+// is asked of it.
+HexPane::Reader countingReader(quint64 size, quint64 &asked) {
+    return [size, &asked](quint64 offset, quint64 length) {
+        asked += length;
+        QByteArray out;
+        for (quint64 at = offset; at < offset + length && at < size; ++at) {
+            out.append(static_cast<char>(at & 0xFF));
+        }
+        return out;
+    };
+}
+
+}  // namespace
+
+void TestMainWindow::aDiskIsReadOnlyAsFarAsItIsShown() {
+    HexPane pane;
+    pane.setFont(QFont(QStringLiteral("monospace"), 10));
+    pane.resize(700, 300);
+    pane.show();
+    quint64 asked = 0;
+    // A gigabyte: laid out as text this would never finish.
+    constexpr quint64 Size = Q_UINT64_C(1) << 30;
+    pane.setSource(Size, countingReader(Size, asked));
+    QCOMPARE(asked, quint64(0));
+
+    // A paint reads one screenful, not the disk.
+    pane.viewport()->grab();
+    const quint64 screen =
+        static_cast<quint64>(pane.viewport()->height() / QFontMetrics(pane.font()).lineSpacing() +
+                             3) *
+        hexview::BytesPerLine;
+    QVERIFY2(asked > 0 && asked <= screen,
+             qPrintable(QStringLiteral("read %1 bytes for a screen of %2 (viewport %3px)")
+                            .arg(asked)
+                            .arg(screen)
+                            .arg(pane.viewport()->height())));
+
+    // And scrolling to the far end reads only what is there.
+    asked = 0;
+    pane.verticalScrollBar()->setValue(pane.verticalScrollBar()->maximum());
+    pane.viewport()->grab();
+    QVERIFY2(asked <= screen, qPrintable(QString::number(asked)));
+    QVERIFY(pane.lineText(pane.lineCount() - 1).startsWith(QStringLiteral("3ffffff0")));
+}
+
+void TestMainWindow::aDiskPastTheOldCapIsShownWhole() {
+    // The whole-disk view stopped at 4 MB because layout was slow. It is not
+    // any more, so a hard disk is shown to its last byte.
+    HexPane pane;
+    quint64 asked = 0;
+    constexpr quint64 Size = 100u * 1024 * 1024;
+    pane.setSource(Size, countingReader(Size, asked));
+    QCOMPARE(static_cast<quint64>(pane.lineCount()), Size / hexview::BytesPerLine);
+    QVERIFY(pane.lineText(pane.lineCount() - 1).startsWith(QStringLiteral("063ffff0")));
+}
+
+void TestMainWindow::copyingAWholeHardDiskIsCutAndSaysSo() {
+    // Showing a whole hard disk makes Select All a gigabyte; its dump as text
+    // is five. The copy takes the first CopyLimit bytes and says it did.
+    HexPane pane;
+    quint64 asked = 0;
+    constexpr quint64 Size = 100u * 1024 * 1024;
+    pane.setSource(Size, countingReader(Size, asked));
+    pane.selectField();
+    QSignalSpy cut(&pane, &HexPane::copyCut);
+    QApplication::clipboard()->clear();
+    pane.copyField();
+
+    const QString copied = QApplication::clipboard()->text();
+    QCOMPARE(static_cast<quint64>(copied.count(QChar('\n')) + 1),
+             HexPane::CopyLimit / hexview::BytesPerLine);
+    QVERIFY2(asked <= HexPane::CopyLimit, qPrintable(QString::number(asked)));
+    QCOMPARE(cut.size(), 1);
+    QCOMPARE(cut.first().at(0).toULongLong(), HexPane::CopyLimit);
+    QCOMPARE(cut.first().at(1).toULongLong(), Size);
+
+    // A selection inside the limit is copied whole, and nothing is said.
+    pane.selectBytesAt(0);
+    pane.copyField();
+    QCOMPARE(cut.size(), 1);
+}
+
+void TestMainWindow::theRegionTintIsPainted() {
+    // The marks are what the paint draws; this checks the paint draws them.
+    HexPane pane;
+    pane.setFont(QFont(QStringLiteral("monospace"), 10));
+    pane.resize(700, 200);
+    pane.setBytes(QByteArray(1024, '\x41'));
+    pane.setRegions({{0, 512, ADE_REGION_BOOTBLOCK, 0, {}}, {512, 1024, ADE_REGION_FILE, 0, {}}});
+    pane.show();
+    const QImage shot = pane.viewport()->grab().toImage();
+
+    // The space between the offset and the hex holds no glyph, so the pixel
+    // there is the background alone.
+    const QPoint spot = pane.pointOf(0, hexview::FieldColumn - 1);
+    QCOMPARE(shot.pixelColor(spot * shot.devicePixelRatio()),
+             HexPane::regionColour(pane.palette(), ADE_REGION_BOOTBLOCK));
+    const QPoint plain = pane.pointOf(512 / hexview::BytesPerLine, hexview::FieldColumn - 1);
+    if (plain.y() < pane.viewport()->height()) {
+        QCOMPARE(shot.pixelColor(plain * shot.devicePixelRatio()),
+                 pane.palette().color(QPalette::Base));
+    }
+}
+
+void TestMainWindow::linesOfDifferentColoursStayInColumn() {
+    // A line is drawn in runs of one colour, and every run is placed on the
+    // character grid. Placed on a grid of whole pixels, when the font's
+    // advance is fractional, each run started a little off where the text
+    // before it ended — so a line of dimmed nulls and a line of data put
+    // their `|` several pixels apart. Seen in a screenshot, not by any test.
+    HexPane pane;
+    pane.setFont(QFont(QStringLiteral("monospace"), 10));
+    pane.resize(800, 120);
+    QByteArray data(16, '\x00');                  // one dimmed run
+    data.append(QByteArray(16, '\x41'));          // one plain run
+    for (int i = 0; i < 16; ++i) data.append(static_cast<char>(i % 2 ? 0x00 : 0xff));  // many
+    pane.setBytes(data);
+    pane.show();
+    const QImage shot = pane.viewport()->grab().toImage();
+    const qreal ratio = shot.devicePixelRatio();
+
+    // The darkest pixel column of the closing `|` on each line, looked for
+    // within that character's own cell — a wider search finds the stroke of
+    // an `A` beside it and measures the wrong glyph.
+    const int cell = QFontMetrics(pane.font()).horizontalAdvance(QString(10, QChar('0'))) / 10;
+    const auto bar = [&](int line) {
+        const QPoint start = pane.pointOf(line, hexview::LineLength - 1);
+        int best = -1;
+        int darkest = 256;
+        for (int x = start.x() - 1; x < start.x() - 1 + cell; ++x) {
+            int dark = 255;
+            for (int dy = -3; dy <= 3; ++dy) {
+                dark = qMin(dark, shot.pixelColor(QPoint(x, start.y() + dy) * ratio).lightness());
+            }
+            if (dark < darkest) {
+                darkest = dark;
+                best = x;
+            }
+        }
+        return best;
+    };
+    QCOMPARE(bar(1), bar(0));
+    QCOMPARE(bar(2), bar(0));
+}
+
+void TestMainWindow::aDragHeldPastTheBottomScrollsAndKeepsSelecting() {
+    QScopedPointer<HexPane> pane(dumpPane(200));
+    QCOMPARE(pane->verticalScrollBar()->value(), 0);
+    const QPoint from = at(pane.data(), 0, hexview::columnOf(0));
+    const QPoint below(from.x(), pane->viewport()->height() + 20);
+    QMouseEvent press(QEvent::MouseButtonPress, from, pane->mapToGlobal(from), Qt::LeftButton,
+                      Qt::LeftButton, Qt::NoModifier);
+    QApplication::sendEvent(pane->viewport(), &press);
+    QMouseEvent move(QEvent::MouseMove, below, pane->mapToGlobal(below), Qt::NoButton,
+                     Qt::LeftButton, Qt::NoModifier);
+    QApplication::sendEvent(pane->viewport(), &move);
+
+    // Held still past the edge, it keeps going: the view scrolls and the
+    // selection follows it down.
+    QTRY_VERIFY_WITH_TIMEOUT(pane->verticalScrollBar()->value() >= 3, 2000);
+    QMouseEvent release(QEvent::MouseButtonRelease, below, pane->mapToGlobal(below),
+                        Qt::LeftButton, Qt::NoButton, Qt::NoModifier);
+    QApplication::sendEvent(pane->viewport(), &release);
+    const int scrolled = pane->verticalScrollBar()->value();
+    const QStringList lines = pane->selectedFieldText().split(QChar('\n'));
+    QVERIFY2(lines.size() > 10, qPrintable(QString::number(lines.size())));
+
+    // And stops when released.
+    QTest::qWait(200);
+    QCOMPARE(pane->verticalScrollBar()->value(), scrolled);
+}
 
 void TestMainWindow::aDragAcrossLinesSelectsOnlyTheFieldItStartedIn() {
     QScopedPointer<HexPane> pane(dumpPane(4));
@@ -816,27 +974,33 @@ void TestMainWindow::wholeLinesCanStillBeCopiedWhenThatIsWhatIsWanted() {
 // the same bytes in the other.
 namespace {
 
+// The selection and its mirror, as (line, mark), over every line.
+QList<std::pair<int, HexPane::Mark>> highlights(HexPane *pane) {
+    QList<std::pair<int, HexPane::Mark>> out;
+    for (int line = 0; line < pane->lineCount(); ++line) {
+        for (const auto &mark : pane->marksOn(line)) {
+            if (mark.kind == HexPane::Mark::Selection || mark.kind == HexPane::Mark::Mirror) {
+                out.append({line, mark});
+            }
+        }
+    }
+    return out;
+}
+
 // Every highlighted range as (line, first column, last column), in order.
 QList<std::tuple<int, int, int>> marks(HexPane *pane) {
     QList<std::tuple<int, int, int>> out;
-    for (const auto &selection : pane->extraSelections()) {
-        const QTextBlock block = selection.cursor.block();
-        const int start = selection.cursor.selectionStart() - block.position();
-        const int end = selection.cursor.selectionEnd() - block.position();
-        out.append({block.blockNumber(), start, end - 1});
+    for (const auto &[line, mark] : highlights(pane)) {
+        out.append({line, mark.column, mark.column + mark.length - 1});
     }
     return out;
 }
 
 // Whether any highlight covers exactly that span, and with which background.
 bool markedFrom(HexPane *pane, int line, int first, int last, QColor &colour) {
-    for (const auto &selection : pane->extraSelections()) {
-        const QTextBlock block = selection.cursor.block();
-        if (block.blockNumber() != line) continue;
-        const int start = selection.cursor.selectionStart() - block.position();
-        const int end = selection.cursor.selectionEnd() - block.position() - 1;
-        if (start == first && end == last) {
-            colour = selection.format.background().color();
+    for (const auto &[at, mark] : highlights(pane)) {
+        if (at == line && mark.column == first && mark.column + mark.length - 1 == last) {
+            colour = mark.background;
             return true;
         }
     }
@@ -900,9 +1064,12 @@ void TestMainWindow::theMarkIsWeakerThanTheSelectionSoTheCopiedFieldIsObvious() 
     // text alone, so a dimmed null stays dimmed under it.
     drag(pane.data(), at(pane.data(), 0, hexview::columnOf(0)),
          at(pane.data(), 0, hexview::columnOf(3)));
-    for (const auto &selection : pane->extraSelections()) {
-        const bool isMark = selection.format.background().color() == marked;
-        QCOMPARE(selection.format.hasProperty(QTextFormat::ForegroundBrush), !isMark);
+    const auto all = highlights(pane.data());
+    QVERIFY(!all.isEmpty());
+    for (const auto &[line, mark] : all) {
+        const bool isMark = mark.kind == HexPane::Mark::Mirror;
+        QCOMPARE(mark.background == marked, isMark);
+        QCOMPARE(mark.foreground.isValid(), !isMark);
     }
 }
 
@@ -917,8 +1084,8 @@ void TestMainWindow::theMarkIsWeakerThanTheSelectionSoTheCopiedFieldIsObvious() 
 namespace {
 
 // The pane, and what one dump line measures in its font.
-QPair<QPlainTextEdit *, int> hexPaneOf(MainWindow &window) {
-    auto *hex = window.findChild<QPlainTextEdit *>(QStringLiteral("hex"));
+QPair<HexPane *, int> hexPaneOf(MainWindow &window) {
+    auto *hex = window.findChild<HexPane *>(QStringLiteral("hex"));
     if (!hex) return {nullptr, 0};
     const QFontMetrics metrics(hex->font());
     return {hex, metrics.horizontalAdvance(QString(hexview::LineLength, QChar('0')))};
@@ -998,18 +1165,10 @@ MainWindow *diskWindow(const QString &image) {
     return window;
 }
 
-// The background the highlighter painted on the line holding `offset`.
-QColor tintAt(QPlainTextEdit *hex, int offset) {
-    const QTextBlock block = hex->document()->findBlockByNumber(offset / hexview::BytesPerLine);
-    if (!block.isValid()) return {};
-    // Any range carrying a background. The wash is set across the whole line,
-    // but Qt splits it into fragments wherever the null dimming sets a
-    // foreground on top — so there is no single range spanning the line, which
-    // is what this looked for first and why it found nothing.
-    for (const auto &range : block.layout()->formats()) {
-        if (range.format.background().style() != Qt::NoBrush) {
-            return range.format.background().color();
-        }
+// The region wash painted under the line holding `offset`.
+QColor tintAt(HexPane *hex, int offset) {
+    for (const auto &mark : hex->marksOn(offset / hexview::BytesPerLine)) {
+        if (mark.kind == HexPane::Mark::Tint) return mark.background;
     }
     return {};
 }
@@ -1018,25 +1177,25 @@ QColor tintAt(QPlainTextEdit *hex, int offset) {
 
 void TestMainWindow::selectingTheDiskRowShowsTheWholeDisk() {
     QScopedPointer<MainWindow> window(diskWindow(m_image));
-    auto *hex = window->findChild<QPlainTextEdit *>(QStringLiteral("hex"));
+    auto *hex = window->findChild<HexPane *>(QStringLiteral("hex"));
     QVERIFY(hex);
 
     // Not a file: the first line is the disk's own byte 0, which is `DOS`.
-    const QString text = hex->toPlainText();
+    const QString text = hex->lineText(0);
     QVERIFY2(text.startsWith(QStringLiteral("00000000  44 4f 53")), qPrintable(text.left(40)));
 
     // And it is the whole disk, not a preview of the first block.
-    QCOMPARE(hex->document()->blockCount() - 1, 901120 / hexview::BytesPerLine);
+    QCOMPARE(hex->lineCount(), 901120 / hexview::BytesPerLine);
 }
 
 void TestMainWindow::theWholeDiskViewTintsItsRegionsAndAFileViewDoesNot() {
     QScopedPointer<MainWindow> window(diskWindow(m_image));
-    auto *hex = window->findChild<QPlainTextEdit *>(QStringLiteral("hex"));
+    auto *hex = window->findChild<HexPane *>(QStringLiteral("hex"));
     QVERIFY(hex);
 
     const QColor boot = tintAt(hex, 0);
     QVERIFY2(boot.isValid(), "the bootblock is tinted");
-    QCOMPARE(boot, HexHighlighter::regionColour(hex->palette(), ADE_REGION_BOOTBLOCK));
+    QCOMPARE(boot, HexPane::regionColour(hex->palette(), ADE_REGION_BOOTBLOCK));
 
     // A DD floppy's rootblock is block 880, and it is a different colour.
     const QColor root = tintAt(hex, 880 * 512);
@@ -1045,7 +1204,7 @@ void TestMainWindow::theWholeDiskViewTintsItsRegionsAndAFileViewDoesNot() {
 
     // Files are deliberately not tinted: they are most of a disk, and
     // colouring everything is the same as colouring nothing.
-    QVERIFY(!HexHighlighter::regionColour(hex->palette(), ADE_REGION_FILE).isValid());
+    QVERIFY(!HexPane::regionColour(hex->palette(), ADE_REGION_FILE).isValid());
 
     // Selecting a file afterwards clears the map. A leftover would colour the
     // file's bytes by where some other view's offsets fell — the worst kind of
@@ -1106,7 +1265,7 @@ namespace {
 
 // Scroll the hex pane so `offset` is the top line.
 void scrollTo(MainWindow &window, quint64 offset) {
-    auto *hex = window.findChild<QPlainTextEdit *>(QStringLiteral("hex"));
+    auto *hex = window.findChild<HexPane *>(QStringLiteral("hex"));
     hex->verticalScrollBar()->setValue(static_cast<int>(offset / hexview::BytesPerLine));
     QApplication::processEvents();
 }
@@ -1148,8 +1307,8 @@ void TestMainWindow::scrollingIntoAFileMarksItsRowWithoutSelectingIt() {
     // scrolled — the feature would undo itself on the first wheel click.
     QCOMPARE(tree->selectedItems().size(), 1);
     QCOMPARE(tree->selectedItems().first(), tree->topLevelItem(0));
-    auto *hex = window->findChild<QPlainTextEdit *>(QStringLiteral("hex"));
-    QCOMPARE(hex->document()->blockCount() - 1, 901120 / hexview::BytesPerLine);
+    auto *hex = window->findChild<HexPane *>(QStringLiteral("hex"));
+    QCOMPARE(hex->lineCount(), 901120 / hexview::BytesPerLine);
 }
 
 void TestMainWindow::scrollingOutOfAFileUnmarksIt() {
@@ -1183,7 +1342,7 @@ void TestMainWindow::aScrollQtDoesNotAnnounceIsStillFollowed() {
     tree->expandItem(tree->topLevelItem(0));
     QTreeWidgetItem *file = childNamed(tree->topLevelItem(0), QStringLiteral("data.bin"));
     QVERIFY(file);
-    auto *hex = window->findChild<QPlainTextEdit *>(QStringLiteral("hex"));
+    auto *hex = window->findChild<HexPane *>(QStringLiteral("hex"));
 
     const int line = static_cast<int>(file->data(0, tree::RoleBlock).toUInt()) * 512 /
                      hexview::BytesPerLine;
@@ -1209,7 +1368,7 @@ void TestMainWindow::theFollowStopsWhenAFileIsShown() {
     tree->setCurrentItem(file, 0, QItemSelectionModel::ClearAndSelect);
     QApplication::processEvents();
 
-    auto *hex = window->findChild<QPlainTextEdit *>(QStringLiteral("hex"));
+    auto *hex = window->findChild<HexPane *>(QStringLiteral("hex"));
     const QString before = status(*window);
     {
         const QSignalBlocker silence(hex->verticalScrollBar());
@@ -1331,10 +1490,10 @@ void TestMainWindow::clickingAContentHitGoesToItInTheWholeDiskView() {
     found->setCurrentItem(found->topLevelItem(0), 0, QItemSelectionModel::ClearAndSelect);
     QApplication::processEvents();
 
-    auto *hex = window.findChild<QPlainTextEdit *>(QStringLiteral("hex"));
+    auto *hex = window.findChild<HexPane *>(QStringLiteral("hex"));
     QVERIFY(hex);
     // The whole disk, not the file: the hit is an offset into the image.
-    QCOMPARE(hex->document()->blockCount() - 1, 901120 / hexview::BytesPerLine);
+    QCOMPARE(hex->lineCount(), 901120 / hexview::BytesPerLine);
 
     // Scrolled so the hit is on screen, with a few lines of lead — a match on
     // the very first visible line reads as the top of the view rather than as
@@ -1345,7 +1504,7 @@ void TestMainWindow::clickingAContentHitGoesToItInTheWholeDiskView() {
              qPrintable(QStringLiteral("hit on line %1, view at %2").arg(hitLine).arg(top)));
 
     // And the hit itself is highlighted, so it can be picked out of the line.
-    QVERIFY(!hex->extraSelections().isEmpty());
+    QVERIFY(hex->hasSelection());
 }
 
 // Extract everything to a folder (F-024).
@@ -1499,7 +1658,7 @@ void TestMainWindow::theMapColoursFilesAndKeepsEmptySpaceVisible() {
         // blank would leave the map empty.
         const QColor file = MapView::colourFor(palette, ADE_REGION_FILE);
         QVERIFY2(file.isValid(), label);
-        QVERIFY2(!HexHighlighter::regionColour(palette, ADE_REGION_FILE).isValid(),
+        QVERIFY2(!HexPane::regionColour(palette, ADE_REGION_FILE).isValid(),
                  "and the hex pane still leaves them alone");
 
         // Empty space must recede without disappearing. At the first values it
@@ -1543,7 +1702,7 @@ void TestMainWindow::theMapShowsTheDiskAndClickingACellGoesToIt() {
     QApplication::sendEvent(map, &press);
     QApplication::processEvents();
 
-    auto *hex = window->findChild<QPlainTextEdit *>(QStringLiteral("hex"));
+    auto *hex = window->findChild<HexPane *>(QStringLiteral("hex"));
     QVERIFY(hex);
     QCOMPARE(hex->verticalScrollBar()->value(), 0);
     QVERIFY2(status(*window).contains(QStringLiteral("bootblock")), qPrintable(status(*window)));

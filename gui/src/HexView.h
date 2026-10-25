@@ -1,19 +1,23 @@
 #pragma once
 
-// Rendering the hex pane: the dump itself, and the dimming of null bytes.
+// The hex pane: a dump of bytes, formatted and painted only where it is on
+// screen (IMP-017).
 //
-// The two live together because they share a layout. The highlighter has to
-// know which characters of a line are the hex field, and it can only know that
-// from how the dump was written — kept apart, a change to one would silently
-// misplace the other, dimming the wrong two characters with nothing to say so.
+// The layout constants live beside the pane because everything that places
+// something on a line — the null dimming, the selection, the mirror mark, the
+// mouse — has to agree about where each byte's characters are. Kept apart, a
+// change to one would silently misplace the other, dimming the wrong two
+// characters with nothing to say so.
 
+#include <QAbstractScrollArea>
+#include <QByteArray>
+#include <QColor>
 #include <QPalette>
-#include <QPlainTextEdit>
 #include <QString>
-#include <QSyntaxHighlighter>
+#include <QTimer>
+#include <QVector>
 
-class QByteArray;
-class QTextDocument;
+#include <functional>
 
 namespace hexview {
 
@@ -56,8 +60,9 @@ constexpr Zone zoneAt(int column) {
     return Zone::Ascii;
 }
 
-/// A classic hex dump: offset, sixteen bytes, then the printable characters.
-QString dump(const QByteArray &data);
+/// One dump line: the offset, up to sixteen bytes, then the printable
+/// characters.
+QString line(quint64 offset, const QByteArray &bytes);
 
 }  // namespace hexview
 
@@ -77,77 +82,25 @@ struct HexRegion {
     QString path;
 };
 
-/// Paints the hex pane: dims null bytes, and tints each region of the disk.
+/// The hex pane.
 ///
-/// Both jobs live in one class because Qt allows a document exactly one
-/// `QSyntaxHighlighter` — setting a second silently replaces the first, which
-/// would look like whichever feature was installed last simply not working.
+/// # Why it paints its own lines
 ///
-/// Carried over from the Atari Disk Engine, whose hex view paints itself and
-/// picks the colour with a hand-written light/dark test. ADE's is a
-/// `QPlainTextEdit`, so the same effect comes from a highlighter over its
-/// document — cheaper, too, since Qt only ever re-highlights the lines on
-/// screen rather than all 4,096 of a 64 KB preview.
+/// It was a `QPlainTextEdit` holding the finished dump, and an 880 KB floppy
+/// is 56,000 lines of it: selecting a disk spent 401 ms laying them out and
+/// colouring every one, for the forty on screen (IMP-017). Now the pane holds
+/// the bytes — or, for a whole disk, a way to read them — and a paint formats
+/// and colours only the lines it draws. The cost is a screenful whatever the
+/// disk, so the whole-disk view no longer stops at 4 MB.
 ///
-/// **Only the hex field.** The offset column is mostly zeros and the ASCII
-/// column can hold the characters `00` from a file that happens to contain
-/// them, so the dimming is placed by column arithmetic rather than by
-/// searching each line for the text `00`. A search would dim `00000000` at the
-/// start of every line, which is the opposite of making data stand out.
-class HexHighlighter : public QSyntaxHighlighter {
-public:
-    /// Paints `document`, taking its colours from `source`'s palette.
-    ///
-    /// The palette is read at highlight time rather than captured, so the
-    /// colours follow a theme change instead of staying the old theme's.
-    HexHighlighter(QTextDocument *document, const QPlainTextEdit *source);
-
-    /// Tint these runs of the disk. Empty for a file's own bytes, where there
-    /// is nothing to say: a file is all one region by definition.
-    ///
-    /// Must be sorted by `start` and must not overlap, which is what
-    /// `ade_layout_open` guarantees.
-    void setRegions(QVector<HexRegion> regions);
-
-    /// The tint for a region, or an invalid colour for one that is not tinted.
-    ///
-    /// **Files are deliberately not tinted.** They are most of a disk, and
-    /// colouring them colours everything, which is the same as colouring
-    /// nothing — the eye has to be able to find the four structural blocks
-    /// among the sixteen hundred that hold data. Unclaimed space gets the
-    /// faintest wash there is, because "this is not part of any file" is worth
-    /// seeing and is also the second most common answer.
-    static QColor regionColour(const QPalette &palette, int region);
-
-    /// The dim colour for a given palette.
-    ///
-    /// Blended 70% of the way from the text colour toward the background,
-    /// rather than being two constants for "light" and "dark". On a standard
-    /// light theme that gives (178,178,178) against the Atari engine's
-    /// hand-picked (180,180,185); on the dark backgrounds desktops actually
-    /// use it gives 97 to 105 against their 100. Close enough to read as the
-    /// same choice, and unlike a pair of constants it stays legible on a
-    /// palette neither of them anticipated.
-    static QColor dimColour(const QPalette &palette);
-
-protected:
-    void highlightBlock(const QString &line) override;
-
-private:
-    /// The region covering `offset`, or -1 for none.
-    int regionAt(quint64 offset) const;
-
-    const QPlainTextEdit *m_source;
-    QVector<HexRegion> m_regions;
-};
-
-/// The hex pane, whose selection stays inside one field.
+/// The scrollbar counts lines, one step per dump line, so its value *is* the
+/// top line. The window relies on that to say which file is on screen.
 ///
-/// # Why this is not a plain `QPlainTextEdit`
+/// # Selection stays inside one field
 ///
 /// A hex dump is three columns pretending to be one line of text, and ordinary
 /// text selection does not know that. Dragging down two lines in the hex field
-/// selects the end of that line's characters, the ASCII column, the next
+/// would select the end of that line's characters, the ASCII column, the next
 /// line's offset, and only then more hex — so copying a screenful of hex is
 /// impossible, which is one of the two things anybody does with a hex view.
 ///
@@ -168,17 +121,89 @@ private:
 /// equally selected, and nothing on screen would say which of them Ctrl+C is
 /// about to copy — replacing one ambiguity with a worse one.
 ///
-/// # What this does not do
+/// # Null bytes are dimmed, and regions tinted
 ///
-/// Keyboard selection with shift and the arrow keys still moves the ordinary
-/// text cursor, which is not clamped. Making that agree would mean
-/// reimplementing cursor movement over a layout the document does not
-/// describe; the drag is where the problem actually bites.
-class HexPane : public QPlainTextEdit {
+/// Carried over from the Atari Disk Engine. **Only the hex field** is dimmed:
+/// the offset column is mostly zeros and the ASCII column can hold the
+/// characters `00` from a file that happens to contain them, so the dimming
+/// is placed by column rather than by searching the line for `00`.
+class HexPane : public QAbstractScrollArea {
     Q_OBJECT
 
 public:
+    /// Reads `length` bytes at `offset` of whatever the pane is showing.
+    using Reader = std::function<QByteArray(quint64 offset, quint64 length)>;
+
+    /// The document margin, as `QPlainTextEdit` had: the space between the
+    /// frame and the first character.
+    static constexpr int Margin = 4;
+
+    /// The most a whole-disk view shows: what eight offset digits can name.
+    static constexpr quint64 MaxBytes = Q_UINT64_C(1) << 32;
+
+    /// The most bytes one copy takes. Select All on a whole hard disk is
+    /// gigabytes, and its dump as clipboard text is five times that; the view
+    /// can show it now, but nobody can paste it. Four megabytes is what the
+    /// whole-disk view used to stop at, so no copy that worked before is cut.
+    static constexpr quint64 CopyLimit = Q_UINT64_C(4) * 1024 * 1024;
+
     explicit HexPane(QWidget *parent = nullptr);
+
+    /// Show these bytes: a file's.
+    void setBytes(const QByteArray &bytes);
+    /// Show `size` bytes read through `read` as they come on screen: a whole
+    /// disk. `read` must stay valid until the pane is cleared or given
+    /// something else. Sizes past [`MaxBytes`] are cut there.
+    void setSource(quint64 size, Reader read);
+    /// Show a line of text instead of a dump: "(no readable contents)".
+    void setMessage(const QString &message);
+    /// Show nothing, and forget the selection and the regions.
+    void clear();
+
+    /// Tint these runs of the disk. Empty for a file's own bytes, where there
+    /// is nothing to say: a file is all one region by definition.
+    ///
+    /// Must be sorted by `start` and must not overlap, which is what
+    /// `ade_layout_open` guarantees.
+    void setRegions(QVector<HexRegion> regions);
+
+    /// Whether anything at all is shown, dump or message.
+    bool isEmpty() const { return lineCount() == 0; }
+    /// How many lines the pane holds.
+    int lineCount() const;
+    /// The text of line `number`, as it is drawn.
+    QString lineText(int number) const;
+
+    /// What is painted on a line beyond its plain text.
+    struct Mark {
+        enum Kind {
+            /// The region's wash, under the whole line.
+            Tint,
+            /// A null byte in the hex field.
+            Dim,
+            /// The other field's view of the selected bytes.
+            Mirror,
+            /// The selection.
+            Selection,
+        };
+        Kind kind;
+        int column;
+        int length;
+        /// Invalid for "leave it as it was".
+        QColor background;
+        /// Invalid for "leave it as it was".
+        QColor foreground;
+    };
+    /// Every mark on line `number`, in the order it is painted: a later one
+    /// wins where two overlap. What the paint draws, so a test can read it.
+    QVector<Mark> marksOn(int number) const;
+
+    /// The viewport point over character `column` of line `number`, if it is
+    /// on screen: the inverse of what a click resolves to.
+    QPoint pointOf(int number, int column) const;
+
+    /// Whether some bytes are selected.
+    bool hasSelection() const { return m_hasSelection; }
 
     /// The highlighted text, as it would reach the clipboard.
     ///
@@ -209,6 +234,26 @@ public:
     /// screen, and this says which of the sixteen it is.
     void selectBytesAt(quint64 offset);
 
+    /// The tint for a region, or an invalid colour for one that is not tinted.
+    ///
+    /// **Files are deliberately not tinted.** They are most of a disk, and
+    /// colouring them colours everything, which is the same as colouring
+    /// nothing — the eye has to be able to find the four structural blocks
+    /// among the sixteen hundred that hold data. Unclaimed space gets the
+    /// faintest wash there is, because "this is not part of any file" is worth
+    /// seeing and is also the second most common answer.
+    static QColor regionColour(const QPalette &palette, int region);
+
+    /// The dim colour for a given palette.
+    ///
+    /// Blended 70% of the way from the text colour toward the background,
+    /// rather than being two constants for "light" and "dark". On a standard
+    /// light theme that gives (178,178,178) against the Atari engine's
+    /// hand-picked (180,180,185); on the dark backgrounds desktops actually
+    /// use it gives 97 to 105 against their 100. Close enough to read as the
+    /// same choice, and unlike a pair of constants it stays legible on a
+    /// palette neither of them anticipated.
+    static QColor dimColour(const QPalette &palette);
 
     /// The colour marking the *other* field's view of the selected bytes.
     ///
@@ -219,21 +264,19 @@ public:
 
 signals:
     /// The view scrolled, by any means.
-    ///
-    /// Not `verticalScrollBar()->valueChanged`, which is what this used first
-    /// and which **misses a click in the scrollbar trough**: measured, a trough
-    /// click moved the bar from line 0 to line 37 and emitted `valueChanged`
-    /// exactly zero times. The wheel and a drag of the handle both emit it, so
-    /// the gap looks like the feature working until somebody pages down.
-    ///
-    /// `scrollContentsBy` is the virtual QAbstractScrollArea calls whenever the
-    /// contents actually move, whatever moved them, and after they have moved.
     void scrolled();
 
+    /// A copy took only the first [`CopyLimit`] bytes of a larger selection.
+    void copyCut(quint64 copied, quint64 selected);
+
 protected:
+    void paintEvent(QPaintEvent *event) override;
+    void resizeEvent(QResizeEvent *event) override;
+    void changeEvent(QEvent *event) override;
     void scrollContentsBy(int dx, int dy) override;
     void mousePressEvent(QMouseEvent *event) override;
     void mouseMoveEvent(QMouseEvent *event) override;
+    void mouseReleaseEvent(QMouseEvent *event) override;
     void mouseDoubleClickEvent(QMouseEvent *event) override;
     void keyPressEvent(QKeyEvent *event) override;
     void contextMenuEvent(QContextMenuEvent *event) override;
@@ -246,14 +289,49 @@ private:
         int index = 0;
     };
 
-    /// Where a viewport position falls, or nothing if it is past the text.
-    bool pointAt(const QPoint &pos, hexview::Zone &zone, Point &point) const;
-    /// Repaint the selection from the current anchor and cursor.
-    void refresh();
+    /// [`marksOn`] for a line whose text is already in hand, so a paint does
+    /// not read each line a second time.
+    QVector<Mark> marksFor(int number, const QString &text) const;
+    /// The bytes of lines `first` to `last` inclusive, in one read.
+    QByteArray bytesOf(int first, int last) const;
+    /// How many bytes are shown.
+    quint64 size() const;
+    /// Where a viewport position falls. With `clamp`, a point above or below
+    /// the lines is taken to the first or last; without, it is no point.
+    bool pointAt(const QPoint &pos, bool clamp, hexview::Zone &zone, Point &point) const;
+    /// The selection's two ends, in reading order.
+    std::pair<Point, Point> ordered() const;
+    /// The selection's last line, as far as one copy takes it.
+    int copyEnd(int first, int last) const;
+    /// Bytes from the start of line `first` to the end of line `last`.
+    quint64 bytesBetween(int first, int last) const;
+    /// Say so if a copy of lines `first` to `last` was cut.
+    void reportCut(int first, int last);
+    /// The region covering `offset`, or -1 for none.
+    int regionAt(quint64 offset) const;
+    /// Character width and line height in the pane's font. The width is
+    /// fractional, as the font's advance is: rounded, every run of a line
+    /// would start a little off the grid the next run is drawn on, and lines
+    /// of different colours would drift out of alignment with each other.
+    qreal charWidth() const;
+    int lineHeight() const;
+    /// Recompute the scrollbars for the content and the viewport.
+    void updateScrollBars();
+    /// Extend a drag to `pos`, scrolling if it is past the viewport.
+    void dragTo(const QPoint &pos);
+
+    QByteArray m_bytes;
+    Reader m_read;
+    quint64 m_size = 0;
+    QString m_message;
+    QVector<HexRegion> m_regions;
 
     hexview::Zone m_zone = hexview::Zone::Hex;
     Point m_anchor;
     Point m_cursor;
     bool m_selecting = false;
     bool m_hasSelection = false;
+    /// Keeps a drag that is held past the top or bottom edge scrolling.
+    QTimer m_autoScroll;
+    QPoint m_lastDrag;
 };

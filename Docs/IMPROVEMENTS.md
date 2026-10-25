@@ -11,18 +11,6 @@ Effort vocabulary: trivial | small | medium | large.
 
 ## Suggested
 
-### IMP-017 Selecting a disk lays out its whole hex dump: 400 ms a click
-**Status:** suggested
-**Effort:** medium
-
-**Where:** [gui/src/HexView.h](../gui/src/HexView.h) `HexPane`, and `MainWindow::fillVisiblePreview`.
-
-**What happens.** Measured 2026-10-23 with IMP-009 applied: selecting a disk's own row with the Hex tab in front costs **401 ms**, nearly all of it `setPlainText` laying out a 56,000-line dump of an 880 KB floppy and the region highlighter colouring every line of it. A hard disk is capped at 4 MB of dump, about 1.4 s. A file costs 5.4 ms for the same reason at a sixty-fourth of the size.
-
-**What would be better.** IMP-009's second half: a pane that formats and highlights only the lines on screen, from the bytes, as it scrolls — a `QAbstractScrollArea` painting rows on demand rather than a `QPlainTextEdit` holding a finished string. The cost becomes a screenful, whatever the disk.
-
-**Trade-offs.** The current pane is a plain text document, and a great deal relies on that: selection that stays within one field (hex or ASCII), copying exactly what is highlighted, marking the characters a hex selection spells, the scroll-follow that marks the file on screen, the region tints. Each is tested, and each would need reimplementing in the new widget — which is why this is medium rather than small, and why it was split from IMP-009 rather than done with it. It also removes the 4 MB cap, which exists only because layout is slow.
-
 ### IMP-016 Two entries with the same name in one directory are not reported
 **Status:** suggested
 **Effort:** small
@@ -82,6 +70,31 @@ The split is not random and there is a defensible rule inside it — a command t
 **Why it matters now.** [[D-018]] settles the overwrite question for the write suite, and cites this entry: the suite's rule was chosen to be coherent with the *majority* of these paths rather than with all of them, because they do not agree with each other. Whatever is decided here should be decided for all five at once.
 
 ## Applied
+
+### IMP-017 Selecting a disk lays out its whole hex dump: 400 ms a click
+**Status:** applied
+**Effort:** medium
+**Found:** 2026-10-23, measuring IMP-009.
+
+**Where:** [gui/src/HexView.h](../gui/src/HexView.h) `HexPane`, and `MainWindow::fillVisiblePreview`.
+
+**What happens.** Measured 2026-10-23 with IMP-009 applied: selecting a disk's own row with the Hex tab in front costs **401 ms**, nearly all of it `setPlainText` laying out a 56,000-line dump of an 880 KB floppy and the region highlighter colouring every line of it. A hard disk is capped at 4 MB of dump, about 1.4 s. A file costs 5.4 ms for the same reason at a sixty-fourth of the size.
+
+**What would be better.** IMP-009's second half: a pane that formats and highlights only the lines on screen, from the bytes, as it scrolls — a `QAbstractScrollArea` painting rows on demand rather than a `QPlainTextEdit` holding a finished string. The cost becomes a screenful, whatever the disk.
+
+**Trade-offs.** The current pane is a plain text document, and a great deal relies on that: selection that stays within one field (hex or ASCII), copying exactly what is highlighted, marking the characters a hex selection spells, the scroll-follow that marks the file on screen, the region tints. Each is tested, and each would need reimplementing in the new widget — which is why this is medium rather than small, and why it was split from IMP-009 rather than done with it. It also removes the 4 MB cap, which exists only because layout is slow.
+
+**Applied 2026-10-25.** `HexPane` is now a `QAbstractScrollArea` that holds the bytes, or for a whole disk a reader over the image, and paints only the lines on screen: one engine read per paint, formatted and coloured as it is drawn. The scrollbar still counts lines, so the scroll-follow is unchanged. Measured with one harness over the same 30 corpus disks and their 455 root files, before and after:
+
+| Selecting… | before | after |
+|---|---|---|
+| a disk's own row, Hex in front | 368 ms | **3.9 ms** |
+| a file | 6.6 ms | **1.4 ms** |
+
+The **4 MB cap is gone** for the hex view: a whole hard disk is shown to its last byte, up to the 4 GiB that eight offset digits can name. The text pane is still a `QPlainTextEdit`, so it keeps the cap, and now reads the disk only when its tab is shown. Everything the trade-offs listed was carried over and stays tested — field-clamped selection, copying, the mirror mark, null dimming, region tints, the scroll-follow — and a drag held past the edge keeps scrolling, which `QPlainTextEdit` had done for free. The GUI suite runs in 1.3 s instead of about 10.
+
+**Two things the new pane needed that the old one had for free.** *Alignment:* a line is drawn in runs of one colour, and placed as strings the runs drifted off the character grid by however the font rounds its advances — 2 to 4 px by the end of a line, so the `|` of a line of nulls and of a line of data did not line up. Found in a screenshot, not by a test; glyphs are now placed on their columns explicitly, and a pixel test checks the columns of differently coloured lines agree (it fails against the string drawing). *A copy limit:* Select All on a whole hard disk is gigabytes, five times that as dump text. A copy takes the first 4 MB — what the view used to stop at, so no copy that worked before is cut — and the status bar says when it has cut one.
+
 
 ### IMP-018 The Amiga hardware names have not been reviewed one by one, as the instructions were
 **Status:** applied

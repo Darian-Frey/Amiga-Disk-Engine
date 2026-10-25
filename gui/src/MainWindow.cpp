@@ -136,12 +136,12 @@ QString formatProtection(quint32 bits) {
 // Measured from the pane's own font and frame rather than guessed: the font is
 // whatever the desktop calls fixed-width, which is not the same size on two
 // machines, and a guess that works here is the bug being fixed somewhere else.
-int hexPaneWidth(const QPlainTextEdit &pane) {
+int hexPaneWidth(const HexPane &pane) {
     const QFontMetrics metrics(pane.font());
     const int text = metrics.horizontalAdvance(QString(hexview::LineLength, QChar('0')));
-    // The document's own left and right margins, the frame, and room for the
+    // The pane's own left and right margins, the frame, and room for the
     // vertical scrollbar a full disk will always need.
-    const int margins = static_cast<int>(pane.document()->documentMargin()) * 2;
+    const int margins = HexPane::Margin * 2;
     const int frame = pane.frameWidth() * 2;
     const int scrollbar = pane.style()->pixelMetric(QStyle::PM_ScrollBarExtent);
     return text + margins + frame + scrollbar + 4;
@@ -207,8 +207,6 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
 
     m_hex = new HexPane(this);
     m_hex->setObjectName(QStringLiteral("hex"));
-    m_hex->setReadOnly(true);
-    m_hex->setLineWrapMode(QPlainTextEdit::NoWrap);
     m_hex->setFont(QFontDatabase::systemFont(QFontDatabase::FixedFont));
     // Scrolling the whole disk says which file is on screen. Not by selecting
     // its row: selection is what *chose* the whole-disk view, so following the
@@ -216,6 +214,12 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
     // undo itself on the first wheel click. The row is marked instead, which
     // is a different thing said a different way.
     connect(m_hex, &HexPane::scrolled, this, [this] { markWhatIsOnScreen(); });
+    // A copy of a whole hard disk is cut rather than attempted; saying so is
+    // the difference between a limit and a clipboard that is quietly short.
+    connect(m_hex, &HexPane::copyCut, this, [this](quint64 copied, quint64 selected) {
+        statusBar()->showMessage(
+            QStringLiteral("Copied the first %1 of %2 selected bytes").arg(copied).arg(selected));
+    });
 
     // And a backstop, because Qt does not reliably say when the view moved.
     // Measured: a click in the scrollbar trough scrolled the pane from line 0
@@ -230,11 +234,6 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
     m_follow = new QTimer(this);
     m_follow->setInterval(120);
     connect(m_follow, &QTimer::timeout, this, [this] { markWhatIsOnScreen(); });
-
-    // Null bytes dimmed and disk regions tinted. Owned by the document, which
-    // outlives every dump put into it, and kept so the regions can be set as
-    // the selection changes.
-    m_paint = new HexHighlighter(m_hex->document(), m_hex);
 
     m_text = new QPlainTextEdit(this);
     m_text->setReadOnly(true);
@@ -648,6 +647,9 @@ bool MainWindow::closeAll() {
     m_tree->clear();
     m_results->clear();
     m_selected = nullptr;
+    // The pane before the images: a whole-disk view reads through a pointer
+    // to its image, and must not be left holding one that is gone.
+    m_hex->clear();
     m_images.clear();
     clearViews();
     setWindowTitle(QStringLiteral("Amiga Disk Engine"));
@@ -1570,7 +1572,7 @@ void MainWindow::showLegend(const QVector<HexRegion> &regions) {
         const QString describes =
             QString::fromUtf8(ade_region_describes(static_cast<AdeRegion>(region)))
                 .toHtmlEscaped();
-        const QColor colour = HexHighlighter::regionColour(m_hex->palette(), region);
+        const QColor colour = HexPane::regionColour(m_hex->palette(), region);
         const QString swatch =
             colour.isValid()
                 ? QStringLiteral("<span style='background:%1'>&nbsp;&nbsp;&nbsp;</span>")
@@ -1614,53 +1616,36 @@ void MainWindow::showWholeDisk(QTreeWidgetItem *item) {
         return;
     }
     const quint64 size = open->image.size();
-    // Capped, and the cap is measured rather than chosen. A dump is five
-    // characters per byte, and Qt lays out the document when it is set: 4 MB
-    // takes about 1.4 seconds, 2 MB about 0.7. Four is the number because
-    // every image in the 4,652-image corpus is smaller than that — the largest
-    // is 2.1 MB — so every floppy, extended ADF and flux capture is shown
-    // whole, and only a hard disk is cut. Which is the right place to cut: a
-    // hex dump of a hundred megabytes was never the way to read one.
-    constexpr quint64 WholeDiskBytes = 4u * 1024 * 1024;
-    const quint64 shown = qMin(size, WholeDiskBytes);
+    // The hex pane reads the disk as it is scrolled, a screenful at a time
+    // (IMP-017), so it shows the whole of it however large. The reader holds
+    // the image by pointer: `closeAll` clears the pane before the images go.
+    const auto read = [open](quint64 offset, quint64 length) {
+        const ade::Buffer buffer = open->image.readRange(offset, length);
+        return buffer ? buffer.data() : QByteArray();
+    };
 
-    const ade::Buffer buffer = open->image.readRange(0, shown);
-    if (!buffer) {
-        clearViews();
-        return;
-    }
-    const QByteArray bytes = buffer.data();
-
-    // The map goes in **before** the text, over a cleared pane. A
-    // QSyntaxHighlighter re-highlights its whole document when its inputs
-    // change, and a whole disk is 56,000 lines: setting the map afterwards
-    // made the GUI test suite take eleven seconds instead of ninety
-    // milliseconds, and left the pane briefly painted with the previous
-    // disk's regions. Cleared, then mapped, then filled — nothing is
-    // highlighted twice, and nothing is ever highlighted wrongly.
     const QVector<HexRegion> regions = open->image.regions();
     m_map->setMap(regions, open->image.size() / 512, 512);
     showMapLegend(regions);
-    m_hex->clear();
-    if (m_paint) m_paint->setRegions(regions);
+    m_hex->setSource(size, read);
+    m_hex->setRegions(regions);
     m_diskRegions = regions;
     m_diskImage = item->data(0, RoleImage).toULongLong();
     m_diskPartition = item->data(0, RolePartition).toUInt();
     m_topLine = -1;
     if (m_follow) m_follow->start();
-    // Filled when its tab is showing, not before (IMP-009): on a whole disk
-    // the hex pane costs about 380 ms and the text pane 130, and rebuilding
-    // a hidden one on every click is time spent on nothing.
+    // The text pane is filled when its tab is showing, not before (IMP-009):
+    // on a whole disk it costs about 130 ms, spent on nothing if it is hidden.
     m_text->clear();
-    m_pending = {true, true, bytes};
+    m_pending = {true, {}, open};
     fillVisiblePreview();
     showLegend(regions);
     m_extract->setEnabled(false);
 
     QString message = describe(*open);
-    if (shown < size) {
+    if (size > HexPane::MaxBytes) {
         message += QStringLiteral("  —  hex shows the first %1 of %2 bytes")
-                       .arg(shown)
+                       .arg(HexPane::MaxBytes)
                        .arg(size);
     }
     statusBar()->showMessage(message);
@@ -1734,7 +1719,6 @@ void MainWindow::showEntry(QTreeWidgetItem *item) {
     // them. It did not, and the empty-contents path below kept the previous
     // disk's colours and legend under the words "(no readable contents)".
     m_hex->clear();
-    if (m_paint) m_paint->setRegions({});
     m_diskRegions.clear();
     if (m_follow) m_follow->stop();
     markRow(0);
@@ -1749,16 +1733,17 @@ void MainWindow::showEntry(QTreeWidgetItem *item) {
         // Either unreadable or genuinely empty. Both are worth saying, and
         // neither is worth a dialog.
         m_pending = {};
-        m_hex->setPlainText(QStringLiteral("(no readable contents)"));
+        m_hex->setMessage(QStringLiteral("(no readable contents)"));
         m_text->clear();
         return;
     }
     const QByteArray head = data.left(PreviewBytes);
 
-    // Only the pane whose tab is showing is filled now; the other waits until
-    // it is brought forward (IMP-009).
+    // The hex pane paints only what is on screen, so it takes the bytes now;
+    // the text pane waits until it is brought forward (IMP-009).
+    m_hex->setBytes(head);
     m_text->clear();
-    m_pending = {true, true, head};
+    m_pending = {true, head, nullptr};
     fillVisiblePreview();
     if (data.size() > head.size()) {
         statusBar()->showMessage(
@@ -1795,8 +1780,7 @@ void MainWindow::clearViews() {
     // The map and its legend belong to whatever was being shown. Left behind,
     // they would explain colours that are no longer on screen — and worse, the
     // map would tint the next thing put in the pane by where *this* one's
-    // offsets fell.
-    if (m_paint) m_paint->setRegions({});
+    // offsets fell. Clearing the hex pane clears its regions.
     m_diskRegions.clear();
     if (m_follow) m_follow->stop();
     markRow(0);
@@ -2290,14 +2274,20 @@ void MainWindow::renderAssembly() {
 void MainWindow::fillVisiblePreview() {
     if (!m_views) return;
     QWidget *showing = m_views->currentWidget();
-    if (m_pending.hex && showing == m_hexTab) {
-        m_pending.hex = false;
-        m_hex->setPlainText(hexview::dump(m_pending.bytes));
-    }
     if (m_pending.text && showing == m_text) {
         m_pending.text = false;
+        QByteArray bytes = m_pending.bytes;
+        if (m_pending.disk) {
+            // Capped: the text pane is a `QPlainTextEdit`, which lays out its
+            // whole document when it is set — 4 MB takes over a second. Every
+            // image in the corpus is smaller; only a hard disk is cut.
+            constexpr quint64 WholeDiskText = 4u * 1024 * 1024;
+            const ade::Buffer buffer = m_pending.disk->image.readRange(
+                0, qMin(m_pending.disk->image.size(), WholeDiskText));
+            if (buffer) bytes = buffer.data();
+        }
         // Latin-1, like every other name and string off an Amiga disk.
-        m_text->setPlainText(QString::fromLatin1(m_pending.bytes));
+        m_text->setPlainText(QString::fromLatin1(bytes));
     }
-    if (!m_pending.hex && !m_pending.text) m_pending.bytes.clear();
+    if (!m_pending.text) m_pending = {};
 }
