@@ -573,7 +573,7 @@ impl<'a> Volume<'a> {
         Ok(duplicated
             .into_iter()
             .map(|(name, blocks)| Duplicate {
-                reached: self.reached_by_name(&block, &name),
+                reached: self.reached_by_name(&block, &name).map(|e| e.block),
                 name,
                 blocks,
             })
@@ -582,9 +582,28 @@ impl<'a> Volume<'a> {
 
     /// The entry AmigaDOS opens for `name` in the directory whose block is
     /// `dir_block`: hash the name, walk that slot's chain, first match.
-    fn reached_by_name(&self, dir_block: &[u8], name: &[u8]) -> Option<u32> {
+    ///
+    /// When the bootblock gave no dostype the hashing mode is unknown, and
+    /// both functions are tried, international first — as `misplaced` does,
+    /// so a guess about the mode cannot make a file unreachable.
+    fn reached_by_name(&self, dir_block: &[u8], name: &[u8]) -> Option<Entry> {
+        let modes: &[bool] = if self.dostype.is_some() {
+            if self.is_international() {
+                &[true]
+            } else {
+                &[false]
+            }
+        } else {
+            &[true, false]
+        };
+        modes
+            .iter()
+            .find_map(|&international| self.chain_match(dir_block, name, international))
+    }
+
+    fn chain_match(&self, dir_block: &[u8], name: &[u8], international: bool) -> Option<Entry> {
         let ht = self.hash_table_size();
-        let slot = crate::hash::hash_name(name, ht, self.is_international());
+        let slot = crate::hash::hash_name(name, ht, international);
         let offset = 24usize.saturating_add((slot as usize).saturating_mul(4));
         let mut next = ade_endian::u32_at(dir_block, offset).unwrap_or(0);
         let mut seen: HashSet<u32> = HashSet::new();
@@ -596,7 +615,7 @@ impl<'a> Volume<'a> {
                 return None;
             }
             if self.names_match(&entry.name, name) {
-                return Some(next);
+                return Some(entry);
             }
             next = entry.hash_chain;
         }
@@ -605,8 +624,15 @@ impl<'a> Volume<'a> {
 
     /// Resolve a slash-separated path from the volume root.
     ///
-    /// Comparison is case-insensitive and uses the volume's hashing mode, so
-    /// it matches what AmigaDOS would find.
+    /// Each name is found **the way AmigaDOS finds it** — hash it, walk that
+    /// one slot's chain, first match — so a directory holding two entries of
+    /// one name gives the one an Amiga opens (BUG-013: walking the listing and
+    /// taking the first match returned Typhoon's stale `tubes`). Only when no
+    /// lookup reaches the name — every copy filed under a wrong slot — is the
+    /// directory walked instead, so a file `ls` lists can still be read;
+    /// [`Self::lookup_traced`] says when that happened.
+    ///
+    /// Comparison is case-insensitive under the volume's own folding.
     ///
     /// The path is UTF-8 and the names on the disk are Latin-1, so each
     /// component is converted before it is compared. Comparing the UTF-8
@@ -618,8 +644,18 @@ impl<'a> Volume<'a> {
     /// # Errors
     /// [`FsError::NotFound`] or [`FsError::NotADirectory`] for a bad path.
     pub fn lookup(&self, path: &str) -> Result<Entry, FsError> {
+        self.lookup_traced(path).map(|found| found.entry)
+    }
+
+    /// [`Self::lookup`], saying which components AmigaDOS could not have
+    /// found by name and were found only by walking their directory.
+    ///
+    /// # Errors
+    /// As [`Self::lookup`].
+    pub fn lookup_traced(&self, path: &str) -> Result<Found, FsError> {
         let mut current = self.root;
         let mut last: Option<Entry> = None;
+        let mut walked = Vec::new();
         for component in path.split('/').filter(|c| !c.is_empty() && *c != ".") {
             let not_found = || FsError::NotFound {
                 name: component.to_owned(),
@@ -629,12 +665,21 @@ impl<'a> Volume<'a> {
                 .map(|c| u8::try_from(u32::from(c)))
                 .collect::<Result<_, _>>()
                 .map_err(|_| not_found())?;
+            // `list` first: it is what says a file in the middle of a path is
+            // not a directory, and its listing is the fallback.
             let listing = self.list(current)?;
-            let found = listing
-                .entries
-                .into_iter()
-                .find(|e| self.names_match(&e.name, &wanted))
-                .ok_or_else(not_found)?;
+            let block = self.read_block(current)?;
+            let found = if let Some(entry) = self.reached_by_name(&block, &wanted) {
+                entry
+            } else {
+                let entry = listing
+                    .entries
+                    .into_iter()
+                    .find(|e| self.names_match(&e.name, &wanted))
+                    .ok_or_else(not_found)?;
+                walked.push(component.to_owned());
+                entry
+            };
             current = if found.kind.is_directory() {
                 found.block
             } else {
@@ -644,7 +689,7 @@ impl<'a> Volume<'a> {
             };
             last = Some(found);
         }
-        last.map_or_else(
+        let entry = last.map_or_else(
             || {
                 self.read_block(self.root).and_then(|b| {
                     Entry::parse(&b, self.root).map_err(|e| FsError::Malformed {
@@ -654,7 +699,8 @@ impl<'a> Volume<'a> {
                 })
             },
             Ok,
-        )
+        )?;
+        Ok(Found { entry, walked })
     }
 
     /// Whether two names are equal under this volume's case folding.
@@ -1044,6 +1090,17 @@ pub struct Misplaced {
     /// Whether the volume's *other* hash function — plain on an international
     /// volume, international on a plain one — gives the slot it is in.
     pub other_mode: bool,
+}
+
+/// What a path resolved to, and how (BUG-013).
+#[derive(Debug, Clone)]
+pub struct Found {
+    /// The entry.
+    pub entry: Entry,
+    /// Components AmigaDOS could not have found by name — every copy filed
+    /// under a wrong hash slot — and that were found by walking their
+    /// directory instead. Empty for an ordinary path.
+    pub walked: Vec<String>,
 }
 
 /// Two or more entries in one directory with the same name (IMP-016).

@@ -3,8 +3,9 @@
 //! AmigaDOS cannot create them and disks carry them. Only one of a group can
 //! be opened by name; this measures how many groups there are and which one
 //! a lookup reaches. Measured 2026-10-25: 11 groups on 5 of 3,606 volumes, 8
-//! reachable by name from none, and 9 where ADE's own `lookup` picks a
-//! different entry from AmigaDOS (BUG-013), printed as it runs. The corpus
+//! reachable by name from none. Before BUG-013 was fixed, ADE's own `lookup`
+//! picked a different entry from AmigaDOS in 9 of them; it now opens what
+//! AmigaDOS opens, and finds the unreachable ones by walking, saying so. The corpus
 //! half is local only and skips without the corpus; the built cases run in CI.
 
 #![allow(
@@ -64,16 +65,22 @@ fn duplicate_names_across_the_corpus() {
                 } else {
                     format!("{dir_path}/{name}")
                 };
-                let ade = volume.lookup(&full).ok().map(|e| e.block);
-                if ade != d.reached {
-                    ade_differs += 1;
-                    eprintln!(
-                        "{}: {full:?} blocks {:?}: AmigaDOS reaches {:?}, ADE's lookup {:?}",
-                        path.file_name().unwrap().to_string_lossy(),
-                        d.blocks,
-                        d.reached,
-                        ade
-                    );
+                let found = volume.lookup_traced(&full).unwrap();
+                // BUG-013: the copy AmigaDOS opens, and found by name; or, when
+                // no lookup reaches it, still found and said to be walked.
+                if let Some(block) = d.reached {
+                    if found.entry.block != block || !found.walked.is_empty() {
+                        ade_differs += 1;
+                        eprintln!(
+                            "{}: {full:?}: AmigaDOS opens {block}, ADE found {} {:?}",
+                            path.file_name().unwrap().to_string_lossy(),
+                            found.entry.block,
+                            found.walked
+                        );
+                    }
+                } else {
+                    assert!(d.blocks.contains(&found.entry.block), "{full:?}");
+                    assert!(!found.walked.is_empty(), "{full:?} is said to be walked");
                 }
             }
         }
@@ -85,6 +92,10 @@ fn duplicate_names_across_the_corpus() {
     eprintln!(
         "{volumes} volumes: {groups} duplicate-name groups on {disks} disks, {unreachable} \
          reachable by name from none, {ade_differs} where ADE's lookup picks another"
+    );
+    assert_eq!(
+        ade_differs, 0,
+        "ADE's lookup opens what AmigaDOS opens (BUG-013)"
     );
     assert!(volumes > 3000, "the corpus mounted: {volumes}");
     // Measured 2026-10-25: 11 groups on 5 disks. A folding or grouping bug
@@ -194,6 +205,13 @@ fn copies_all_in_wrong_slots_are_reachable_from_none() {
     put_u32(&mut bytes, slot_at(right), 0).unwrap();
     put_u32(&mut bytes, slot_at((right + 7) % HT), first).unwrap();
     reseal(&mut bytes, 880);
+
+    // BUG-013: no lookup by name reaches it, so it is found by walking, and
+    // the lookup says so.
+    let image = Image::from_bytes(bytes.clone()).unwrap();
+    let volume = image.volume().unwrap();
+    let traced = volume.lookup_traced("aaa").unwrap();
+    assert_eq!(traced.walked, vec!["aaa".to_owned()]);
 
     let found = findings(bytes);
     assert_eq!(found.len(), 1, "{found:?}");

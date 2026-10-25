@@ -10,21 +10,23 @@ Severity vocabulary: low | medium | high.
 
 ## Open
 
-### BUG-013 A path lookup takes the first matching name in listing order, not the entry AmigaDOS opens
-**Severity:** medium
-**Status:** open
-**Found:** 2026-10-25, measuring IMP-016 over the corpus.
-**Where:** [src/filesystem/src/volume.rs](../src/filesystem/src/volume.rs) `Volume::lookup`, and everything that resolves a path through it: `ade extract`, `ade disasm`, `ade decode`, `--partition` paths in the C ABI.
-
-**What is wrong.** `lookup` lists the whole directory and returns the first entry whose name matches, in hash-table order. AmigaDOS hashes the name and walks **one** slot's chain. With one entry per name the two agree. With two entries of one name — which disks carry — they can disagree, and then ADE reads a different file from the one an Amiga opens.
-
-**Measured, and confirmed against ADFlib.** On `Typhoon.adf`, `tubes` exists twice: AmigaDOS's lookup reaches header 957, ADE's reaches 968, a stale header whose data blocks belong to 957. `ade extract disks/Typhoon.adf tubes` returns 19,136 bytes with three warnings; `unadf -p` — a lookup by name — returns 19,328 different bytes. Over 3,606 corpus volumes, 9 of the 11 duplicate-name groups resolve differently: Typhoon's, and 8 where AmigaDOS reaches **none** of the copies (every one in a wrong slot) and ADE still returns the first.
-
-**Correct behaviour.** Resolve a component the way AmigaDOS does — hash it, walk that chain, first match — which `Volume::duplicates` already does privately (`reached_by_name`). The open question is the second case: a name AmigaDOS cannot open at all. A forensic tool should still reach it, so the likely answer is the hashed lookup first, then the listing as a fallback, *reporting* that the file was found only by walking — and a caller wanting AmigaDOS's exact answer asking for that.
-
-**Not fixed here** because IMP-016 reports duplicates and does not change what a lookup returns (Maintenance Rule 8). `src/api/tests/duplicate_names.rs` prints every case where the two disagree.
+_None._
 
 ## Fixed
+
+### BUG-013 A path lookup took the first matching name in listing order, not the entry AmigaDOS opens
+**Severity:** medium
+**Status:** fixed
+**Found:** 2026-10-25, measuring IMP-016 over the corpus. **Fixed** 2026-10-25.
+**Where:** [src/filesystem/src/volume.rs](../src/filesystem/src/volume.rs) `Volume::lookup`, and everything that resolves a path through it: `ade extract`, `ade disasm`, `ade decode`, `ade ls <dir>`, the destination of `mkdir` and `put`, and the disk-description file `inspect` reads. (The C ABI resolves no paths; it is handed blocks.)
+
+**What was wrong.** `lookup` listed the whole directory and returned the first entry whose name matched, in hash-table order. AmigaDOS hashes the name and walks **one** slot's chain. With one entry per name the two agree. With two entries of one name — which disks carry — they can disagree, and then ADE read a different file from the one an Amiga opens. Over 3,606 corpus volumes, 9 of the 11 duplicate-name groups resolved differently: Typhoon's `tubes` (AmigaDOS opens header 957, ADE took 968), and 8 where AmigaDOS reaches none of the copies and ADE returned the first it listed.
+
+**A correction to the evidence first given.** When this was logged, `unadf -p` returning different bytes from `ade extract` on Typhoon's `tubes` was cited as confirmation. **It was not:** headers 957 and 968 share one data chain, so ADE reads identical bytes from either, and the difference from ADFlib is in how each reads that chain where it is damaged — ADE stops at a block claiming another owner and reports the file short, ADFlib reads on. The bug was real (the hash arithmetic and the corpus scan show it); that comparison did not show it. The confirmation now is a built disk whose two same-named copies hold **different** contents, where ADFlib's lookup by name and ADE's must agree (`oracle_fixtures.rs`, `a_name_held_twice_opens_the_copy_adflib_opens`).
+
+**The fix**, with the open question decided by the author: each component is resolved **the way AmigaDOS does** — hash it, walk that chain, first match — by the same code `ade check` uses to name the copy AmigaDOS opens (`reached_by_name`), so the report and the lookup cannot disagree. Only when no lookup reaches the name is the directory walked instead, so a file `ls` lists can still be read; `Volume::lookup_traced` says which components were found that way, and `extract`, `disasm` and `decode` warn on stderr: *found T_____________ by walking its directory; AmigaDOS cannot open it by name, because it is filed under the wrong hash slot.* When the bootblock gives no dostype, both hash functions are tried before walking.
+
+**Tests.** The ADFlib case above: with the old lookup ADE returns the stale copy and ADFlib the original, so it fails; with the fix both return the original. The corpus scan in `duplicate_names.rs` now asserts that ADE opens what AmigaDOS opens in every group, and finds the unreachable ones by walking, saying so; a built case checks the walked report.
 
 ### BUG-012 `create`, `convert` and single-file `extract` accept `--format=json` and ignore it
 **Severity:** low

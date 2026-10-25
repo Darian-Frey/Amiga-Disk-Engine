@@ -607,7 +607,7 @@ fn disasm(args: &Args) -> ExitCode {
                     return ExitCode::from(EXIT_NO_VOLUME);
                 }
             };
-            let bytes = match volume.lookup(inner).and_then(|e| volume.read_file(&e)) {
+            let bytes = match lookup(&volume, inner).and_then(|e| volume.read_file(&e)) {
                 Ok(d) => d.into_bytes(),
                 Err(e) => {
                     eprintln!("ade: {inner}: {e}");
@@ -667,8 +667,7 @@ fn decode(args: &Args) -> ExitCode {
             return ExitCode::from(EXIT_NO_VOLUME);
         }
     };
-    let found = volume
-        .lookup(inner)
+    let found = lookup(&volume, inner)
         .and_then(|e| volume.read_file(&e).map(|data| (e.name.clone(), data)));
     let (name, bytes) = match found {
         Ok((name, data)) => (name, data.into_bytes()),
@@ -1236,6 +1235,28 @@ fn list(
     ExitCode::from(if clean { EXIT_CLEAN } else { EXIT_FAULTS })
 }
 
+/// Resolve a path for a command that reads the file, saying on stderr when
+/// part of it was found only by walking a directory (BUG-013).
+///
+/// A name AmigaDOS cannot open — every copy filed under a wrong hash slot —
+/// is still reachable here, because a forensic tool should reach what `ls`
+/// lists; but the file is not one an Amiga would have opened by that name,
+/// and the person reading it should know.
+fn lookup(
+    volume: &Volume<'_>,
+    path: &str,
+) -> Result<ade_core::layers::filesystem::entry::Entry, ade_core::layers::filesystem::volume::FsError>
+{
+    let found = volume.lookup_traced(path)?;
+    for name in &found.walked {
+        eprintln!(
+            "ade: {path}: found {name} by walking its directory; AmigaDOS cannot open it by \
+             name, because it is filed under the wrong hash slot"
+        );
+    }
+    Ok(found.entry)
+}
+
 /// Write a file that must not exist yet (IMP-010).
 ///
 /// `create_new`, not a check and then a write: the check leaves a window in
@@ -1320,7 +1341,7 @@ fn extract(args: &Args) -> ExitCode {
             return ExitCode::from(EXIT_NO_VOLUME);
         }
     };
-    let entry = match volume.lookup(inner) {
+    let entry = match lookup(&volume, inner) {
         Ok(e) => e,
         Err(e) => {
             eprintln!("ade: {e}");

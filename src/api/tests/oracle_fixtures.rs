@@ -394,3 +394,97 @@ fn adflib_reads_our_generated_dircache() {
 
     eprintln!("ADFlib read our generated dircache on both DOS\\4 and DOS\\5");
 }
+
+/// `unadf -p`: fetch one file **by name**, which is a hashed lookup — the
+/// question a walk cannot answer.
+fn oracle_fetch(image: &std::path::Path, name: &str) -> Option<Vec<u8>> {
+    let script = format!("ulimit -v {MEM_KIB}; exec timeout {TIMEOUT_S} unadf -p \"$1\" \"$2\"");
+    let out = Command::new("sh")
+        .arg("-c")
+        .arg(&script)
+        .arg("sh")
+        .arg(image)
+        .arg(name)
+        .output()
+        .ok()?;
+    out.status.code().filter(|c| *c == 0)?;
+    Some(out.stdout)
+}
+
+#[test]
+fn a_name_held_twice_opens_the_copy_adflib_opens() {
+    // BUG-013. Two entries named `aaa` and `AAA` — one name under case
+    // folding — with different contents: the original down the chain its
+    // name hashes to, the stale copy in slot 0, earlier in listing order.
+    // Walking the listing finds the stale one first; a lookup by name finds
+    // the original. ADFlib's `-p` is a lookup by name.
+    use ade_core::edit::Session;
+    use ade_core::layers::block::Geometry;
+    use ade_core::layers::endian::put_u32;
+    use ade_core::layers::filesystem::dostype::Dostype;
+    use ade_core::layers::filesystem::format::{self, Stamp};
+    use ade_core::layers::filesystem::hash::hash_name;
+    if !have_unadf() {
+        eprintln!("skipping: unadf not installed");
+        return;
+    }
+    let when = Stamp {
+        days: 17_000,
+        mins: 1,
+        ticks: 0,
+    };
+    let blank = format::blank(
+        Geometry::DD_FLOPPY,
+        Dostype::from_raw(0x444F_5300).unwrap(),
+        "Twins",
+        when,
+    )
+    .unwrap();
+    let mut s = Session::from_bytes(blank).unwrap();
+    s.set_clock(Some(when));
+    let root = s.root();
+    s.add_file(root, b"aaa", b"the original\n").unwrap();
+    let stale = s.add_file(root, b"bbb", b"a stale copy\n").unwrap();
+    let mut bytes = s.bytes().to_vec();
+    let reseal = |bytes: &mut Vec<u8>, block: usize| {
+        let at = block * 512;
+        put_u32(bytes, at + 20, 0).unwrap();
+        let sum = ade_core::layers::block::checksum::normal_at(&bytes[at..at + 512], 20).unwrap();
+        put_u32(bytes, at + 20, sum).unwrap();
+    };
+    // Rename the stale copy `AAA`, and move it from `bbb`'s slot to slot 0.
+    let header = stale as usize * 512;
+    bytes[header + 432] = 3;
+    bytes[header + 433..header + 436].copy_from_slice(b"AAA");
+    reseal(&mut bytes, stale as usize);
+    let root_at = 880 * 512;
+    assert_ne!(
+        hash_name(b"aaa", 72, false),
+        0,
+        "slot 0 must be a wrong one"
+    );
+    put_u32(
+        &mut bytes,
+        root_at + 24 + hash_name(b"bbb", 72, false) as usize * 4,
+        0,
+    )
+    .unwrap();
+    put_u32(&mut bytes, root_at + 24, stale).unwrap();
+    reseal(&mut bytes, 880);
+
+    let path = write_temp(&bytes, "twins");
+    let adflib = oracle_fetch(&path, "aaa");
+    let image = Image::from_bytes(bytes).unwrap();
+    let volume = image.volume().unwrap();
+    let found = volume.lookup_traced("aaa").unwrap();
+    let ade = volume.read_file(&found.entry).unwrap().into_bytes();
+    let _ = fs::remove_file(&path);
+
+    assert_eq!(
+        adflib.as_deref(),
+        Some(&b"the original\n"[..]),
+        "ADFlib opens the original"
+    );
+    assert_eq!(ade, b"the original\n", "and so does ADE");
+    assert!(found.walked.is_empty(), "found by name, not by walking");
+}
