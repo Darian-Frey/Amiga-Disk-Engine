@@ -223,3 +223,53 @@ fn a_file_put_under_an_accented_name_extracts_by_that_name() {
     assert_eq!(fs::read(&out).unwrap(), b"umlaut");
     let _ = fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn extracting_onto_an_existing_file_is_refused() {
+    // IMP-010: every command that writes a file refuses one that is there,
+    // and single-file `extract` was the last that replaced it silently.
+    let dir = scratch("extract-noclobber");
+    let image = disk(&dir);
+    let host = dir.join("note.txt");
+    fs::write(&host, b"from the host\n").unwrap();
+    let with = dir.join("with.adf");
+    let (_, err, code) = run(&[
+        "put",
+        &image,
+        host.to_str().unwrap(),
+        "note.txt",
+        &format!("--output={}", with.display()),
+    ]);
+    assert_eq!(code, Some(0), "{err}");
+
+    let out = dir.join("out.txt");
+    fs::write(&out, b"do not lose me").unwrap();
+    let (_, err, code) = run(&[
+        "extract",
+        with.to_str().unwrap(),
+        "note.txt",
+        out.to_str().unwrap(),
+    ]);
+    assert_eq!(code, Some(2), "{err}");
+    assert!(err.contains("refusing to overwrite"), "{err}");
+    assert_eq!(
+        fs::read(&out).unwrap(),
+        b"do not lose me",
+        "the existing file survives"
+    );
+
+    // A new name still works, and so does stdout, where the shell decides.
+    let fresh = dir.join("fresh.txt");
+    let (_, err, code) = run(&[
+        "extract",
+        with.to_str().unwrap(),
+        "note.txt",
+        fresh.to_str().unwrap(),
+    ]);
+    assert_eq!(code, Some(0), "{err}");
+    assert_eq!(fs::read(&fresh).unwrap(), b"from the host\n");
+    let (stdout, _, code) = run(&["extract", with.to_str().unwrap(), "note.txt"]);
+    assert_eq!(code, Some(0));
+    assert_eq!(stdout, "from the host\n");
+    let _ = fs::remove_dir_all(&dir);
+}

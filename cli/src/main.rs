@@ -1236,7 +1236,41 @@ fn list(
     ExitCode::from(if clean { EXIT_CLEAN } else { EXIT_FAULTS })
 }
 
+/// Write a file that must not exist yet (IMP-010).
+///
+/// `create_new`, not a check and then a write: the check leaves a window in
+/// which something else can create the file, and the write would then
+/// replace it — the one thing every command that writes a file promises not
+/// to do. Prints the refusal itself, so every caller says it the same way.
+fn write_new(path: &Path, bytes: &[u8]) -> Result<(), ExitCode> {
+    use std::io::Write as _;
+    let file = std::fs::File::create_new(path).and_then(|mut f| {
+        f.write_all(bytes)?;
+        f.flush()
+    });
+    match file {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            eprintln!(
+                "ade: {}: already exists, refusing to overwrite",
+                path.display()
+            );
+            Err(ExitCode::from(EXIT_USAGE))
+        }
+        Err(e) => {
+            eprintln!("ade: {}: {e}", path.display());
+            // A half-written file would be trusted; it is removed.
+            let _ = std::fs::remove_file(path);
+            Err(ExitCode::from(EXIT_UNREADABLE))
+        }
+    }
+}
+
 /// Extract one file to disk, or to stdout when no destination is given.
+///
+/// Never over an existing file (IMP-010): every command that writes a file
+/// refuses one that is there, and this was the last that did not. Writing to
+/// stdout is the way to put it somewhere the shell decides.
 fn extract(args: &Args) -> ExitCode {
     let p = |n: usize| args.positional.get(n).map_or("", String::as_str);
     let path = Path::new(p(0));
@@ -1249,6 +1283,15 @@ fn extract(args: &Args) -> ExitCode {
         eprintln!(
             "ade: extract writes the file to stdout without a destination; give one for a \
              JSON report"
+        );
+        return ExitCode::from(EXIT_USAGE);
+    }
+    // Refused before anything is read, so the answer does not wait on a
+    // large file; `write_new` still guards the write itself.
+    if let Some(out) = dest.as_ref().filter(|d| d.exists()) {
+        eprintln!(
+            "ade: {}: already exists, refusing to overwrite",
+            out.display()
         );
         return ExitCode::from(EXIT_USAGE);
     }
@@ -1313,9 +1356,8 @@ fn extract(args: &Args) -> ExitCode {
     let data = data.into_bytes();
 
     if let Some(out) = dest {
-        if let Err(e) = std::fs::write(&out, &data) {
-            eprintln!("ade: {}: {e}", out.display());
-            return ExitCode::from(EXIT_UNREADABLE);
+        if let Err(code) = write_new(&out, &data) {
+            return code;
         }
         match report {
             Some(json) => {
@@ -1640,16 +1682,8 @@ fn convert(input: &Path, output: &Path, raw: bool, format: Format) -> ExitCode {
 
     // Never overwrite. A conversion that silently replaces a source image is
     // the irreversible damage D-004 is about.
-    if output.exists() {
-        eprintln!(
-            "ade: {}: already exists, refusing to overwrite",
-            output.display()
-        );
-        return ExitCode::from(EXIT_USAGE);
-    }
-    if let Err(e) = std::fs::write(output, &out_bytes) {
-        eprintln!("ade: {}: {e}", output.display());
-        return ExitCode::from(EXIT_UNREADABLE);
+    if let Err(code) = write_new(output, &out_bytes) {
+        return code;
     }
     let mut stdout = std::io::stdout().lock();
     if format == Format::Json {

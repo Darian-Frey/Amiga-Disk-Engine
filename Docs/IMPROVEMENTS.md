@@ -11,9 +11,14 @@ Effort vocabulary: trivial | small | medium | large.
 
 ## Suggested
 
+_None._
+
+## Applied
+
 ### IMP-010 Half of ADE's write paths refuse to overwrite and half do not
-**Status:** suggested
+**Status:** applied
 **Effort:** small
+**Found:** 2026-09-01.
 
 **Where:** `cli/src/main.rs` — `convert` and `extract`, against `create` and `unpack`.
 
@@ -33,7 +38,18 @@ The split is not random and there is a defensible rule inside it — a command t
 
 **Why it matters now.** [[D-018]] settles the overwrite question for the write suite, and cites this entry: the suite's rule was chosen to be coherent with the *majority* of these paths rather than with all of them, because they do not agree with each other. Whatever is decided here should be decided for all five at once.
 
-## Applied
+**Applied 2026-10-25 — every command that writes a file now refuses one that exists.** Measured again first, and the table above had gone stale:
+
+| command | writing over an existing file, 2026-10-25 |
+|---|---|
+| `create`, `convert`, `mkdir --output`, `put --output`, `consolidate --output` | **refuses** |
+| `extract --all`, `batch --convert`, `carve --all` | **skips** and reports |
+| `extract img path dest` | **overwrote, silently** |
+
+`convert` had moved to refusing with the write suite (b0fb2e1, 2026-10-12) without this entry being updated, which left single-file `extract` the only exception. Decided with the author: it **refuses** like the rest, exit 2 and *already exists, refusing to overwrite*, with **no `--force`** — it would be the first in ADE and would then be expected everywhere. To re-extract over a file, delete it first, or write to stdout (`ade extract disk.adf path > dest`), where the shell decides. The rule is now one sentence: *a command given a destination refuses one that exists; a command that generates its names skips and reports.*
+
+`extract` and `convert` now write through `File::create_new`, not a check followed by a write — the check left a window in which something else could create the file, and the write would then replace it. `extract` also refuses before reading anything, so the answer does not wait on a large file. Tested in `cli/tests/edit.rs`: the existing file survives, a new name and stdout still work, and removing either guard fails the test.
+
 
 ### IMP-011 Three JSON documents are built in the CLI, where D-015's inventory cannot see them
 **Status:** applied
