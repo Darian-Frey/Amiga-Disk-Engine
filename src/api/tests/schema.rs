@@ -680,3 +680,105 @@ fn extract_emits_exactly_these_fields() {
         ],
     );
 }
+
+// The three documents IMP-011 moved out of the CLI, where nothing inventoried
+// them: `extract --all`, `surface` and `specs`.
+
+#[test]
+fn an_unpack_emits_exactly_these_fields() {
+    let mut v = ade_fixtures::Volume::dd(1).named("Schema");
+    v.add_file("readme", b"hello");
+    v.add_dir("Tools");
+    let image = ade_core::Image::from_bytes(v.build()).unwrap();
+    let volume = image.volume().unwrap();
+    let dest = std::env::temp_dir().join(format!("ade-schema-unpack-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dest);
+    ade_core::unpack::unpack(&volume, &dest).unwrap();
+    // The second run skips everything, so `skipped` has an element to read.
+    let again = ade_core::unpack::unpack(&volume, &dest).unwrap();
+    let _ = std::fs::remove_dir_all(&dest);
+    assert!(!again.skipped.is_empty());
+    compare(
+        "unpack",
+        &paths(&again.to_json().versioned()),
+        &[
+            "schema",
+            "files",
+            "directories",
+            "bytes",
+            "skipped",
+            "skipped[].path",
+            "skipped[].reason",
+        ],
+    );
+}
+
+#[test]
+fn a_surface_emits_exactly_these_fields() {
+    use ade_core::layers::container::extended::STANDARD_TRACK_BYTES;
+    use ade_core::layers::endian::{put_u16, put_u32};
+    // A plain image wrapped as an extended ADF of 160 ordinary tracks.
+    let plain = ade_fixtures::Volume::dd(1).named("Schema").build();
+    let mut extended = vec![0u8; 12];
+    extended[..8].copy_from_slice(b"UAE-1ADF");
+    put_u16(&mut extended, 10, 160).unwrap();
+    for _ in 0..160 {
+        let at = extended.len();
+        extended.extend_from_slice(&[0u8; 12]);
+        put_u32(
+            &mut extended,
+            at + 4,
+            u32::try_from(STANDARD_TRACK_BYTES).unwrap(),
+        )
+        .unwrap();
+        put_u32(
+            &mut extended,
+            at + 8,
+            u32::try_from(STANDARD_TRACK_BYTES * 8).unwrap(),
+        )
+        .unwrap();
+    }
+    extended.extend_from_slice(&plain);
+    let assembly = ade_core::assemble::of_bytes(&extended).unwrap();
+    compare(
+        "surface",
+        &paths(&assembly.surface_json().versioned()),
+        &[
+            "schema",
+            "sectors_placed",
+            "sectors_total",
+            "tracks",
+            "tracks[].track",
+            "tracks[].cylinder",
+            "tracks[].head",
+            "tracks[].sectors",
+            "tracks[].expected",
+            "tracks[].source",
+        ],
+    );
+}
+
+#[test]
+fn a_specs_report_emits_exactly_these_fields() {
+    // A file naming a Release 2 library, so `libraries` has an element.
+    let mut v = ade_fixtures::Volume::dd(1).named("Schema");
+    v.add_file("prog", b"\0\0opens asl.library here\0");
+    let bytes = v.build();
+    let image = ade_core::Image::from_bytes(bytes.clone()).unwrap();
+    let specs = ade_core::specs::Specs::of(&image, &bytes);
+    assert!(!specs.libraries.is_empty(), "{specs:?}");
+    compare(
+        "specs",
+        &paths(&specs.to_json().versioned()),
+        &[
+            "schema",
+            "facts",
+            "facts[].what",
+            "facts[].because",
+            "libraries",
+            "unknowable",
+            "unknowable[].what",
+            "unknowable[].why",
+        ],
+    );
+}

@@ -1837,28 +1837,7 @@ fn unpack(path: &Path, dest: &Path, format: Format, partition: Option<&str>) -> 
 
     let mut out = std::io::stdout().lock();
     if format == Format::Json {
-        emit_json(
-            &mut out,
-            ade_core::json::Value::Obj(vec![
-                ("files", ade_core::json::Value::Num(done.files)),
-                ("directories", ade_core::json::Value::Num(done.directories)),
-                ("bytes", ade_core::json::Value::Num(done.bytes)),
-                (
-                    "skipped",
-                    ade_core::json::Value::Arr(
-                        done.skipped
-                            .iter()
-                            .map(|s| {
-                                ade_core::json::Value::Obj(vec![
-                                    ("path", ade_core::json::Value::str(&s.path)),
-                                    ("reason", ade_core::json::Value::str(&s.reason)),
-                                ])
-                            })
-                            .collect(),
-                    ),
-                ),
-            ]),
-        );
+        emit_json(&mut out, done.to_json());
     } else {
         let mut lines = vec![format!(
             "{} files, {} directories, {} bytes -> {}",
@@ -2026,33 +2005,7 @@ fn surface(path: &Path, format: Format) -> ExitCode {
 
     let mut out = std::io::stdout().lock();
     if format == Format::Json {
-        use ade_core::json::Value;
-        emit_json(
-            &mut out,
-            Value::Obj(vec![
-                ("sectors_placed", Value::Num(assembly.sectors_placed as u64)),
-                ("sectors_total", Value::Num(assembly.sectors_total as u64)),
-                (
-                    "tracks",
-                    Value::Arr(
-                        assembly
-                            .tracks
-                            .iter()
-                            .map(|t| {
-                                Value::Obj(vec![
-                                    ("track", Value::Num(t.index as u64)),
-                                    ("cylinder", Value::Num(t.cylinder() as u64)),
-                                    ("head", Value::Num(t.head() as u64)),
-                                    ("sectors", Value::Num(u64::from(t.sectors))),
-                                    ("expected", Value::Num(u64::from(t.expected))),
-                                    ("source", Value::str(t.source.name())),
-                                ])
-                            })
-                            .collect(),
-                    ),
-                ),
-            ]),
-        );
+        emit_json(&mut out, assembly.surface_json());
         return ExitCode::from(EXIT_CLEAN);
     }
 
@@ -2126,45 +2079,7 @@ fn specs(path: &Path, format: Format) -> ExitCode {
 
     let mut out = std::io::stdout().lock();
     if format == Format::Json {
-        use ade_core::json::Value;
-        emit_json(
-            &mut out,
-            Value::Obj(vec![
-                (
-                    "facts",
-                    Value::Arr(
-                        specs
-                            .facts
-                            .iter()
-                            .map(|f| {
-                                Value::Obj(vec![
-                                    ("what", Value::str(&f.what)),
-                                    ("because", Value::str(&f.because)),
-                                ])
-                            })
-                            .collect(),
-                    ),
-                ),
-                (
-                    "libraries",
-                    Value::Arr(specs.libraries.iter().map(Value::str).collect()),
-                ),
-                (
-                    "unknowable",
-                    Value::Arr(
-                        ade_core::specs::UNKNOWABLE
-                            .iter()
-                            .map(|(what, why)| {
-                                Value::Obj(vec![
-                                    ("what", Value::str(*what)),
-                                    ("why", Value::str(*why)),
-                                ])
-                            })
-                            .collect(),
-                    ),
-                ),
-            ]),
-        );
+        emit_json(&mut out, specs.to_json());
         return ExitCode::from(EXIT_CLEAN);
     }
 

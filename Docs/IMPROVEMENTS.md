@@ -11,18 +11,6 @@ Effort vocabulary: trivial | small | medium | large.
 
 ## Suggested
 
-### IMP-011 Three JSON documents are built in the CLI, where D-015's inventory cannot see them
-**Status:** suggested
-**Effort:** small
-
-**Where:** `cli/src/main.rs` — `unpack` (F-024), `surface` (F-029) and `specs` (F-028) assemble `json::Value` inline. Every other document is built by the API (`layout::to_json`, `find`, `scan`, `health`, `inspect`, …) and inventoried in `src/api/tests/schema.rs`.
-
-**Why it matters.** D-015's whole claim is that the JSON surface cannot change *quietly*: field names are inventoried, and altering the output fails a test that can only be silenced by editing the inventory and moving `json::SCHEMA` in the same commit. A document assembled in a front end is outside that mechanism entirely — its fields can be renamed with nothing failing. The three above were added without a schema bump, which is the visible symptom: the version says the surface did not grow, and it did.
-
-Found 2026-09-01 while adding `carve`, which was written the same way and moved into `ade_core::carve::to_json` before it shipped, with an inventory entry and a bump to 1.10. The fix for the other three is the same move, three times.
-
-**Trade-offs.** The pull is that a document with one caller looks like it belongs beside that caller, and moving it puts formatting concerns in the API crate. Against: the inventory is the only thing making F-015's stability promise real, and a mechanism with three exceptions is a mechanism people stop trusting. Moving them also changes no output, so it is verifiable by diffing the JSON before and after.
-
 ### IMP-010 Half of ADE's write paths refuse to overwrite and half do not
 **Status:** suggested
 **Effort:** small
@@ -46,6 +34,22 @@ The split is not random and there is a defensible rule inside it — a command t
 **Why it matters now.** [[D-018]] settles the overwrite question for the write suite, and cites this entry: the suite's rule was chosen to be coherent with the *majority* of these paths rather than with all of them, because they do not agree with each other. Whatever is decided here should be decided for all five at once.
 
 ## Applied
+
+### IMP-011 Three JSON documents are built in the CLI, where D-015's inventory cannot see them
+**Status:** applied
+**Effort:** small
+**Found:** 2026-09-01, adding `carve`.
+
+**Where:** `cli/src/main.rs` — `unpack` (F-024), `surface` (F-029) and `specs` (F-028) assemble `json::Value` inline. Every other document is built by the API (`layout::to_json`, `find`, `scan`, `health`, `inspect`, …) and inventoried in `src/api/tests/schema.rs`.
+
+**Why it matters.** D-015's whole claim is that the JSON surface cannot change *quietly*: field names are inventoried, and altering the output fails a test that can only be silenced by editing the inventory and moving `json::SCHEMA` in the same commit. A document assembled in a front end is outside that mechanism entirely — its fields can be renamed with nothing failing. The three above were added without a schema bump, which is the visible symptom: the version says the surface did not grow, and it did.
+
+Found 2026-09-01 while adding `carve`, which was written the same way and moved into `ade_core::carve::to_json` before it shipped, with an inventory entry and a bump to 1.10. The fix for the other three is the same move, three times.
+
+**Trade-offs.** The pull is that a document with one caller looks like it belongs beside that caller, and moving it puts formatting concerns in the API crate. Against: the inventory is the only thing making F-015's stability promise real, and a mechanism with three exceptions is a mechanism people stop trusting. Moving them also changes no output, so it is verifiable by diffing the JSON before and after.
+
+**Applied 2026-10-25.** The three documents are built by the API now — `Unpacked::to_json` (F-024), `Assembly::surface_json` (F-029) and `Specs::to_json` (F-028) — and each has its inventory test in `src/api/tests/schema.rs`, with input that fills every array so the element fields are listed too. The CLI builds no JSON of its own any more; `emit_json` is the only place it touches a `Value`. **No output changed:** `surface` on an extended ADF, `specs` on two disks and `extract --all` run twice (so the skipped list is filled) give byte-identical documents before and after, apart from the version. Renaming one field in the moved code fails its inventory test as a major change, which is the point. Schema **1.14 → 1.15**: no field moved, but the version now covers three documents it did not, which is the growth that went unrecorded when they were added.
+
 
 ### IMP-015 A root listed in its own hash table appears as an entry, and is not reported
 **Status:** applied

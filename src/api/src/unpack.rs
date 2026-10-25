@@ -63,6 +63,34 @@ pub struct Unpacked {
     pub skipped: Vec<Skipped>,
 }
 
+impl Unpacked {
+    /// The run as JSON (F-024). Built here rather than in a front end so the
+    /// inventory in `tests/schema.rs` can see it (D-015, IMP-011).
+    #[must_use]
+    pub fn to_json(&self) -> crate::json::Value {
+        use crate::json::Value;
+        Value::Obj(vec![
+            ("files", Value::Num(self.files)),
+            ("directories", Value::Num(self.directories)),
+            ("bytes", Value::Num(self.bytes)),
+            (
+                "skipped",
+                Value::Arr(
+                    self.skipped
+                        .iter()
+                        .map(|s| {
+                            Value::Obj(vec![
+                                ("path", Value::str(&s.path)),
+                                ("reason", Value::str(&s.reason)),
+                            ])
+                        })
+                        .collect(),
+                ),
+            ),
+        ])
+    }
+}
+
 /// The name to write an Amiga name under on this host.
 ///
 /// Takes a name that has **already been decoded** from Latin-1 — which is what

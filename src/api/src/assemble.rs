@@ -106,6 +106,37 @@ impl TrackSource {
 }
 
 impl Assembly {
+    /// What came off each track, as JSON (F-029). Built here rather than in
+    /// a front end so the inventory in `tests/schema.rs` can see it (D-015,
+    /// IMP-011).
+    #[must_use]
+    pub fn surface_json(&self) -> crate::json::Value {
+        use crate::json::Value;
+        let count = |n: usize| Value::Num(u64::try_from(n).unwrap_or(u64::MAX));
+        Value::Obj(vec![
+            ("sectors_placed", count(self.sectors_placed)),
+            ("sectors_total", count(self.sectors_total)),
+            (
+                "tracks",
+                Value::Arr(
+                    self.tracks
+                        .iter()
+                        .map(|t| {
+                            Value::Obj(vec![
+                                ("track", count(t.index)),
+                                ("cylinder", count(t.cylinder())),
+                                ("head", count(t.head())),
+                                ("sectors", Value::Num(u64::from(t.sectors))),
+                                ("expected", Value::Num(u64::from(t.expected))),
+                                ("source", Value::str(t.source.name())),
+                            ])
+                        })
+                        .collect(),
+                ),
+            ),
+        ])
+    }
+
     /// Whether anything was recovered at all.
     #[must_use]
     pub const fn is_empty(&self) -> bool {

@@ -90,6 +90,45 @@ pub const UNKNOWABLE: [(&str, &str); 4] = [
 ];
 
 impl Specs {
+    /// The report as JSON (F-028), the blind spots included. Built here
+    /// rather than in a front end so the inventory in `tests/schema.rs` can
+    /// see it (D-015, IMP-011).
+    #[must_use]
+    pub fn to_json(&self) -> crate::json::Value {
+        use crate::json::Value;
+        Value::Obj(vec![
+            (
+                "facts",
+                Value::Arr(
+                    self.facts
+                        .iter()
+                        .map(|f| {
+                            Value::Obj(vec![
+                                ("what", Value::str(&f.what)),
+                                ("because", Value::str(&f.because)),
+                            ])
+                        })
+                        .collect(),
+                ),
+            ),
+            (
+                "libraries",
+                Value::Arr(self.libraries.iter().map(Value::str).collect()),
+            ),
+            (
+                "unknowable",
+                Value::Arr(
+                    UNKNOWABLE
+                        .iter()
+                        .map(|(what, why)| {
+                            Value::Obj(vec![("what", Value::str(*what)), ("why", Value::str(*why))])
+                        })
+                        .collect(),
+                ),
+            ),
+        ])
+    }
+
     /// Read what `bytes` will admit to, using `image` for its structure.
     #[must_use]
     pub fn of(image: &crate::Image, bytes: &[u8]) -> Self {
