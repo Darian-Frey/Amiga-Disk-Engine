@@ -489,6 +489,83 @@ impl<'a> Volume<'a> {
         Ok(out)
     }
 
+    /// Entries in a directory that share a name under the volume's case
+    /// folding (IMP-016).
+    ///
+    /// AmigaDOS cannot create two — a name is how it finds a file — but disks
+    /// carry them, from hand edits and damage. Only one of a group can be
+    /// opened by name, and nothing in a listing says which: [`Duplicate::reached`]
+    /// does, by finding the name the way AmigaDOS does — hash it, and take
+    /// the first match down that one slot's chain.
+    ///
+    /// # Errors
+    /// As [`Self::list`].
+    pub fn duplicates(&self, dir: u32) -> Result<Vec<Duplicate>, FsError> {
+        let listing = self.list(dir)?;
+        let fold = |c: u8| {
+            if self.is_international() {
+                crate::hash::intl_toupper(c)
+            } else {
+                crate::hash::toupper(c)
+            }
+        };
+        // In first-seen order, indexed by folded name, so a large directory
+        // costs linear time. `list` already lists each block once, so an
+        // entry two merged chains reach is one entry, not a duplicate.
+        let mut groups: Vec<(Vec<u8>, Vec<u32>)> = Vec::new();
+        let mut index: std::collections::HashMap<Vec<u8>, usize> = std::collections::HashMap::new();
+        for entry in listing.entries {
+            // A root in its own hash table is IMP-015's structure, not a name.
+            if entry.kind == EntryKind::Root {
+                continue;
+            }
+            let key: Vec<u8> = entry.name.iter().map(|&c| fold(c)).collect();
+            if let Some((_, blocks)) = index.get(&key).and_then(|&i| groups.get_mut(i)) {
+                blocks.push(entry.block);
+            } else {
+                index.insert(key, groups.len());
+                groups.push((entry.name, vec![entry.block]));
+            }
+        }
+        let duplicated: Vec<(Vec<u8>, Vec<u32>)> =
+            groups.into_iter().filter(|(_, b)| b.len() > 1).collect();
+        if duplicated.is_empty() {
+            return Ok(Vec::new());
+        }
+        let block = self.read_block(dir)?;
+        Ok(duplicated
+            .into_iter()
+            .map(|(name, blocks)| Duplicate {
+                reached: self.reached_by_name(&block, &name),
+                name,
+                blocks,
+            })
+            .collect())
+    }
+
+    /// The entry AmigaDOS opens for `name` in the directory whose block is
+    /// `dir_block`: hash the name, walk that slot's chain, first match.
+    fn reached_by_name(&self, dir_block: &[u8], name: &[u8]) -> Option<u32> {
+        let ht = self.hash_table_size();
+        let slot = crate::hash::hash_name(name, ht, self.is_international());
+        let offset = 24usize.saturating_add((slot as usize).saturating_mul(4));
+        let mut next = ade_endian::u32_at(dir_block, offset).unwrap_or(0);
+        let mut seen: HashSet<u32> = HashSet::new();
+        while next != 0 && seen.insert(next) {
+            self.geometry.validate(BlockIndex(u64::from(next))).ok()?;
+            let raw = self.read_block(next).ok()?;
+            let entry = Entry::parse(&raw, next).ok()?;
+            if !entry.looks_like_an_entry() {
+                return None;
+            }
+            if self.names_match(&entry.name, name) {
+                return Some(next);
+            }
+            next = entry.hash_chain;
+        }
+        None
+    }
+
     /// Resolve a slash-separated path from the volume root.
     ///
     /// Comparison is case-insensitive and uses the volume's hashing mode, so
@@ -930,6 +1007,18 @@ pub struct Misplaced {
     /// Whether the volume's *other* hash function — plain on an international
     /// volume, international on a plain one — gives the slot it is in.
     pub other_mode: bool,
+}
+
+/// Two or more entries in one directory with the same name (IMP-016).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Duplicate {
+    /// The name, as the first of them stores it.
+    pub name: Vec<u8>,
+    /// Every entry's block, in listing order.
+    pub blocks: Vec<u32>,
+    /// The one AmigaDOS opens by name, or `None` if a lookup reaches none of
+    /// them — every one filed in a wrong slot.
+    pub reached: Option<u32>,
 }
 
 /// The result of listing a directory: what was found, and what went wrong.

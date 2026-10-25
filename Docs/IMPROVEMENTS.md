@@ -11,18 +11,6 @@ Effort vocabulary: trivial | small | medium | large.
 
 ## Suggested
 
-### IMP-016 Two entries with the same name in one directory are not reported
-**Status:** suggested
-**Effort:** small
-
-**Where:** [src/api/src/health.rs](../src/api/src/health.rs).
-
-**What is missing.** AmigaDOS cannot create two entries with one name in a directory — a name is how it finds them — but disks carry them. Found 2026-10-23 measuring IMP-012: 1869, Typhoon and Valhalla each hold a correctly filed file and a stale misplaced one of the same name (one of them 508 bytes against 536, so they differ), and TeleEpic II holds four entries named `T_____________`. Only one same-named entry can be opened by name; the rest are listed and unreachable, and nothing says which is which. IMP-012's check reports the misplaced ones; a duplicate filed in its *right* slot, behind another of the same name in the same chain, is reported by nothing.
-
-**What would be better.** For each directory, group the listing by name under the volume's case folding (`names_match`), and report each group of two or more as `duplicate-name` (warning), naming the blocks and which one a lookup by name would reach — the first in its right slot's chain.
-
-**Trade-offs.** One more pass over each listing, which the walk has already read. The value is that "which `startup-sequence` runs?" has an answer only ADE can give, and the stale one is often the interesting one.
-
 ### IMP-015 A root listed in its own hash table appears as an entry, and is not reported
 **Status:** suggested
 **Effort:** small
@@ -70,6 +58,26 @@ The split is not random and there is a defensible rule inside it — a command t
 **Why it matters now.** [[D-018]] settles the overwrite question for the write suite, and cites this entry: the suite's rule was chosen to be coherent with the *majority* of these paths rather than with all of them, because they do not agree with each other. Whatever is decided here should be decided for all five at once.
 
 ## Applied
+
+### IMP-016 Two entries with the same name in one directory are not reported
+**Status:** applied
+**Effort:** small
+**Found:** 2026-10-23, measuring IMP-012.
+
+**Where:** [src/api/src/health.rs](../src/api/src/health.rs).
+
+**What is missing.** AmigaDOS cannot create two entries with one name in a directory — a name is how it finds them — but disks carry them. Found 2026-10-23 measuring IMP-012: 1869, Typhoon and Valhalla each hold a correctly filed file and a stale misplaced one of the same name (one of them 508 bytes against 536, so they differ), and TeleEpic II holds four entries named `T_____________`. Only one same-named entry can be opened by name; the rest are listed and unreachable, and nothing says which is which. IMP-012's check reports the misplaced ones; a duplicate filed in its *right* slot, behind another of the same name in the same chain, is reported by nothing.
+
+**What would be better.** For each directory, group the listing by name under the volume's case folding (`names_match`), and report each group of two or more as `duplicate-name` (warning), naming the blocks and which one a lookup by name would reach — the first in its right slot's chain.
+
+**Trade-offs.** One more pass over each listing, which the walk has already read. The value is that "which `startup-sequence` runs?" has an answer only ADE can give, and the stale one is often the interesting one.
+
+**Applied 2026-10-25.** `ade check` reports **`duplicate-name`** (warning) for every group of two or more entries in a directory whose names match under the volume's case folding, naming the blocks and the one AmigaDOS opens — the first match down the slot the name hashes to, found the way AmigaDOS finds it, not by walking. When no copy is down that chain the finding says AmigaDOS can open none of them. Capped at 20 a disk with a summary line, like `entry-wrong-slot`. Schema **1.12 → 1.13** for the new code.
+
+**Measured over the whole corpus first:** 11 groups on 5 of 3,606 volumes — the five disks this entry named. Three are a correctly filed file beside a stale misplaced copy: Typhoon's `tubes` (AmigaDOS opens header 957, not 968), 1869's `s/Startup-sequence.bak` (743, not 713) and Valhalla and the Lord of Action's `T/Command-0-T01` (388, not 219). The other eight — TeleEpic II's seven groups of placeholder names and Xenon 2's NUL-padded name — are reached by **no** lookup: every copy sits in a wrong slot, so `entry-wrong-slot` reports each copy and `duplicate-name` says they share a name. `Volume::duplicates` does the grouping in `ade-filesystem`; `src/api/tests/duplicate_names.rs` holds the measurement as a regression check and three built cases CI runs (a pair down the right chain, a pair in wrong slots, one entry reached from two slots). Mutation-checked: a lookup that never matches fails the first.
+
+**It found a bug in ADE.** ADE's own path lookup takes the first matching name in listing order, not what AmigaDOS opens, so `ade extract disks/Typhoon.adf tubes` returns the stale copy — confirmed against ADFlib's `unadf -p`, which returns different bytes. Logged as **BUG-013**, not fixed here.
+
 
 ### IMP-017 Selecting a disk lays out its whole hex dump: 400 ms a click
 **Status:** applied

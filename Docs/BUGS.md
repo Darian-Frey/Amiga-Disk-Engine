@@ -10,7 +10,19 @@ Severity vocabulary: low | medium | high.
 
 ## Open
 
-_None._
+### BUG-013 A path lookup takes the first matching name in listing order, not the entry AmigaDOS opens
+**Severity:** medium
+**Status:** open
+**Found:** 2026-10-25, measuring IMP-016 over the corpus.
+**Where:** [src/filesystem/src/volume.rs](../src/filesystem/src/volume.rs) `Volume::lookup`, and everything that resolves a path through it: `ade extract`, `ade disasm`, `ade decode`, `--partition` paths in the C ABI.
+
+**What is wrong.** `lookup` lists the whole directory and returns the first entry whose name matches, in hash-table order. AmigaDOS hashes the name and walks **one** slot's chain. With one entry per name the two agree. With two entries of one name — which disks carry — they can disagree, and then ADE reads a different file from the one an Amiga opens.
+
+**Measured, and confirmed against ADFlib.** On `Typhoon.adf`, `tubes` exists twice: AmigaDOS's lookup reaches header 957, ADE's reaches 968, a stale header whose data blocks belong to 957. `ade extract disks/Typhoon.adf tubes` returns 19,136 bytes with three warnings; `unadf -p` — a lookup by name — returns 19,328 different bytes. Over 3,606 corpus volumes, 9 of the 11 duplicate-name groups resolve differently: Typhoon's, and 8 where AmigaDOS reaches **none** of the copies (every one in a wrong slot) and ADE still returns the first.
+
+**Correct behaviour.** Resolve a component the way AmigaDOS does — hash it, walk that chain, first match — which `Volume::duplicates` already does privately (`reached_by_name`). The open question is the second case: a name AmigaDOS cannot open at all. A forensic tool should still reach it, so the likely answer is the hashed lookup first, then the listing as a fallback, *reporting* that the file was found only by walking — and a caller wanting AmigaDOS's exact answer asking for that.
+
+**Not fixed here** because IMP-016 reports duplicates and does not change what a lookup returns (Maintenance Rule 8). `src/api/tests/duplicate_names.rs` prints every case where the two disagree.
 
 ## Fixed
 

@@ -369,6 +369,7 @@ fn scan_tree(volume: &Volume<'_>, findings: &mut Vec<Finding>) -> TreeScan {
 
     scan_dircaches(volume, &walked, &mut scan, findings);
     scan_hash_slots(volume, &walked, findings);
+    scan_duplicate_names(volume, &walked, findings);
     scan
 }
 
@@ -440,6 +441,77 @@ fn scan_hash_slots(
             Severity::Warning,
             format!(
                 "{} more entries are filed under the wrong hash slot",
+                reported.saturating_sub(MAX_SLOT_FINDINGS)
+            ),
+        ));
+    }
+}
+
+/// Directories holding two or more entries of one name (IMP-016).
+///
+/// AmigaDOS cannot create them — a name is how it finds a file — but disks
+/// carry them. Only one of a group can be opened by name, and a listing shows
+/// them all without saying which, so the finding names it: the first match
+/// down the slot the name hashes to, which is what AmigaDOS opens. Measured
+/// 2026-10-25: 11 groups on 5 of 3,606 corpus volumes, 8 of them reachable
+/// by name from none — every copy filed in a wrong slot.
+fn scan_duplicate_names(
+    volume: &Volume<'_>,
+    walked: &ade_filesystem::volume::Walk,
+    findings: &mut Vec<Finding>,
+) {
+    let directories = core::iter::once((String::new(), volume.root())).chain(
+        walked
+            .entries
+            .iter()
+            .filter(|(_, e)| e.kind == EntryKind::Directory)
+            .map(|(path, e)| (path.clone(), e.block)),
+    );
+    let mut reported = 0usize;
+    for (dir_path, dir) in directories {
+        let Ok(found) = volume.duplicates(dir) else {
+            continue;
+        };
+        for d in found {
+            reported = reported.saturating_add(1);
+            if reported > MAX_SLOT_FINDINGS {
+                continue;
+            }
+            let name: String = d.name.iter().map(|&b| char::from(b)).collect();
+            let path = if dir_path.is_empty() {
+                name
+            } else {
+                format!("{dir_path}/{name}")
+            };
+            let blocks: Vec<String> = d.blocks.iter().map(u32::to_string).collect();
+            let opened = match d.reached {
+                Some(b) => format!(
+                    "AmigaDOS opens block {b} by name, and the others appear only in a listing"
+                ),
+                None => "AmigaDOS can open none of them by name: each is filed under a wrong \
+                         hash slot"
+                    .to_owned(),
+            };
+            findings.push(
+                Finding::new(
+                    "duplicate-name",
+                    Severity::Warning,
+                    format!(
+                        "{path}: {} entries share this name (blocks {}); {opened}.",
+                        d.blocks.len(),
+                        blocks.join(", ")
+                    ),
+                )
+                .at(d.reached.or(d.blocks.first().copied()).unwrap_or(0)),
+            );
+        }
+    }
+    if reported > MAX_SLOT_FINDINGS {
+        findings.push(Finding::new(
+            "duplicate-name",
+            Severity::Warning,
+            format!(
+                "{} more names are shared by several entries",
                 reported.saturating_sub(MAX_SLOT_FINDINGS)
             ),
         ));
