@@ -2230,6 +2230,36 @@ pub unsafe extern "C" fn ade_edit_rename(
     })
 }
 
+/// Repair the bitmap and any entries filed under the wrong hash slot, as one
+/// step for undo. `out_report` receives what was done and what was left, one
+/// line each — "nothing to repair" when nothing needed it — freed with
+/// [`ade_string_free`]. With `free_orphans`, blocks the bitmap marks used that
+/// nothing reaches are freed too, as AmigaDOS's validator frees them.
+///
+/// Something left unrepaired is not a failure: it is in the report, with why.
+///
+/// # Safety
+/// `image` must be a live handle or null; `out_report` and `out_message` as
+/// `out_message` is for [`ade_edit_mkdir`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ade_edit_repair(
+    image: *mut AdeImage,
+    free_orphans: bool,
+    out_report: *mut *mut c_char,
+    out_message: *mut *mut c_char,
+) -> AdeResult {
+    let mut report = String::new();
+    let result = edit(image, std::ptr::null_mut(), out_message, |s| {
+        let done = s.repair(free_orphans)?;
+        report = done.lines().join("\n");
+        Ok(0)
+    });
+    if result == AdeResult::Ok {
+        set_message(out_report, &report);
+    }
+    result
+}
+
 /// Open a group: every edit until the matching [`ade_edit_group_end`] undoes
 /// and redoes as one step (IMP-014). Groups nest; only the outermost counts.
 /// Undo and redo close any open group.

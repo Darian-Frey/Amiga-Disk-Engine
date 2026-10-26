@@ -39,7 +39,9 @@ use std::path::{Path, PathBuf};
 
 use ade_block::Geometry;
 use ade_filesystem::edit::{self as fs_edit, EditError as FsEditError};
+use ade_filesystem::entry::EntryKind;
 use ade_filesystem::format::Stamp;
+use ade_filesystem::repair;
 use ade_filesystem::volume::FsError;
 
 use crate::health::{self, Severity};
@@ -128,6 +130,9 @@ pub struct Session {
     destination: Option<PathBuf>,
     /// Warnings and errors the current bytes already carry, by code.
     baseline: HashMap<&'static str, usize>,
+    /// Why no edit but a repair may be made, while the bitmap marks live
+    /// blocks free.
+    unsound: Option<String>,
     undo: Vec<Vec<u8>>,
     redo: Vec<Vec<u8>>,
     /// Whether there are edits no save has captured.
@@ -166,10 +171,12 @@ impl Session {
     ///
     /// # Errors
     /// [`EditError::NotEditable`] for anything but a plain ADF or an
-    /// unpartitioned hardfile holding a volume. [`EditError::Unsound`] for a
-    /// disk whose bitmap marks live blocks free: every allocation on it could
-    /// land on data, and refusing is the only safe answer until it is
-    /// repaired.
+    /// unpartitioned hardfile holding a volume.
+    ///
+    /// A disk whose bitmap marks live blocks free opens, but every edit on it
+    /// but [`Self::repair`] is refused with [`EditError::Unsound`]: any
+    /// allocation could land on data, and refusing is the only safe answer
+    /// until the bitmap is repaired.
     pub fn from_bytes(bytes: Vec<u8>) -> Result<Self, EditError> {
         let Some((_, geometry)) = crate::inspect::plain_volume_geometry(&bytes) else {
             return Err(EditError::NotEditable(
@@ -184,20 +191,12 @@ impl Session {
                 "there is no volume on this image that ADE can mount".to_owned(),
             ));
         }
-        if let Some(bitmap) = &report.bitmap
-            && bitmap.referenced_but_free > 0
-        {
-            return Err(EditError::Unsound(format!(
-                "the bitmap marks {} blocks free that files are using, so a new block could \
-                 land on live data",
-                bitmap.referenced_but_free
-            )));
-        }
         Ok(Self {
             bytes,
             geometry,
             origin: None,
             destination: None,
+            unsound: unsound(&report),
             baseline: problems(&report),
             undo: Vec::new(),
             redo: Vec::new(),
@@ -360,6 +359,95 @@ impl Session {
             .map(|_| ())
     }
 
+    /// Repair what can be put back from the volume's own structures, as one
+    /// step for undo: the bitmap, made to mark every block the tree uses and
+    /// flagged valid; and entries filed under the wrong hash slot, moved to
+    /// the one their name hashes to.
+    ///
+    /// Blocks the map marks used that nothing reaches stay used unless
+    /// `free_orphans` is set: a trackloaded game keeps its data outside any
+    /// file, and those bits are what stop AmigaDOS writing over it. The
+    /// bitmap is left alone when the tree cannot be read in full, as
+    /// AmigaDOS's own validator leaves it, since a block the walk missed
+    /// would be marked free.
+    ///
+    /// Anything that needed repair and was not repaired is listed in the
+    /// result with the reason, rather than failing the rest.
+    ///
+    /// # Errors
+    /// [`EditError::WouldDamage`] if the repaired disk is less healthy than
+    /// it was, which is a bug in ADE; [`EditError::NotEditable`] or
+    /// [`EditError::Lookup`] if the volume cannot be read. A refused repair
+    /// leaves the session as it was.
+    pub fn repair(&mut self, free_orphans: bool) -> Result<Repaired, EditError> {
+        let (report, in_use) = health::examine_in_use(self.bytes.clone());
+        let image = crate::Image::from_bytes(self.bytes.clone())
+            .map_err(|e| EditError::NotEditable(e.to_string()))?;
+        let volume = image.volume().map_err(EditError::Lookup)?;
+        let walk = volume.walk(volume.root()).map_err(EditError::Lookup)?;
+        let directories: Vec<(String, u32)> = std::iter::once((String::new(), volume.root()))
+            .chain(
+                walk.entries
+                    .iter()
+                    .filter(|(_, e)| e.kind == EntryKind::Directory)
+                    .map(|(path, e)| (path.clone(), e.block)),
+            )
+            .collect();
+        let mut next = self.bytes.clone();
+        let mut done = Repaired::default();
+
+        if let Some(bitmap) = &report.bitmap {
+            let wrong = bitmap.referenced_but_free > 0
+                || !bitmap.flagged_valid
+                || report.findings.iter().any(|f| f.code == "bitmap-checksum")
+                || (free_orphans && bitmap.orphaned > 0);
+            if wrong {
+                let outcome = match unwalked(&report, &volume, &directories) {
+                    Some(why) => Err(why),
+                    None => repair::rebuild_bitmap(&mut next, self.geometry, &in_use, free_orphans)
+                        .map_err(|e| e.to_string()),
+                };
+                match outcome {
+                    Ok(r) if !r.is_empty() => done.bitmap = Some(r),
+                    Ok(_) => {}
+                    Err(why) => done.declined.push(format!("the bitmap: {why}")),
+                }
+            }
+            if !free_orphans {
+                done.orphans_kept = bitmap.orphaned;
+            }
+        }
+
+        for (dir_path, dir) in &directories {
+            let Ok(found) = volume.misplaced(*dir) else {
+                continue;
+            };
+            for m in found {
+                let name: String = m.name.iter().map(|&b| char::from(b)).collect();
+                let path = if dir_path.is_empty() {
+                    name
+                } else {
+                    format!("{dir_path}/{name}")
+                };
+                match fs_edit::refile(&mut next, self.geometry, m.block) {
+                    Ok(()) => done.refiled.push(path),
+                    Err(e) => done
+                        .declined
+                        .push(format!("{path}, in the wrong hash slot: {e}")),
+                }
+            }
+        }
+
+        if !done.is_empty() {
+            // Orphaned blocks are allowed to appear: a bitmap block that
+            // failed its checksum hid what it marked, and the repaired one
+            // shows it. Everything else is held to the edit's standard.
+            let report = health::examine(next.clone());
+            self.keep(next, &report, &["orphaned-blocks"])?;
+        }
+        Ok(done)
+    }
+
     /// Make an empty directory in the directory at `parent`.
     ///
     /// # Errors
@@ -395,15 +483,30 @@ impl Session {
         &mut self,
         change: impl FnOnce(&mut [u8]) -> Result<u32, FsEditError>,
     ) -> Result<u32, EditError> {
+        if let Some(why) = &self.unsound {
+            return Err(EditError::Unsound(format!("{why}; repair the disk first")));
+        }
         let mut next = self.bytes.clone();
         let block = change(&mut next)?;
-
         let report = health::examine(next.clone());
-        let after = problems(&report);
+        self.keep(next, &report, &[])?;
+        Ok(block)
+    }
+
+    /// Keep `next` as the image, unless `report` finds a warning or error it
+    /// has more of than the image had — other than the codes in `allowed`.
+    fn keep(
+        &mut self,
+        next: Vec<u8>,
+        report: &health::Health,
+        allowed: &[&str],
+    ) -> Result<(), EditError> {
+        let after = problems(report);
         let mut new: Vec<String> = report
             .findings
             .iter()
             .filter(|f| f.severity >= Severity::Warning)
+            .filter(|f| !allowed.contains(&f.code))
             .filter(|f| {
                 after.get(f.code).copied().unwrap_or(0)
                     > self.baseline.get(f.code).copied().unwrap_or(0)
@@ -424,8 +527,9 @@ impl Session {
         }
         self.redo.clear();
         self.baseline = after;
+        self.unsound = unsound(report);
         self.dirty = true;
-        Ok(block)
+        Ok(())
     }
 
     fn push_undo(&mut self, bytes: Vec<u8>) {
@@ -515,7 +619,9 @@ impl Session {
     /// After moving through history: the baseline follows the bytes, and the
     /// disk counts as changed — a save may already hold a different state.
     fn settle(&mut self) {
-        self.baseline = problems(&health::examine(self.bytes.clone()));
+        let report = health::examine(self.bytes.clone());
+        self.baseline = problems(&report);
+        self.unsound = unsound(&report);
         self.dirty = true;
     }
 
@@ -637,6 +743,146 @@ fn problems(report: &health::Health) -> HashMap<&'static str, usize> {
         *n = n.saturating_add(1);
     }
     out
+}
+
+/// What [`Session::repair`] did, and what it left.
+#[derive(Debug, Clone, Default)]
+pub struct Repaired {
+    /// What changed in the bitmap, if it was repaired.
+    pub bitmap: Option<repair::BitmapRepair>,
+    /// Entries moved to the hash slot their name hashes to, by path.
+    pub refiled: Vec<String>,
+    /// What needed repair and was left as it was, each with the reason.
+    pub declined: Vec<String>,
+    /// Blocks marked used that nothing reaches, left marked used.
+    pub orphans_kept: usize,
+}
+
+impl Repaired {
+    /// Whether nothing was changed.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.bitmap.is_none() && self.refiled.is_empty()
+    }
+
+    /// What was done and what was not, one line each, for a person.
+    #[must_use]
+    pub fn lines(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        if let Some(b) = &self.bitmap {
+            if !b.now_used.is_empty() {
+                out.push(format!(
+                    "marked {} in use that the bitmap had free: {}",
+                    blocks(b.now_used.len()),
+                    list(&b.now_used)
+                ));
+            }
+            if !b.now_free.is_empty() {
+                out.push(format!(
+                    "freed {} nothing reaches: {}",
+                    blocks(b.now_free.len()),
+                    list(&b.now_free)
+                ));
+            }
+            if !b.rewritten.is_empty() {
+                out.push(format!("rewrote bitmap {}", list_named(&b.rewritten)));
+            }
+            if b.flag_set {
+                out.push("set the rootblock's bitmap-valid flag".to_owned());
+            }
+        }
+        for path in &self.refiled {
+            out.push(format!(
+                "refiled {path} under the hash slot its name hashes to"
+            ));
+        }
+        if self.is_empty() {
+            out.push(if self.declined.is_empty() {
+                "nothing to repair".to_owned()
+            } else {
+                "nothing repaired".to_owned()
+            });
+        }
+        for why in &self.declined {
+            out.push(format!("not repaired — {why}"));
+        }
+        out
+    }
+}
+
+fn blocks(n: usize) -> String {
+    if n == 1 {
+        "1 block".to_owned()
+    } else {
+        format!("{n} blocks")
+    }
+}
+
+/// Up to six block numbers, and how many more.
+fn list(blocks: &[u32]) -> String {
+    let shown: Vec<String> = blocks.iter().take(6).map(u32::to_string).collect();
+    match blocks.len().saturating_sub(6) {
+        0 => shown.join(", "),
+        more => format!("{}, and {more} more", shown.join(", ")),
+    }
+}
+
+fn list_named(blocks: &[u32]) -> String {
+    if blocks.len() == 1 {
+        format!("block {}", list(blocks))
+    } else {
+        format!("blocks {}", list(blocks))
+    }
+}
+
+/// Why the walk cannot be trusted to have found every block in use, if it
+/// cannot.
+fn unwalked(
+    report: &health::Health,
+    volume: &ade_filesystem::volume::Volume<'_>,
+    directories: &[(String, u32)],
+) -> Option<String> {
+    const LOST: [&str; 5] = [
+        "tree-unreadable",
+        "walk-capped",
+        "file-unreadable",
+        "file-exceeds-volume",
+        "dircache-chain-broken",
+    ];
+    if let Some(f) = report.findings.iter().find(|f| LOST.contains(&f.code)) {
+        return Some(format!(
+            "the tree cannot be read in full ({}), so a block in use could be marked free",
+            f.message
+        ));
+    }
+    for (path, dir) in directories {
+        let damaged = volume
+            .list(*dir)
+            .map_or(true, |listing| !listing.is_clean());
+        if damaged {
+            let what = if path.is_empty() {
+                "the root directory"
+            } else {
+                path.as_str()
+            };
+            return Some(format!(
+                "{what} cannot be listed in full, so a block in use could be marked free"
+            ));
+        }
+    }
+    None
+}
+
+/// Why a disk in this condition may not be edited, if it may not.
+fn unsound(report: &health::Health) -> Option<String> {
+    let bitmap = report.bitmap.as_ref()?;
+    (bitmap.referenced_but_free > 0).then(|| {
+        format!(
+            "the bitmap marks {} blocks free that files are using, so a new block could land \
+             on live data",
+            bitmap.referenced_but_free
+        )
+    })
 }
 
 /// Whether two paths name the same file, including through a link.

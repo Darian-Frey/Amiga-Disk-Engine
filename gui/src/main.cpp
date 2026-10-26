@@ -22,6 +22,10 @@ int main(int argc, char *argv[]) {
                          QMessageBox::warning(&window, QStringLiteral("Amiga Disk Engine"),
                                               message);
                      });
+    QObject::connect(&window, &MainWindow::reported, &window,
+                     [&window](const QString &title, const QString &message) {
+                         QMessageBox::information(&window, title, message);
+                     });
     window.show();
 
     // Images named on the command line open straight away, which makes the

@@ -217,6 +217,18 @@ pub fn examine(bytes: Vec<u8>) -> Health {
 /// Never: an unreadable image is a finding, not a failure.
 #[must_use]
 pub fn examine_partition(bytes: Vec<u8>, partition: Option<&str>) -> Health {
+    examine_into(bytes, partition, &mut HashSet::new())
+}
+
+/// [`examine`], and every block the directory tree reaches — the set the
+/// bitmap is checked against, which a bitmap repair writes back.
+pub(crate) fn examine_in_use(bytes: Vec<u8>) -> (Health, HashSet<u32>) {
+    let mut in_use = HashSet::new();
+    let health = examine_into(bytes, None, &mut in_use);
+    (health, in_use)
+}
+
+fn examine_into(bytes: Vec<u8>, partition: Option<&str>, in_use: &mut HashSet<u32>) -> Health {
     // The inspection unwraps an ADZ for itself; everything below reads blocks
     // directly, so it needs the same bytes the inspection saw. Passing the
     // still-compressed ones reported a truncated image on a sound disk.
@@ -291,6 +303,7 @@ pub fn examine_partition(bytes: Vec<u8>, partition: Option<&str>) -> Health {
         _ => &image,
     };
     let bitmap = cross_check_bitmap(&volume, source, &scan.referenced, &mut findings);
+    in_use.clone_from(&scan.referenced);
 
     // Worst first, so the first line a reader sees is the one that matters.
     findings.sort_by_key(|f| core::cmp::Reverse(f.severity));

@@ -568,9 +568,28 @@ A new directory or file changes more blocks than the one it occupies. For one en
 
 **The dircache is laid out again, not patched.** The parent's existing records are kept byte for byte (they are AmigaDOS's description, not ADE's), the new record is appended, and the whole is packed into the existing chain's blocks in order, taking a new block only when one fills. A record never spans two blocks. A new directory gets no cache block of its own: an empty directory needs none, which ADFlib accepts, as it does on a blank volume.
 
-**What makes an edit refuse.** No dostype in the bootblock (how names hash is unknown), LNFS (D-013), a bitmap flagged invalid or failing its checksum or not covering the volume, a parent whose listing or cache is damaged, and — checked by the layer above — a disk on which the bitmap already marks referenced blocks free. Over the corpus, of 4,652 images: 3,023 edited, 1,052 not plain images, 288 full, 255 bitmap flagged invalid, 15 hiding live blocks, 10 without a usable dostype, 9 with a damaged directory.
+**What makes an edit refuse.** No dostype in the bootblock (how names hash is unknown), LNFS (D-013), a bitmap flagged invalid or failing its checksum or not covering the volume, a parent whose listing or cache is damaged, and — checked by the layer above — a disk on which the bitmap already marks referenced blocks free, which opens but takes no edit until `ade repair` has put the map right (§Repairing a volume, which is also the answer to the flagged-invalid case). Over the corpus, of 4,652 images: 3,023 edited, 1,052 not plain images, 288 full, 255 bitmap flagged invalid, 15 hiding live blocks, 10 without a usable dostype, 9 with a damaged directory.
 
 **The check that matters most cannot be made by walking.** An entry in the wrong hash slot is still listed by every reader that visits every slot — ADE, `ade check`, `unadf -r` — and found by none that looks a name up. Only accented names hash differently between the international and plain functions (C-006), so a test with ASCII names cannot tell them apart either. ADE's writer is tested by reading the slot directly and by asking ADFlib for files by name; IMP-012 records that `ade check` should do the first of those for every disk.
+
+### Repairing a volume
+
+*What `ade repair` changes (F-034), and what it will not. Measured 2026-10-26.*
+
+**The bitmap is written from the health report's set of blocks in use**: every header, every block a file's tables name, every dircache block, and the rootblock and the bitmap's own blocks. Only the bits for blocks inside the volume are set; the bits past its end map nothing and are left as found, because writers disagree about them — ADE's formatter clears them, `Bitmap::rebuild` sets them. The block is resealed (checksum at offset 0, BUG-004) and, if `bm_flag` was clear, the rootblock gets -1 there and is resealed.
+
+**Orphans stay allocated by default.** A bit marking a block used that nothing reaches is kept: on a trackloaded disk it is what protects data no file describes. AmigaDOS's validator frees them when it revalidates a disk; `--free-orphans` does the same.
+
+**When the bitmap is left alone**, as the validator leaves it — it fails with *Disk structure corrupt* rather than guess:
+
+- a tree that cannot be read in full: `tree-unreadable`, `walk-capped`, `file-unreadable`, `file-exceeds-volume`, `dircache-chain-broken`, or any directory whose listing carries faults (BUG-016: the report does not yet say so itself). A block the walk missed would be marked free.
+- a bitmap pointer outside the volume, on the rootblock, named twice, or naming a block the tree uses.
+- a bitmap that does not cover the volume, or continues in a `bm_ext` chain, which ADE does not write.
+- a clear flag on a rootblock that fails its checksum: setting the flag reseals the block.
+
+**A misfiled entry** (§Writing into a volume, last paragraph) is taken out of whichever chain holds it and put into the chain its name hashes to, in block order. Nothing else moves: no datestamp, no cache record, since the cache lists entries, not slots. It is left where it is when another entry in the directory has the same name — refiling would change which one AmigaDOS opens — or when a block the move reseals already fails its checksum.
+
+**Corpus, 2026-10-26:** of 4,653 images, 3,600 open for editing; 270 needed a repair and took it, with no new warning or error — 259 flags set, 12 maps given back live blocks (Future Wars disk 1: 1,628 of them), 3 bitmap checksums resealed, 1 entry refiled. 9 had something declined. 261 of the 270 then took a file filling their free space, and every file ADE and ADFlib had read in full read the same.
 
 ## Executables and 68000 code
 

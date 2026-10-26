@@ -19,5 +19,6 @@ pub mod dostype;
 pub mod entry;
 pub mod hash;
 pub mod rdb;
+pub mod repair;
 pub mod rootblock;
 pub mod volume;

@@ -130,6 +130,8 @@ pub enum EditError {
     /// The parent directory is damaged, and writing into it would extend the
     /// damage.
     Damaged(String),
+    /// A repair was asked for that the volume does not need, and why.
+    NotNeeded(String),
     /// Reading the volume failed.
     Fs(FsError),
 }
@@ -140,6 +142,7 @@ impl core::fmt::Display for EditError {
             Self::Unsupported(why)
             | Self::BitmapUntrusted(why)
             | Self::Damaged(why)
+            | Self::NotNeeded(why)
             | Self::NotRemovable(why) => f.write_str(why),
             Self::NotADirectory { block } => {
                 write!(f, "block {block} is not a directory ADE can write into")
@@ -447,6 +450,74 @@ pub fn rename(
     Ok(())
 }
 
+/// Move the entry at `block` from a hash slot its name does not hash to
+/// (IMP-012) into the one it does, so AmigaDOS can open it by name.
+///
+/// Only the hash chains change. The entry keeps its name and its datestamp,
+/// the directory keeps its own, and a directory cache is left alone: it
+/// records entries, not slots, and the entry was in it already.
+///
+/// # Errors
+/// [`EditError::NotNeeded`] when the entry is where its name hashes to;
+/// [`EditError::Damaged`] when another entry in the directory has the same
+/// name — refiling would change which of the two AmigaDOS opens, which is a
+/// choice for whoever owns the disk — or when a block the move would reseal
+/// already fails its checksum, since resealing it would hide that. Otherwise
+/// as [`rename`]. The image is unchanged whenever one is returned.
+pub fn refile(image: &mut [u8], geometry: Geometry, block: u32) -> Result<(), EditError> {
+    let writes = {
+        let source = Slice { image, geometry };
+        let (entry, parent) = removable_for_rename(&source, block)?;
+        // No block is taken or freed, so the bitmap is not consulted — and a
+        // disk whose bitmap needs repair can still have its entries refiled.
+        let mut plan = Plan::mount(&source, parent)?;
+        if !plan
+            .volume
+            .misplaced(parent)?
+            .iter()
+            .any(|m| m.block == block)
+        {
+            return Err(EditError::NotNeeded(format!(
+                "{} is already where its name hashes to",
+                entry.name_lossy()
+            )));
+        }
+        if plan
+            .volume
+            .list(parent)?
+            .entries
+            .iter()
+            .any(|e| e.block != block && plan.volume.names_match(&e.name, &entry.name))
+        {
+            return Err(EditError::Damaged(format!(
+                "another entry is also called {:?}; refiling this one would change which of \
+                 them AmigaDOS opens, so rename or delete one first",
+                entry.name_lossy()
+            )));
+        }
+        plan.unlink(block)?;
+        plan.insert(block, &entry.name)?;
+        let writes = plan.finish();
+        for &b in writes.keys() {
+            if !checksum::normal_valid(&plan_read(&source, b)?) {
+                return Err(EditError::Damaged(format!(
+                    "block {b} already fails its checksum; refiling would reseal it and hide that"
+                )));
+            }
+        }
+        writes
+    };
+    apply(image, geometry, &writes);
+    Ok(())
+}
+
+/// One block of `source`, as it stands.
+fn plan_read(source: &dyn BlockSource, block: u32) -> Result<Vec<u8>, EditError> {
+    let mut raw = vec![0u8; source.geometry().block_size() as usize];
+    ade_block::read_at(source, BlockIndex(u64::from(block)), &mut raw).map_err(FsError::Block)?;
+    Ok(raw)
+}
+
 /// The entry at `block` and its parent, if it is one ADE will delete.
 fn removable(
     source: &dyn BlockSource,
@@ -496,9 +567,9 @@ fn removable_for_rename(
 }
 
 /// A volume's bytes, read as blocks.
-struct Slice<'a> {
-    image: &'a [u8],
-    geometry: Geometry,
+pub(crate) struct Slice<'a> {
+    pub(crate) image: &'a [u8],
+    pub(crate) geometry: Geometry,
 }
 
 impl BlockSource for Slice<'_> {
@@ -568,6 +639,31 @@ impl<'a> Plan<'a> {
     /// Mount, and check what every edit of `parent` depends on: the volume,
     /// the parent, its listing and the bitmap.
     fn open(source: &'a dyn BlockSource, parent: u32) -> Result<Self, EditError> {
+        let plan = Self::mount(source, parent)?;
+        let bitmap = &plan.bitmap;
+        if !bitmap.flagged_valid {
+            return Err(EditError::BitmapUntrusted(
+                "the rootblock flags its bitmap as invalid, so it cannot say which blocks are \
+                 free"
+                    .to_owned(),
+            ));
+        }
+        if let Some(bad) = bitmap.bad_checksums.first() {
+            return Err(EditError::BitmapUntrusted(format!(
+                "bitmap block {bad} fails its checksum"
+            )));
+        }
+        if bitmap.incomplete || bitmap.blocks.is_empty() {
+            return Err(EditError::BitmapUntrusted(
+                "the bitmap does not cover the whole volume".to_owned(),
+            ));
+        }
+        Ok(plan)
+    }
+
+    /// As [`Self::open`], without trusting the bitmap: for an edit that
+    /// neither takes nor frees a block, and so never consults it.
+    fn mount(source: &'a dyn BlockSource, parent: u32) -> Result<Self, EditError> {
         let volume = Volume::mount(source)?;
         let Some(dostype) = volume.dostype() else {
             return Err(EditError::Unsupported(
@@ -603,24 +699,6 @@ impl<'a> Plan<'a> {
         }
 
         let bitmap = Bitmap::read(source, &geometry, volume.rootblock())?;
-        if !bitmap.flagged_valid {
-            return Err(EditError::BitmapUntrusted(
-                "the rootblock flags its bitmap as invalid, so it cannot say which blocks are \
-                 free"
-                    .to_owned(),
-            ));
-        }
-        if let Some(bad) = bitmap.bad_checksums.first() {
-            return Err(EditError::BitmapUntrusted(format!(
-                "bitmap block {bad} fails its checksum"
-            )));
-        }
-        if bitmap.incomplete || bitmap.blocks.is_empty() {
-            return Err(EditError::BitmapUntrusted(
-                "the bitmap does not cover the whole volume".to_owned(),
-            ));
-        }
-
         let ht = volume.hash_table_size() as usize;
         let cursor = u64::from(volume.root()).saturating_add(1);
         Ok(Self {
@@ -1097,7 +1175,7 @@ fn encode_record(r: &Record) -> Vec<u8> {
 }
 
 /// Copy a finished plan into the image.
-fn apply(image: &mut [u8], geometry: Geometry, writes: &BTreeMap<u32, Vec<u8>>) {
+pub(crate) fn apply(image: &mut [u8], geometry: Geometry, writes: &BTreeMap<u32, Vec<u8>>) {
     let bsize = geometry.block_size() as usize;
     for (&block, raw) in writes {
         let Some(at) = (block as usize).checked_mul(bsize) else {
@@ -1115,7 +1193,11 @@ const fn from_end(raw: &[u8], back: usize) -> usize {
 }
 
 /// Write a long `back` bytes from the end of the block.
-fn put_back(raw: &mut [u8], back: usize, value: u32) -> Result<(), ade_endian::OutOfBounds> {
+pub(crate) fn put_back(
+    raw: &mut [u8],
+    back: usize,
+    value: u32,
+) -> Result<(), ade_endian::OutOfBounds> {
     let at = from_end(raw, back);
     put_u32(raw, at, value)
 }
@@ -1142,7 +1224,7 @@ fn put_name(raw: &mut [u8], name: &[u8]) {
 }
 
 /// Recompute the normal checksum at offset 20.
-fn seal(raw: &mut [u8]) {
+pub(crate) fn seal(raw: &mut [u8]) {
     let _ = put_u32(raw, 0x14, 0);
     if let Some(sum) = checksum::normal_at(raw, 0x14) {
         let _ = put_u32(raw, 0x14, sum);

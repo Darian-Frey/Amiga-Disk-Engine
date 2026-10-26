@@ -569,6 +569,16 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
         "Works on disks that do not mount, which are the ones worth carving."));
     connect(m_carve, &QAction::triggered, this, &MainWindow::recoverLostFiles);
 
+    // An edit, so it goes on the undo stack and waits for a save like any
+    // other — but an edit of the disk as a whole, which is why it is here.
+    m_repair = disk->addAction(QStringLiteral("Re&pair disk"));
+    m_repair->setEnabled(false);
+    m_repair->setToolTip(QStringLiteral(
+        "Mark every block a file uses as used, seal the bitmap and set its valid flag; "
+        "move entries filed under the wrong hash slot to the right one.\n"
+        "Blocks nothing reaches stay marked used: a game may keep data there."));
+    connect(m_repair, &QAction::triggered, this, &MainWindow::repairSelected);
+
     // Help. The manual will join About here; nothing stands in for it in the
     // meantime, because a menu item that is greyed out or opens an apology is
     // a promise the window has already broken.
@@ -2041,6 +2051,25 @@ bool MainWindow::renameItem(QTreeWidgetItem *item, const QString &name) {
     return true;
 }
 
+QString MainWindow::repairDisk(QTreeWidgetItem *item) {
+    Open *open = item ? imageFor(item) : editTarget();
+    if (!open) return {};
+    const ade::EditResult r = open->image.repair(false);
+    m_lastEdited = open->index;
+    if (!r.ok()) {
+        emit errorOccurred(QStringLiteral("Could not repair %1: %2").arg(open->name, r.message));
+        return {};
+    }
+    reloadImage(*open);
+    if (open->image.isModified()) {
+        statusBar()->showMessage(QStringLiteral("Repaired %1 — not saved yet").arg(open->name));
+    }
+    emit reported(QStringLiteral("Repair — %1").arg(open->name), r.message);
+    return r.message;
+}
+
+void MainWindow::repairSelected() { repairDisk(m_selected); }
+
 void MainWindow::deleteSelected() { deleteItem(m_selected); }
 
 void MainWindow::renameSelected() {
@@ -2241,6 +2270,7 @@ void MainWindow::updateEditActions() {
                        (!m_selected || m_selected->data(0, RolePartition).toUInt() ==
                                            ADE_WHOLE_IMAGE);
     if (m_newFolder) m_newFolder->setEnabled(plain);
+    if (m_repair) m_repair->setEnabled(plain);
     const bool entry = plain && isEditableEntry(m_selected, m_tree);
     if (m_delete) m_delete->setEnabled(entry);
     if (m_rename) m_rename->setEnabled(entry);

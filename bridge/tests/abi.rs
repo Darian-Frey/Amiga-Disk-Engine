@@ -1989,3 +1989,54 @@ fn save_over_keeps_the_original_once_and_writes_the_edit() {
     }
     let _ = std::fs::remove_file(&path);
 }
+
+#[test]
+fn a_disk_is_repaired_through_the_abi() {
+    // A cleared bitmap flag: the commonest damage in the corpus.
+    let mut disk = blank_disk();
+    let root = 880 * 512;
+    put_u32(&mut disk, root + 512 - 200, 0).unwrap();
+    put_u32(&mut disk, root + 20, 0).unwrap();
+    let sum = ade_core::layers::block::checksum::normal_at(&disk[root..root + 512], 20).unwrap();
+    put_u32(&mut disk, root + 20, sum).unwrap();
+    let (path, c_path) = fixture("repair", &disk);
+    // SAFETY: a valid path; every handle and string is freed once.
+    unsafe {
+        let image = ade::ade_image_open(c_path.as_ptr(), std::ptr::null(), std::ptr::null_mut());
+        let report = |image| {
+            let mut text: *mut std::ffi::c_char = std::ptr::null_mut();
+            assert_eq!(
+                ade::ade_edit_repair(image, false, &raw mut text, std::ptr::null_mut()),
+                AdeResult::Ok
+            );
+            assert!(!text.is_null());
+            let owned = std::ffi::CStr::from_ptr(text)
+                .to_string_lossy()
+                .into_owned();
+            ade::ade_string_free(text);
+            owned
+        };
+        assert_eq!(report(image), "set the rootblock's bitmap-valid flag");
+        assert!(ade::ade_image_is_modified(image));
+        assert_eq!(report(image), "nothing to repair");
+        assert_eq!(ade::ade_edit_undo(image), AdeResult::Ok);
+        assert_eq!(report(image), "set the rootblock's bitmap-valid flag");
+
+        // Null is tolerated, and the report is optional.
+        assert_eq!(
+            ade::ade_edit_repair(
+                std::ptr::null_mut(),
+                false,
+                std::ptr::null_mut(),
+                std::ptr::null_mut()
+            ),
+            AdeResult::NullArgument
+        );
+        assert_eq!(
+            ade::ade_edit_repair(image, false, std::ptr::null_mut(), std::ptr::null_mut()),
+            AdeResult::Ok
+        );
+        ade::ade_image_free(image);
+    }
+    let _ = std::fs::remove_file(&path);
+}

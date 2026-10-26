@@ -1,4 +1,5 @@
-//! `ade mkdir` and `ade put` — writing into a disk, at the command line.
+//! `ade mkdir`, `put`, `rm`, `rename` and `repair` — writing into a disk, at
+//! the command line.
 //!
 //! The engine's side is checked in `src/api/tests/edit.rs`, against ADE's
 //! health report and ADFlib. These check what only the command can get wrong:
@@ -13,6 +14,8 @@
 )]
 
 use std::{fs, path::PathBuf, process::Command};
+
+use ade_core::layers::endian::put_u32;
 
 fn ade() -> PathBuf {
     let mut p = std::env::current_exe().expect("test exe");
@@ -392,6 +395,51 @@ fn rm_and_rename_write_new_images_and_a_deleted_file_carves_back() {
     assert!(
         found.iter().any(|b| b == b"a file to lose and find\n"),
         "the deleted file carves back byte for byte"
+    );
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn repair_saves_only_when_something_changed() {
+    let dir = scratch("repair");
+    let image = disk(&dir);
+    let out = dir.join("mended.adf");
+    let output = format!("--output={}", out.display());
+
+    // A sound disk: nothing to do, so nothing is written.
+    let (text, err, code) = run(&["repair", &image, &output]);
+    assert_eq!(code, Some(0), "{err}");
+    assert!(text.contains("nothing to repair"), "{text}");
+    assert!(!out.exists(), "nothing changed, so nothing is saved");
+
+    // Clear the bitmap-valid flag and reseal the rootblock.
+    let mut bytes = fs::read(&image).unwrap();
+    let root = 880 * 512;
+    let flag = root + 512 - 200;
+    put_u32(&mut bytes, flag, 0).unwrap();
+    put_u32(&mut bytes, root + 20, 0).unwrap();
+    let sum = ade_core::layers::block::checksum::normal_at(&bytes[root..root + 512], 20).unwrap();
+    put_u32(&mut bytes, root + 20, sum).unwrap();
+    let damaged = dir.join("damaged.adf");
+    fs::write(&damaged, &bytes).unwrap();
+    let damaged = damaged.to_str().unwrap();
+
+    let (_, err, code) = run(&["repair", damaged]);
+    assert_eq!(code, Some(2), "without --output it must refuse");
+    assert!(err.contains("--output"), "{err}");
+
+    let (text, err, code) = run(&["repair", damaged, &output]);
+    assert_eq!(code, Some(0), "{err}");
+    assert!(text.contains("bitmap-valid flag"), "{text}");
+    assert_eq!(
+        fs::read(&out).unwrap(),
+        fs::read(&image).unwrap(),
+        "the disk as it was made"
+    );
+    assert_eq!(
+        fs::read(damaged).unwrap(),
+        bytes,
+        "the original is untouched"
     );
     let _ = fs::remove_dir_all(&dir);
 }

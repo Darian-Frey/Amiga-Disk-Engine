@@ -109,6 +109,12 @@ public:
     bool deleteItem(QTreeWidgetItem *item);
     /// Rename the entry `item` is, in the folder it is in.
     bool renameItem(QTreeWidgetItem *item, const QString &name);
+    /// Repair the disk `item` belongs to (F-034): its bitmap, and entries
+    /// filed under the wrong hash slot, as one step for Undo. Blocks nothing
+    /// reaches stay marked used. Returns the report — also sent through
+    /// `reported` — or an empty string when the repair was refused, which is
+    /// reported through `errorOccurred`.
+    QString repairDisk(QTreeWidgetItem *item);
     /// Save the disk `item` belongs to as a new file. Never the file it was
     /// opened from; never over another existing file.
     bool saveImageAs(QTreeWidgetItem *item, const QString &path);
@@ -147,6 +153,9 @@ signals:
     // `main.cpp` connects this to a QMessageBox; the tests connect it to a
     // list, and so can check that failures are reported at all.
     void errorOccurred(const QString &message);
+    // A result a person asked for and should read, which is not a failure:
+    // what a repair did. Connected as `errorOccurred` is, for the same reason.
+    void reported(const QString &title, const QString &message);
 
 protected:
     void closeEvent(QCloseEvent *event) override;
@@ -160,6 +169,7 @@ private slots:
     void newFolder();
     void deleteSelected();
     void renameSelected();
+    void repairSelected();
     void filesDropped(QTreeWidgetItem *target, const QList<QUrl> &urls);
     void extractSelected();
     void search();
@@ -314,4 +324,5 @@ private:
     Confirm m_confirmDelete;
     QAction *m_delete = nullptr;
     QAction *m_rename = nullptr;
+    QAction *m_repair = nullptr;
 };

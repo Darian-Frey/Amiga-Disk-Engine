@@ -529,6 +529,18 @@ public:
         r.block = block;
         return r;
     }
+    /// Repair the bitmap and misfiled entries (F-034). On success `message`
+    /// is the report, a line per thing done or left; otherwise why not.
+    EditResult repair(bool freeOrphans) {
+        EditResult r;
+        char *report = nullptr;
+        char *why = nullptr;
+        r.code = ade_edit_repair(m_raw, freeOrphans, &report, &why);
+        const QString said = take(report);
+        const QString refused = take(why);
+        r.message = r.ok() ? said : refused;
+        return r;
+    }
     bool isModified() const { return ade_image_is_modified(m_raw); }
     bool canUndo() const { return ade_edit_can_undo(m_raw); }
     bool canRedo() const { return ade_edit_can_redo(m_raw); }

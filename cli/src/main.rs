@@ -151,6 +151,8 @@ struct Args {
     size: Option<u64>,
     /// `extract` takes the whole disk rather than one path.
     all: bool,
+    /// `repair` frees blocks the bitmap marks used that nothing reaches.
+    free_orphans: bool,
     /// `find` reads its pattern as text even if it looks like hex.
     text: bool,
     /// `find` matches ASCII letters in either case.
@@ -187,6 +189,7 @@ fn parse_args(raw: Vec<String>) -> Result<Args, String> {
     let mut volume_type: Option<String> = None;
     let mut hd = false;
     let mut all = false;
+    let mut free_orphans = false;
     let mut dd525 = false;
     let mut size: Option<u64> = None;
     let mut text = false;
@@ -201,6 +204,7 @@ fn parse_args(raw: Vec<String>) -> Result<Args, String> {
             "--hash" => hash = true,
             "--hd" => hd = true,
             "--all" => all = true,
+            "--free-orphans" => free_orphans = true,
             "--dd525" | "--525" => dd525 = true,
             _ if arg.starts_with("--size=") => {
                 size = arg.trim_start_matches("--size=").parse().ok();
@@ -253,6 +257,7 @@ fn parse_args(raw: Vec<String>) -> Result<Args, String> {
         volume_type,
         hd,
         all,
+        free_orphans,
         dd525,
         size,
         text,
@@ -310,7 +315,7 @@ fn main() -> ExitCode {
         ("extract", 2 | 3) => extract(&args),
         ("convert", 2) => convert(Path::new(p(0)), Path::new(p(1)), args.raw, args.format),
         ("create", 1) => create(&args),
-        ("mkdir" | "put" | "rm" | "rename", _) => edit_command(&args),
+        ("mkdir" | "put" | "rm" | "rename" | "repair", _) => edit_command(&args),
         ("disasm", 1 | 2) => disasm(&args),
         ("decode", 2) => decode(&args),
         ("scan", 1) => scan(Path::new(p(0)), args.format),
@@ -381,6 +386,9 @@ fn usage() {
             .to_owned(),
         "    ade rename <image> <path> <name> --output=<new> rename an entry in its folder"
             .to_owned(),
+        "    ade repair <image> [--free-orphans] --output=<new> fix the bitmap and misfiled \
+         entries"
+            .to_owned(),
         "    ade disasm <image> [path]          a program's 68000 code; no path: the bootblock"
             .to_owned(),
         "    ade decode <image> <path>          what a file says, in words (F-033)".to_owned(),
@@ -416,6 +424,8 @@ fn usage() {
         "    --size=N        create: an unpartitioned hard disk of N megabytes".to_owned(),
         "    --hd            create: a 1.76 MB high-density disk instead of 880 KB".to_owned(),
         "    --all           extract: take every file on the disk, not one path".to_owned(),
+        "    --free-orphans  repair: free blocks marked used that nothing reaches, as".to_owned(),
+        "                    AmigaDOS's validator does; a trackloader's data is lost".to_owned(),
         "    --text          find: read the pattern as text even if it looks like hex".to_owned(),
         "    --ignore-case   find: match ASCII letters in either case".to_owned(),
         "    --convert=CODE  batch: convert every image to CODE (adf, hdf, extended-adf)"
@@ -484,8 +494,8 @@ fn edit_and_save(
     ExitCode::from(EXIT_CLEAN)
 }
 
-/// `mkdir`, `put`, `rm` and `rename`, the commands that write into a disk
-/// (D-018).
+/// `mkdir`, `put`, `rm`, `rename` and `repair`, the commands that write into
+/// a disk (D-018).
 fn edit_command(args: &Args) -> ExitCode {
     // Refused rather than ignored: a script passing the flag must be able to
     // tell an unsupported command from a successful one (BUG-007).
@@ -502,6 +512,7 @@ fn edit_command(args: &Args) -> ExitCode {
         ("mkdir", 2) => make_dir(Path::new(p(0)), p(1), output),
         ("rm", 2) => remove(Path::new(p(0)), p(1), args.all, output),
         ("rename", 3) => rename(Path::new(p(0)), p(1), p(2), output),
+        ("repair", 1) => repair(Path::new(p(0)), args.free_orphans, output),
         ("put", 2 | 3) => put(
             Path::new(p(0)),
             Path::new(p(1)),
@@ -532,6 +543,52 @@ fn remove(image: &Path, path: &str, all: bool, output: Option<&Path>) -> ExitCod
             session.delete(block)?;
             Ok(format!("deleted {what}"))
         }
+    })
+}
+
+/// `ade repair`: rebuild the bitmap and refile misplaced entries, saving to
+/// `output` only when something changed. Exits 1 when something that needed
+/// repair was left, as `check` does for a fault.
+fn repair(image: &Path, free_orphans: bool, output: Option<&Path>) -> ExitCode {
+    let Some(output) = output else {
+        eprintln!(
+            "ade: --output=<new image> is required; ADE never writes into the image it \
+             opened (D-018)"
+        );
+        return ExitCode::from(EXIT_USAGE);
+    };
+    let mut session = match ade_core::edit::Session::open(image) {
+        Ok(s) => s,
+        Err(e) => return edit_failed(&image.display().to_string(), &e),
+    };
+    let done = match session.repair(free_orphans) {
+        Ok(done) => done,
+        Err(e) => return edit_failed(&image.display().to_string(), &e),
+    };
+    let mut lines = done.lines();
+    if done.orphans_kept > 0 && !free_orphans {
+        lines.push(format!(
+            "left {} marked in use that nothing reaches (--free-orphans frees them)",
+            if done.orphans_kept == 1 {
+                "1 block".to_owned()
+            } else {
+                format!("{} blocks", done.orphans_kept)
+            }
+        ));
+    }
+    if done.is_empty() {
+        lines.push("  nothing saved".to_owned());
+    } else {
+        if let Err(e) = session.save_as(output) {
+            return edit_failed(&output.display().to_string(), &e);
+        }
+        lines.push(format!("  saved to {}", output.display()));
+    }
+    emit_lines(&mut std::io::stdout().lock(), &lines);
+    ExitCode::from(if done.declined.is_empty() {
+        EXIT_CLEAN
+    } else {
+        EXIT_FAULTS
     })
 }
 

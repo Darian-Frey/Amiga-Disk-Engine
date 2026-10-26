@@ -622,6 +622,15 @@ AdeResult ade_edit_delete(AdeImage *image, uint32_t block, bool all, char **out_
  * ade_edit_mkdir. ADE_ALREADY_EXISTS when another entry has the name; a change
  * of case alone is allowed. ADE_REFUSED for the root. */
 AdeResult ade_edit_rename(AdeImage *image, uint32_t block, AdeBytes name, char **out_message);
+/* Repair the bitmap -- every block in use marked used, every bitmap block
+ * sealed, the valid flag set -- and move entries filed under the wrong hash
+ * slot to the one their name hashes to: one undo step. `out_report` receives a
+ * line per thing done or left undone, with why ("nothing to repair" when
+ * nothing needed it); free it with ade_string_free. Blocks marked used that
+ * nothing reaches stay used unless `free_orphans` is set. ADE_OK even when
+ * something is left: that is in the report. */
+AdeResult ade_edit_repair(AdeImage *image, bool free_orphans, char **out_report,
+                          char **out_message);
 
 /* Group edits a person sees as one action -- a drop of twenty files -- so
  * one undo takes them all back. Groups nest and only the outermost counts; a

@@ -328,6 +328,11 @@ fn every_command_either_emits_json_or_refuses_it() {
             Json::Refuses,
         ),
         (
+            "repair",
+            vec![d.clone(), format!("--output={}", out_path("rp.adf"))],
+            Json::Refuses,
+        ),
+        (
             "put",
             vec![
                 d.clone(),

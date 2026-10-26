@@ -111,6 +111,7 @@ private slots:
     void preferencesReadInWordsInTheDecodedView();
     void theVolumeListedInItsOwnTableIsMarkedAndCannotBeOpened();
     void entriesAreRenamedAndDeletedAndUndoBringsThemBack();
+    void aDiskIsRepairedFromTheDiskMenuAndUndoneInOneStep();
     void aFileTheDecodedViewDoesNotKnowSaysWhatItDoes();
     void theDiskRowShowsItsBootCodeAndAFolderSaysItHasNone();
     void anImageIsARootWithItsEntriesBeneath();
@@ -2459,6 +2460,60 @@ void TestMainWindow::theVolumeListedInItsOwnTableIsMarkedAndCannotBeOpened() {
 }
 
 // Deleting and renaming in the window (F-031).
+void TestMainWindow::aDiskIsRepairedFromTheDiskMenuAndUndoneInOneStep() {
+    // A cleared bitmap flag, the commonest damage in the corpus: ADE refuses
+    // to write to the disk until it is repaired.
+    QTemporaryDir dir;
+    const QString disk = blankDisk(dir, QStringLiteral("mend.adf"));
+    QByteArray bytes = readAll(disk);
+    QCOMPARE(bytes.size(), 901120);
+    const int root = 880 * 512;
+    auto putLong = [&bytes](int at, quint32 v) {
+        for (int i = 0; i < 4; ++i) bytes[at + i] = char(v >> (24 - 8 * i));
+    };
+    auto getLong = [&bytes](int at) {
+        quint32 v = 0;
+        for (int i = 0; i < 4; ++i) v = (v << 8) | quint8(bytes[at + i]);
+        return v;
+    };
+    putLong(root + 512 - 200, 0);
+    putLong(root + 20, 0);
+    quint32 sum = 0;
+    for (int at = root; at < root + 512; at += 4) sum += getLong(at);
+    putLong(root + 20, quint32(0) - sum);
+    writeFile(disk, bytes);
+
+    MainWindow window;
+    window.setDiscardConfirmation([](const QString &) { return true; });
+    QSignalSpy reported(&window, &MainWindow::reported);
+    window.openImage(disk);
+    auto *tree = browser(window);
+    QTreeWidgetItem *row = tree->topLevelItem(0);
+    tree->setCurrentItem(row, 0, QItemSelectionModel::ClearAndSelect);
+    QAction *repair = nullptr;
+    for (QAction *a : window.findChildren<QAction *>()) {
+        if (a->text() == QStringLiteral("Re&pair disk")) repair = a;
+    }
+    QVERIFY(repair && repair->isEnabled());
+
+    QCOMPARE(window.repairDisk(row), QStringLiteral("set the rootblock's bitmap-valid flag"));
+    QCOMPARE(reported.count(), 1);
+    QVERIFY(reported.at(0).at(0).toString().startsWith(QStringLiteral("Repair")));
+    QVERIFY(window.makeFolder(tree->topLevelItem(0), QStringLiteral("Now allowed")));
+
+    // Twice back: the folder, then the repair, which was one step.
+    QVERIFY(window.undoEdit());
+    QVERIFY(window.undoEdit());
+    QVERIFY(!window.undoEdit());
+    QVERIFY(!window.makeFolder(tree->topLevelItem(0), QStringLiteral("Refused again")));
+
+    // A sound disk is left alone, and says so.
+    const QString sound = blankDisk(dir, QStringLiteral("sound.adf"));
+    window.openImage(sound);
+    QTreeWidgetItem *second = tree->topLevelItem(1);
+    QCOMPARE(window.repairDisk(second), QStringLiteral("nothing to repair"));
+}
+
 void TestMainWindow::entriesAreRenamedAndDeletedAndUndoBringsThemBack() {
     QTemporaryDir dir;
     const QString disk = blankDisk(dir, QStringLiteral("edit.adf"));

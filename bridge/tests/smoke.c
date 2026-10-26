@@ -216,6 +216,14 @@ int main(int argc, char **argv) {
                           ADE_REFUSED &&
                       ade_edit_delete(NULL, 0, true, NULL) == ADE_NULL_ARGUMENT,
                   "the root cannot be deleted or renamed");
+
+            /* Repairing (F-034): a report either way, and NULL tolerated. */
+            char *report = NULL;
+            check(ade_edit_repair(image, false, &report, NULL) == ADE_OK && report != NULL &&
+                      report[0] != '\0' &&
+                      ade_edit_repair(NULL, false, NULL, NULL) == ADE_NULL_ARGUMENT,
+                  "a repair says what it did");
+            ade_string_free(report);
         }
         AdeDisasm *boot = ade_disasm_bootblock(image);
         check(boot != NULL && ade_disasm_count(boot) > 0, "the bootblock lists");

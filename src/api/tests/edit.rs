@@ -562,7 +562,7 @@ fn only_plain_images_open_for_editing() {
 }
 
 #[test]
-fn a_disk_whose_bitmap_hides_live_blocks_is_refused() {
+fn a_disk_whose_bitmap_hides_live_blocks_is_edited_only_once_repaired() {
     // Put a file on, then mark its data block free behind ADE's back: the
     // state where the next allocation lands on somebody's data.
     let mut s = session(1);
@@ -584,10 +584,17 @@ fn a_disk_whose_bitmap_hides_live_blocks_is_refused() {
         ade_core::layers::block::checksum::normal_at(&bytes[881 * 512..882 * 512], 0).unwrap();
     ade_core::layers::endian::put_u32(&mut bytes, 881 * 512, sum).unwrap();
 
+    // It opens, but nothing but a repair is made until the map is repaired.
+    let mut s = Session::from_bytes(bytes).unwrap();
+    s.set_clock(Some(WHEN));
     assert!(matches!(
-        Session::from_bytes(bytes),
+        s.make_dir(root, b"Refused"),
         Err(EditError::Unsound(_))
     ));
+    let repaired = s.repair(false).unwrap();
+    assert_eq!(repaired.bitmap.unwrap().now_used, vec![data]);
+    s.make_dir(root, b"Allowed").unwrap();
+    assert_clean(s.bytes(), "repaired, then edited");
 }
 
 /// Real disks, not just ones ADE made: add a directory and a file to every
@@ -631,6 +638,10 @@ fn corpus_disks_take_an_edit_and_stay_sound() {
             Ok(d) => d,
             Err(EditError::Refused(e)) => {
                 *refused.entry(refusal_kind(&e)).or_insert(0) += 1;
+                continue;
+            }
+            Err(EditError::Unsound(_)) => {
+                *refused.entry("unsound".to_owned()).or_insert(0) += 1;
                 continue;
             }
             Err(e) => panic!("{}: {e}", path.display()),

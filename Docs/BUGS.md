@@ -10,7 +10,31 @@ Severity vocabulary: low | medium | high.
 
 ## Open
 
-_None._
+### BUG-016 The health report says nothing about a directory whose hash table points at non-entries
+**Severity:** medium
+**Status:** open
+**Found:** 2026-10-26, building the repair suite (F-034).
+**Where:** [src/api/src/health.rs](../src/api/src/health.rs) `scan_tree`, which walks with `Volume::walk`; and `walk` itself in [src/filesystem/src/volume.rs](../src/filesystem/src/volume.rs), which keeps each directory's entries and drops its `Listing::faults` and `cycles`.
+
+**What is wrong.** A hash slot pointing outside the volume, or at a block that is not a directory entry, is a fault `ade ls` prints — *block 880: hash slot 46 points outside the volume: 3100038107* — and `ade check` never mentions. The disk is damaged and the health report reads as if the directory were whole. Over the corpus, **11** images show such faults in the root directory alone (subdirectories not counted); among them Football Glory (AGA) Disk 2, Pipe Mania, and the `[m][o][b]` dump of Workbench 1.3.2 Extras.
+
+**How it showed.** The repair suite must not rebuild a bitmap from a walk that missed blocks, so it lists every directory itself and declines when one is not clean. On those three disks it declined for a reason the health report had not given.
+
+**Correct behaviour.** A finding per faulty directory — a warning, since what the walk missed may be live — naming the directory and the first faults, capped as `dircache-disagrees` is. It is a new code on the JSON surface, so it needs an inventory entry (D-015) and a schema bump. `Walk` should carry the faults rather than every caller listing again.
+
+**Not fixed here** because it is outside the change that found it (Maintenance Rule 8). The repair suite's own check (`unwalked` in [src/api/src/edit.rs](../src/api/src/edit.rs)) is what keeps it from acting on such a walk meanwhile.
+
+### BUG-015 Bitmap pointers outside the volume are counted as live blocks marked free
+**Severity:** low
+**Status:** open
+**Found:** 2026-10-26, measuring the corpus for the repair suite (F-034).
+**Where:** [src/api/src/health.rs](../src/api/src/health.rs) `cross_check_bitmap`, which adds every pointer in `Bitmap::blocks` to the referenced set before comparing it with the map.
+
+**What is wrong.** `1000 Miglia.adf` has a rootblock of noise: a 159-byte name in a 30-byte field, and bitmap pointers such as 1,840,699 and 50,349,389 on an 1,760-block disk. Those pointers go into the set of blocks in use, the map — which covers only real blocks — has no bit for them, and the report says *24 blocks are in use by files but marked free (1840699, 50349389, …)*. No file uses them, they are not blocks of this volume, and `referenced-but-free` is the finding that means data is about to be lost. It is the only corpus image affected.
+
+**Correct behaviour.** A bitmap pointer outside the volume is its own finding — the bitmap is not where the rootblock says — and is never added to the referenced set.
+
+**Not fixed here** (Maintenance Rule 8). The repair suite does not act on it: it refuses this disk because the rootblock names a bitmap extension chain, and would refuse it again for the out-of-range pointers.
 
 ## Fixed
 

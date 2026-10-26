@@ -154,10 +154,13 @@ impl Bitmap {
     ///
     /// D-004 ships every write path only after its read path is proven, and is
     /// marked never-reversible within v1. AV-003 asks for a rebuild to be
-    /// *offered*, which is this; putting it back on a disk is a write and waits
-    /// for Phase 4. The separation is not bureaucratic — a bitmap rebuilt from
-    /// a misread tree, written to the only copy of a disk, destroys exactly
-    /// what the tool exists to preserve.
+    /// *offered*, which is this. The separation is not bureaucratic — a bitmap
+    /// rebuilt from a misread tree, written to the only copy of a disk,
+    /// destroys exactly what the tool exists to preserve. What *is* written
+    /// to a disk is [`crate::repair::rebuild_bitmap`] (F-034), under D-018's
+    /// terms, and it differs from this in two ways: it keeps blocks marked
+    /// used that nothing reaches unless asked, and it leaves the bits past
+    /// the volume's end as it found them, where this sets them.
     ///
     /// The result is still checkable without writing anything: feed it back
     /// through [`Self::read`] and it must describe the set it was built from.
