@@ -343,20 +343,30 @@ impl<'a> Volume<'a> {
                 continue;
             };
             let mut next = first;
+            // Per chain, to tell a loop from a merge: a block met twice in one
+            // chain is a loop; a block an earlier chain listed is a merge.
+            let mut this_chain: HashSet<u32> = HashSet::new();
             while next != 0 {
-                if !seen.insert(next) {
+                // AV-004: validate before dereferencing — and before the
+                // loop and merge checks, so two pointers outside the volume
+                // are two faults rather than a "merge" at a block that is not
+                // there.
+                if self.geometry.validate(BlockIndex(u64::from(next))).is_err() {
+                    listing.faults.push(FsError::Malformed {
+                        block: dir,
+                        detail: format!("hash slot {slot} points outside the volume: {next}"),
+                    });
+                    break;
+                }
+                if !this_chain.insert(next) {
                     listing.cycles.push(FsError::Cycle {
                         block: next,
                         chain: "hash",
                     });
                     break;
                 }
-                // AV-004: validate before dereferencing.
-                if self.geometry.validate(BlockIndex(u64::from(next))).is_err() {
-                    listing.faults.push(FsError::Malformed {
-                        block: dir,
-                        detail: format!("hash slot {slot} points outside the volume: {next}"),
-                    });
+                if !seen.insert(next) {
+                    listing.merges.push(next);
                     break;
                 }
                 let raw = match self.read_block(next) {
@@ -1024,6 +1034,7 @@ impl<'a> Volume<'a> {
         let cap = usize::try_from(self.geometry.total_blocks()).unwrap_or(usize::MAX);
         let mut out: Vec<(String, Entry)> = Vec::new();
         let mut hit_limit = false;
+        let mut damaged: Vec<DamagedDirectory> = Vec::new();
         let mut visited: HashSet<u32> = HashSet::from([start]);
         // Depth is carried explicitly: bounding the entry count is not enough,
         // because each path is built from its parent's. A cycle makes the
@@ -1033,9 +1044,28 @@ impl<'a> Volume<'a> {
         let mut stack = vec![(String::new(), start, 0usize)];
 
         'outer: while let Some((prefix, dir, depth)) = stack.pop() {
-            let Ok(listing) = self.list(dir) else {
-                continue;
+            let listing = match self.list(dir) {
+                Ok(listing) => listing,
+                Err(e) => {
+                    damaged.push(DamagedDirectory {
+                        block: dir,
+                        path: prefix,
+                        faults: vec![e],
+                        cycles: Vec::new(),
+                        merges: Vec::new(),
+                    });
+                    continue;
+                }
             };
+            if !listing.is_clean() {
+                damaged.push(DamagedDirectory {
+                    block: dir,
+                    path: prefix.clone(),
+                    faults: listing.faults,
+                    cycles: listing.cycles,
+                    merges: listing.merges,
+                });
+            }
             for entry in listing.entries {
                 if out.len() >= cap {
                     hit_limit = true;
@@ -1071,6 +1101,7 @@ impl<'a> Volume<'a> {
         }
         Ok(Walk {
             entries: out,
+            damaged,
             hit_limit,
         })
     }
@@ -1090,6 +1121,30 @@ pub struct Misplaced {
     /// Whether the volume's *other* hash function — plain on an international
     /// volume, international on a plain one — gives the slot it is in.
     pub other_mode: bool,
+}
+
+/// A directory a walk could not list in full (BUG-016).
+#[derive(Debug, Clone)]
+pub struct DamagedDirectory {
+    /// The directory's block.
+    pub block: u32,
+    /// Its path from where the walk started; empty for the start itself.
+    pub path: String,
+    /// What went wrong: a slot or chain pointing outside the volume or at a
+    /// block that is not an entry, or the directory itself unreadable.
+    pub faults: Vec<FsError>,
+    /// Chains that loop, ending early.
+    pub cycles: Vec<FsError>,
+    /// Blocks where two slots' chains merge, losing nothing.
+    pub merges: Vec<u32>,
+}
+
+impl DamagedDirectory {
+    /// Whether entries may be missing from the walk because of it.
+    #[must_use]
+    pub fn loses_entries(&self) -> bool {
+        !self.faults.is_empty() || !self.cycles.is_empty()
+    }
 }
 
 /// What a path resolved to, and how (BUG-013).
@@ -1124,8 +1179,14 @@ pub struct Duplicate {
 pub struct Listing {
     /// Entries found, in hash-table order.
     pub entries: Vec<Entry>,
-    /// Cycles encountered (AV-001).
+    /// Chains that loop back on themselves (AV-001): listing the directory
+    /// the way AmigaDOS does would never finish.
     pub cycles: Vec<FsError>,
+    /// Blocks where one slot's chain runs into a chain an earlier slot
+    /// already listed. Nothing is lost — the shared tail is listed once — but
+    /// AmigaDOS never writes it, and unlinking an entry from the shared tail
+    /// through one chain leaves the other pointing at it.
+    pub merges: Vec<u32>,
     /// Other problems encountered while walking.
     pub faults: Vec<FsError>,
 }
@@ -1134,6 +1195,14 @@ impl Listing {
     /// Whether anything went wrong.
     #[must_use]
     pub fn is_clean(&self) -> bool {
+        self.cycles.is_empty() && self.merges.is_empty() && self.faults.is_empty()
+    }
+
+    /// Whether some entry the table points at may be missing from
+    /// `entries`: a fault, or a loop, which ends its chain early. A merge
+    /// loses nothing.
+    #[must_use]
+    pub fn is_complete(&self) -> bool {
         self.cycles.is_empty() && self.faults.is_empty()
     }
 
@@ -1370,6 +1439,10 @@ fn check_ofs_block(
 pub struct Walk {
     /// Every entry reached, as `(path, entry)`.
     pub entries: Vec<(String, Entry)>,
+    /// Directories that could not be listed in full, in the order reached
+    /// (BUG-016). The entries they did yield are in `entries`; what they did
+    /// not is why a caller deciding which blocks are in use must look here.
+    pub damaged: Vec<DamagedDirectory>,
     /// Set when the walk stopped at the structural cap.
     ///
     /// Means the visited set failed to terminate a cycle — a fault in ADE

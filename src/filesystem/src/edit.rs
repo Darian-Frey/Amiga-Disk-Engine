@@ -697,6 +697,12 @@ impl<'a> Plan<'a> {
                 "the directory is damaged ({fault}); ADE will not write into it"
             )));
         }
+        if let Some(block) = listing.merges.first() {
+            return Err(EditError::Damaged(format!(
+                "two of the directory's hash chains merge at block {block}; ADE will not write \
+                 into it"
+            )));
+        }
 
         let bitmap = Bitmap::read(source, &geometry, volume.rootblock())?;
         let ht = volume.hash_table_size() as usize;

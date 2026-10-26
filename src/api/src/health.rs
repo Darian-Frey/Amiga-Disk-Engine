@@ -382,11 +382,73 @@ fn scan_tree(volume: &Volume<'_>, findings: &mut Vec<Finding>) -> TreeScan {
         scan_file(volume, path, entry, &mut owner, &mut scan, findings);
     }
 
+    scan_damaged_directories(&walked, findings);
     scan_dircaches(volume, &walked, &mut scan, findings);
     scan_hash_slots(volume, &walked, findings);
     scan_duplicate_names(volume, &walked, findings);
     scan_root_in_tables(volume, &walked, findings);
     scan
+}
+
+/// How many damaged directories to report before saying so in one line.
+const MAX_DAMAGED_DIRECTORIES: usize = 20;
+
+/// Directories whose hash table could not be listed in full (BUG-016).
+///
+/// `ade ls` has always printed these faults; the health report walked past
+/// them, so a disk could read as whole with entries missing from it. One
+/// finding per directory, naming what kind of damage it is, because they
+/// mean different things: a pointer to nothing or to a non-entry may hide
+/// entries; a loop hides them *and* hangs AmigaDOS listing the directory —
+/// which crack groups used on purpose, a README whose chain points at itself
+/// in a directory named for the group; a merge of two chains loses nothing,
+/// but is a structure AmigaDOS never writes. Measured 2026-10-26 over 3,606
+/// corpus volumes: 29 directories on 22 disks — 22 pointing at non-entries
+/// (3 of them with merged chains too) and 7 loops.
+fn scan_damaged_directories(walked: &ade_filesystem::volume::Walk, findings: &mut Vec<Finding>) {
+    for (i, d) in walked.damaged.iter().enumerate() {
+        if i == MAX_DAMAGED_DIRECTORIES {
+            findings.push(Finding::new(
+                "directory-damaged",
+                Severity::Warning,
+                format!(
+                    "{} more directories are damaged",
+                    walked.damaged.len().saturating_sub(i)
+                ),
+            ));
+            break;
+        }
+        let place = if d.path.is_empty() {
+            "the root directory".to_owned()
+        } else {
+            d.path.clone()
+        };
+        let mut said = Vec::new();
+        if let Some(first) = d.faults.first() {
+            said.push(match d.faults.len() {
+                1 => format!("1 hash-table pointer leads to no entry ({first})"),
+                n => format!("{n} hash-table pointers lead to no entry (first: {first})"),
+            });
+        }
+        if let Some(first) = d.cycles.first() {
+            said.push(format!(
+                "a {first}, so listing it the way AmigaDOS does never finishes"
+            ));
+        }
+        if let Some(first) = d.merges.first() {
+            said.push(format!(
+                "two hash chains merge at block {first}, which AmigaDOS never writes"
+            ));
+        }
+        findings.push(
+            Finding::new(
+                "directory-damaged",
+                Severity::Warning,
+                format!("{place}: {}", said.join("; ")),
+            )
+            .at(d.block),
+        );
+    }
 }
 
 /// How many misplaced entries to report before saying so in one line.

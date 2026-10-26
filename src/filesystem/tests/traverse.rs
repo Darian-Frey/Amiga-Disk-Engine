@@ -175,9 +175,51 @@ fn a_self_referential_hash_chain_terminates() {
     // The point is that this returns at all.
     let listing = v.list(v.root()).expect("list must terminate");
     assert!(!listing.cycles.is_empty(), "the cycle must be reported");
+    assert!(listing.merges.is_empty(), "a loop is not a merge");
     assert!(
         listing.entries.iter().any(|e| e.name_lossy() == "alpha"),
         "entries found before the cycle are still good data"
+    );
+}
+
+#[test]
+fn two_merged_hash_chains_are_a_merge_and_not_a_loop() {
+    // BUG-016: one visited set across every slot called this a loop.
+    let mut f = Fixture::dd(1);
+    let a = f.add_file("alpha", b"a");
+    let b = f.add_file("beta", b"b");
+    let mut img = f.build();
+    corrupt::hash_chain_merge(&mut img, a, b);
+
+    let mem = Mem::dd(img);
+    let v = Volume::mount(&mem).unwrap();
+    let listing = v.list(v.root()).unwrap();
+    assert!(listing.cycles.is_empty(), "{:?}", listing.cycles);
+    assert_eq!(listing.merges, vec![b]);
+    assert_eq!(listing.entries.len(), 2, "each entry listed once");
+    assert!(!listing.is_clean() && listing.is_complete());
+}
+
+#[test]
+fn a_walk_keeps_what_each_damaged_directory_lost() {
+    let mut f = Fixture::dd(1);
+    let tools = f.add_dir("Tools");
+    let _ = f.add_file("top", b"t");
+    let mut img = f.build();
+    corrupt::hash_slot_out_of_range(&mut img, tools, 3);
+
+    let mem = Mem::dd(img);
+    let v = Volume::mount(&mem).unwrap();
+    let walk = v.walk(v.root()).unwrap();
+    assert_eq!(walk.damaged.len(), 1, "{:?}", walk.damaged);
+    let d = &walk.damaged[0];
+    assert_eq!((d.block, d.path.as_str()), (tools, "Tools"));
+    assert_eq!(d.faults.len(), 1);
+    assert!(d.loses_entries());
+    assert_eq!(
+        walk.entries.len(),
+        2,
+        "the rest of the tree is still walked"
     );
 }
 

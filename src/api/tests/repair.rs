@@ -521,3 +521,34 @@ fn corpus_disks_repair_and_take_a_full_write_without_losing_a_file() {
         "most repaired disks take a write: {filled}"
     );
 }
+
+#[test]
+fn a_merged_chain_does_not_stop_a_bitmap_repair_and_a_loop_does() {
+    // A merge loses no entry, so the walk still finds every block in use; a
+    // loop may hide some (BUG-016).
+    let original = disk(1);
+    let header = |bytes: &[u8], path: &str| {
+        let image = ade_core::Image::from_bytes(bytes.to_vec()).unwrap();
+        let volume = image.volume().unwrap();
+        volume.lookup(path).unwrap().block as usize
+    };
+    let (hello, dir) = (header(&original, "hello.txt"), header(&original, "Dir"));
+    for (target, repairs) in [(dir, true), (hello, false)] {
+        let mut bytes = original.clone();
+        put_u32(&mut bytes, hello * 512 + 512 - 16, target as u32).unwrap();
+        put_u32(&mut bytes, hello * 512 + 20, 0).unwrap();
+        let sum = normal_at(&bytes[hello * 512..][..512], 20).unwrap();
+        put_u32(&mut bytes, hello * 512 + 20, sum).unwrap();
+        put_u32(&mut bytes, ROOT + 512 - 200, 0).unwrap();
+        reseal_root(&mut bytes);
+
+        let mut s = session(bytes);
+        let done = s.repair(false).unwrap();
+        assert_eq!(
+            done.bitmap.is_some_and(|b| b.flag_set),
+            repairs,
+            "{:?}",
+            done.declined
+        );
+    }
+}

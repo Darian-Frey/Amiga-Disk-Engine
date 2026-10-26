@@ -63,6 +63,17 @@ pub fn hash_chain_cycle(img: &mut [u8], a: u32, b: u32) {
     rechecksum(img, b);
 }
 
+/// Run entry `a`'s hash chain into entry `b`, which its own slot already
+/// reaches: two chains merged (BUG-016).
+///
+/// Not a loop — every chain still ends — and nothing is lost to a reader that
+/// lists each block once. It is a structure AmigaDOS never writes, and the
+/// one a "visited" set shared across slots misreports as a cycle.
+pub fn hash_chain_merge(img: &mut [u8], a: u32, b: u32) {
+    put_u32(img, a as usize * BSIZE + (BSIZE - 16), b);
+    rechecksum(img, a);
+}
+
 /// Point a file header's first data block past the end of the volume (AV-004).
 ///
 /// The classic wild-read: dereferencing this without a bounds check reads

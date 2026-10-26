@@ -1330,6 +1330,9 @@ fn list(
     for c in listing.cycles.iter().chain(&listing.faults) {
         eprintln!("  ! {c}");
     }
+    for m in &listing.merges {
+        eprintln!("  ! two hash chains merge at block {m}");
+    }
     ExitCode::from(if clean { EXIT_CLEAN } else { EXIT_FAULTS })
 }
 

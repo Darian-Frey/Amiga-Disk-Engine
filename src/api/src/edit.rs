@@ -402,7 +402,7 @@ impl Session {
                 || report.findings.iter().any(|f| f.code == "bitmap-checksum")
                 || (free_orphans && bitmap.orphaned > 0);
             if wrong {
-                let outcome = match unwalked(&report, &volume, &directories) {
+                let outcome = match unwalked(&report, &walk) {
                     Some(why) => Err(why),
                     None => repair::rebuild_bitmap(&mut next, self.geometry, &in_use, free_orphans)
                         .map_err(|e| e.to_string()),
@@ -837,11 +837,7 @@ fn list_named(blocks: &[u32]) -> String {
 
 /// Why the walk cannot be trusted to have found every block in use, if it
 /// cannot.
-fn unwalked(
-    report: &health::Health,
-    volume: &ade_filesystem::volume::Volume<'_>,
-    directories: &[(String, u32)],
-) -> Option<String> {
+fn unwalked(report: &health::Health, walk: &ade_filesystem::volume::Walk) -> Option<String> {
     const LOST: [&str; 5] = [
         "tree-unreadable",
         "walk-capped",
@@ -855,22 +851,16 @@ fn unwalked(
             f.message
         ));
     }
-    for (path, dir) in directories {
-        let damaged = volume
-            .list(*dir)
-            .map_or(true, |listing| !listing.is_clean());
-        if damaged {
-            let what = if path.is_empty() {
-                "the root directory"
-            } else {
-                path.as_str()
-            };
-            return Some(format!(
-                "{what} cannot be listed in full, so a block in use could be marked free"
-            ));
-        }
-    }
-    None
+    // A merge of two chains loses nothing, so it does not stop a repair; a
+    // fault or a loop may hide entries (BUG-016).
+    walk.damaged.iter().find(|d| d.loses_entries()).map(|d| {
+        let what = if d.path.is_empty() {
+            "the root directory"
+        } else {
+            d.path.as_str()
+        };
+        format!("{what} cannot be listed in full, so a block in use could be marked free")
+    })
 }
 
 /// Why a disk in this condition may not be edited, if it may not.

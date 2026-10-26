@@ -10,20 +10,6 @@ Severity vocabulary: low | medium | high.
 
 ## Open
 
-### BUG-016 The health report says nothing about a directory whose hash table points at non-entries
-**Severity:** medium
-**Status:** open
-**Found:** 2026-10-26, building the repair suite (F-034).
-**Where:** [src/api/src/health.rs](../src/api/src/health.rs) `scan_tree`, which walks with `Volume::walk`; and `walk` itself in [src/filesystem/src/volume.rs](../src/filesystem/src/volume.rs), which keeps each directory's entries and drops its `Listing::faults` and `cycles`.
-
-**What is wrong.** A hash slot pointing outside the volume, or at a block that is not a directory entry, is a fault `ade ls` prints — *block 880: hash slot 46 points outside the volume: 3100038107* — and `ade check` never mentions. The disk is damaged and the health report reads as if the directory were whole. Over the corpus, **11** images show such faults in the root directory alone (subdirectories not counted); among them Football Glory (AGA) Disk 2, Pipe Mania, and the `[m][o][b]` dump of Workbench 1.3.2 Extras.
-
-**How it showed.** The repair suite must not rebuild a bitmap from a walk that missed blocks, so it lists every directory itself and declines when one is not clean. On those three disks it declined for a reason the health report had not given.
-
-**Correct behaviour.** A finding per faulty directory — a warning, since what the walk missed may be live — naming the directory and the first faults, capped as `dircache-disagrees` is. It is a new code on the JSON surface, so it needs an inventory entry (D-015) and a schema bump. `Walk` should carry the faults rather than every caller listing again.
-
-**Not fixed here** because it is outside the change that found it (Maintenance Rule 8). The repair suite's own check (`unwalked` in [src/api/src/edit.rs](../src/api/src/edit.rs)) is what keeps it from acting on such a walk meanwhile.
-
 ### BUG-015 Bitmap pointers outside the volume are counted as live blocks marked free
 **Severity:** low
 **Status:** open
@@ -37,6 +23,28 @@ Severity vocabulary: low | medium | high.
 **Not fixed here** (Maintenance Rule 8). The repair suite does not act on it: it refuses this disk because the rootblock names a bitmap extension chain, and would refuse it again for the out-of-range pointers.
 
 ## Fixed
+
+### BUG-016 The health report says nothing about a directory whose hash table points at non-entries
+**Severity:** medium
+**Status:** fixed
+**Found:** 2026-10-26, building the repair suite (F-034). **Fixed** 2026-10-26.
+**Where:** [src/api/src/health.rs](../src/api/src/health.rs) `scan_tree`, which walks with `Volume::walk`; and `walk` itself in [src/filesystem/src/volume.rs](../src/filesystem/src/volume.rs), which keeps each directory's entries and drops its `Listing::faults` and `cycles`.
+
+**What is wrong.** A hash slot pointing outside the volume, or at a block that is not a directory entry, is a fault `ade ls` prints — *block 880: hash slot 46 points outside the volume: 3100038107* — and `ade check` never mentions. The disk is damaged and the health report reads as if the directory were whole. Over the corpus, **11** images show such faults in the root directory alone (subdirectories not counted); among them Football Glory (AGA) Disk 2, Pipe Mania, and the `[m][o][b]` dump of Workbench 1.3.2 Extras.
+
+**How it showed.** The repair suite must not rebuild a bitmap from a walk that missed blocks, so it lists every directory itself and declines when one is not clean. On those three disks it declined for a reason the health report had not given.
+
+**Correct behaviour.** A finding per faulty directory — a warning, since what the walk missed may be live — naming the directory and the first faults, capped as `dircache-disagrees` is. It is a new code on the JSON surface, so it needs an inventory entry (D-015) and a schema bump. `Walk` should carry the faults rather than every caller listing again.
+
+**Not fixed** in the change that found it (Maintenance Rule 8); the repair suite listed every directory itself meanwhile.
+
+**The fix.** `Walk` now carries a `DamagedDirectory` for each directory it could not list cleanly — its block, its path, and its faults, loops and merges — and `ade check` raises **`directory-damaged`**, a warning, per directory, capped at twenty: *the root directory: 1 hash-table pointer leads to no entry (block 912: not a directory entry: type 0x0, secondary 0x0)*. Schema **1.15 → 1.16**.
+
+**What measuring it found.** `Volume::list` kept one visited set across every slot, so a chain running into one another slot had already listed — a **merge**, which loses nothing — was reported as a hash chain that *loops*. They are now told apart, with a set per chain beside the shared one: `Listing::merges` holds the merges, `cycles` only real loops, and the finding names each for what it is. And a pointer is range-checked *before* the loop and merge checks: Xenon 2's root holds the same out-of-range number in three slots, which read as one fault and two merges "at block 808464432". Corpus: **29 directories on 22 of 3,606 volumes** — 22 pointing at non-entries or outside the volume (3 with merges as well), and **7 real loops**, all crack-group directory art: a README whose chain points at itself, in a directory named for the group, so listing it never ends. No other finding changed on any corpus image.
+
+**The repair suite** now reads `Walk::damaged` rather than listing every directory again, and declines a bitmap repair only for damage that may hide entries — a fault or a loop. A merged chain does not stop it; writing into a directory with merged chains stays refused.
+
+**Tests.** `damaged_directories.rs` builds each kind — a slot outside the volume in a subdirectory, a self-loop, a merge, two slots outside the volume — and requires the right words; its corpus half requires a finding for every directory the walk records, and counts the loops. `traverse.rs` checks a merge is not a loop and that a walk keeps what each directory lost; `repair.rs` that a merge does not stop a repair and a loop does. Each was shown to fail with its fix reverted: merges counted as loops, the range check after the merge check, and a loop not counted as loss.
 
 ### BUG-014 The health report missed a cross-link between two entries of one name
 **Severity:** low
