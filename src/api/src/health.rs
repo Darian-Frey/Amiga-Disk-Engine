@@ -859,10 +859,31 @@ fn cross_check_bitmap(
     // The bitmap blocks and the rootblock are allocated but are not *reached*
     // by a tree walk — they are the filesystem's own overhead. Counting them as
     // orphans would report a false positive on every healthy disk.
+    // Only the bitmap blocks that exist: a pointer outside the volume names
+    // no block, and counting it as one in use called it live data the map
+    // had marked free (BUG-015).
     let mut referenced = referenced.clone();
     referenced.insert(volume.root());
     for &b in &bitmap.blocks {
-        referenced.insert(b);
+        if !bitmap.out_of_range.contains(&b) {
+            referenced.insert(b);
+        }
+    }
+    if !bitmap.out_of_range.is_empty() {
+        findings.push(Finding::new(
+            "bitmap-pointer-invalid",
+            Severity::Warning,
+            format!(
+                "the rootblock names {} for the bitmap outside the volume ({}) — the map \
+                 is not all where it says, and what it says about some blocks is missing",
+                if bitmap.out_of_range.len() == 1 {
+                    "1 block".to_owned()
+                } else {
+                    format!("{} blocks", bitmap.out_of_range.len())
+                },
+                summarise(&bitmap.out_of_range)
+            ),
+        ));
     }
 
     // The two directions are not equally serious.

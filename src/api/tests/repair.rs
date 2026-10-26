@@ -552,3 +552,28 @@ fn a_merged_chain_does_not_stop_a_bitmap_repair_and_a_loop_does() {
         );
     }
 }
+
+#[test]
+fn a_bitmap_pointer_outside_the_volume_is_neither_written_through_nor_repaired() {
+    // BUG-015. Where a bitmap goes is not a repair's to choose, and an edit
+    // would allocate through a map that is partly noise.
+    let mut bytes = disk(1);
+    put_u32(&mut bytes, ROOT + 512 - 196 + 4, 50_000_000).unwrap();
+    reseal_root(&mut bytes);
+    assert_eq!(codes(&bytes), vec!["bitmap-pointer-invalid"]);
+
+    let mut s = session(bytes.clone());
+    let root = s.root();
+    assert!(matches!(
+        s.make_dir(root, b"x"),
+        Err(EditError::Refused(FsEditError::BitmapUntrusted(_)))
+    ));
+    let done = s.repair(false).unwrap();
+    assert!(done.is_empty());
+    assert!(
+        done.declined[0].contains("does not choose where a bitmap goes"),
+        "{:?}",
+        done.declined
+    );
+    assert!(s.bytes() == bytes.as_slice());
+}

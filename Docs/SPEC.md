@@ -495,6 +495,8 @@ Each long describes 32 blocks, bit 0 being the lowest-numbered. **The map starts
 
 `bm_flag` in the rootblock is -1 when valid. [AFFS] warns it "may not be accurate when the system crashes while an affs partition is mounted" — which is AV-003 confirmed by a second source. ADE treats the flag as advisory and can rebuild the bitmap defensively.
 
+**A bitmap pointer outside the volume names no block.** It is reported as `bitmap-pointer-invalid` and is never counted as a block in use; ADE will not write through such a map, nor repair it, since a repair would have to choose where the bitmap goes. One corpus image has it: `1000 Miglia`, whose rootblock is noise — 24 of 25 page pointers and `bm_ext` out of range, the one in range a block of noise read as a map. Until 2026-10-26 those pointers were counted as live blocks the map marked free, ADE's most serious finding, about blocks that do not exist (BUG-015).
+
 If 25 bitmap pointers are insufficient (hard disks above roughly 50 MB), further pointers live in bitmap extension blocks forming a linked list from `bm_ext`:
 
 | offset | type | count | name |

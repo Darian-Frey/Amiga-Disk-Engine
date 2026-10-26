@@ -41,6 +41,15 @@ pub fn bitmap_flag_invalid(img: &mut [u8], root: u32) {
     rechecksum(img, root);
 }
 
+/// Set the rootblock's bitmap page pointer `index` (0–24) to `value`
+/// (BUG-015). Index 25 is the extension pointer, `bm_ext`, which follows the
+/// 25 page pointers.
+pub fn bitmap_pointer(img: &mut [u8], root: u32, index: usize, value: u32) {
+    let off = root as usize * BSIZE + (BSIZE - 196) + index * 4;
+    put_u32(img, off, value);
+    rechecksum(img, root);
+}
+
 /// Point an entry's same-hash chain back at itself (AV-001).
 ///
 /// The minimal cycle: one block whose `hash_chain` names itself. A traversal

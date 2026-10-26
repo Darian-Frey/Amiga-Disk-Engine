@@ -653,6 +653,11 @@ impl<'a> Plan<'a> {
                 "bitmap block {bad} fails its checksum"
             )));
         }
+        if let Some(bad) = bitmap.out_of_range.first() {
+            return Err(EditError::BitmapUntrusted(format!(
+                "the rootblock names block {bad} for the bitmap, which is outside the volume"
+            )));
+        }
         if bitmap.incomplete || bitmap.blocks.is_empty() {
             return Err(EditError::BitmapUntrusted(
                 "the bitmap does not cover the whole volume".to_owned(),

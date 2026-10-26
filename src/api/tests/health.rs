@@ -148,3 +148,30 @@ fn the_json_surface_carries_severities_and_codes() {
     assert!(json.contains(r#""worst":"warning""#));
     assert!(json.contains(r#""bitmap":{"#));
 }
+
+#[test]
+fn a_bitmap_pointer_outside_the_volume_is_its_own_finding_not_live_data() {
+    // BUG-015: `1000 Miglia`'s rootblock is noise, and its bitmap pointers
+    // were counted as blocks in use that the map had marked free.
+    let v = Fixture::dd(1).named("Pointers");
+    let root = v.root();
+    let mut img = v.build();
+    corrupt::bitmap_pointer(&mut img, root, 3, 50_000_000);
+    corrupt::bitmap_pointer(&mut img, root, 25, 60_000_000);
+
+    let h = examine(img);
+    assert_eq!(
+        codes(&h),
+        vec!["bitmap-pointer-invalid"],
+        "{:?}",
+        h.findings
+    );
+    let f = &h.findings[0];
+    assert_eq!(f.severity, Severity::Warning);
+    assert!(
+        f.message.contains("names 2 blocks") && f.message.contains("50000000, 60000000"),
+        "{}",
+        f.message
+    );
+    assert_eq!(h.bitmap.unwrap().referenced_but_free, 0);
+}

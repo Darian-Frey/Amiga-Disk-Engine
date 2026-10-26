@@ -37,6 +37,11 @@ pub struct Bitmap {
     pub blocks: Vec<u32>,
     /// Bitmap blocks whose checksum did not verify.
     pub bad_checksums: Vec<u32>,
+    /// Pointers the rootblock or an extension block gives for the bitmap
+    /// that are outside the volume, in the order met: page pointers, then
+    /// the extension pointer that could not be followed (BUG-015). Kept in
+    /// [`Self::blocks`] too, so its order still matches the rootblock's.
+    pub out_of_range: Vec<u32>,
     /// Whether the rootblock's `bm_flag` said the map is valid.
     pub flagged_valid: bool,
     /// Whether the map ran out before covering the volume.
@@ -77,8 +82,10 @@ impl Bitmap {
         // The extension chain, for volumes needing more than 25 bitmap blocks.
         let mut next_ext = root.bitmap_extension;
         let mut buf = vec![0u8; bsize];
+        let mut bad_ext: Option<u32> = None;
         while next_ext != 0 && seen.insert(next_ext) {
             if geometry.validate(BlockIndex(u64::from(next_ext))).is_err() {
+                bad_ext = Some(next_ext);
                 break;
             }
             if read_at(source, BlockIndex(u64::from(next_ext)), &mut buf).is_err() {
@@ -97,6 +104,12 @@ impl Bitmap {
             next_ext = u32_at(&buf, bsize.saturating_sub(4)).unwrap_or(0);
         }
 
+        let mut out_of_range: Vec<u32> = pointers
+            .iter()
+            .copied()
+            .filter(|&p| geometry.validate(BlockIndex(u64::from(p))).is_err())
+            .collect();
+        out_of_range.extend(bad_ext);
         let mut allocated = HashSet::new();
         let mut bad_checksums = Vec::new();
         let mut bit_base: u64 = 0;
@@ -139,6 +152,7 @@ impl Bitmap {
             covered,
             blocks: pointers,
             bad_checksums,
+            out_of_range,
             flagged_valid: root.bitmap_flag_valid(),
             incomplete: bit_base < u64::from(covered),
         })

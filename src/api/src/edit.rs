@@ -399,7 +399,10 @@ impl Session {
         if let Some(bitmap) = &report.bitmap {
             let wrong = bitmap.referenced_but_free > 0
                 || !bitmap.flagged_valid
-                || report.findings.iter().any(|f| f.code == "bitmap-checksum")
+                || report
+                    .findings
+                    .iter()
+                    .any(|f| f.code == "bitmap-checksum" || f.code == "bitmap-pointer-invalid")
                 || (free_orphans && bitmap.orphaned > 0);
             if wrong {
                 let outcome = match unwalked(&report, &walk) {

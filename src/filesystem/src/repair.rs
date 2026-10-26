@@ -89,44 +89,11 @@ pub fn rebuild_bitmap<S: BuildHasher>(
             ));
         }
         let root = volume.root();
-        if volume.rootblock().bitmap_extension != 0 {
-            return Err(EditError::Unsupported(
-                "this volume's bitmap continues in an extension chain, which ADE does not \
-                 write"
-                    .to_owned(),
-            ));
-        }
         let bitmap = Bitmap::read(&source, &geometry, volume.rootblock())?;
+        let pages = bitmap_layout(&bitmap, &volume, &geometry, in_use)?;
         let reserved = geometry.reserved();
         let total = geometry.total_blocks();
         let inside = |b: u32| b >= reserved && u64::from(b) < total;
-
-        let mut pages: HashSet<u32> = HashSet::new();
-        for &page in &bitmap.blocks {
-            if !inside(page) || page == root {
-                return Err(EditError::Damaged(format!(
-                    "the rootblock names block {page} as part of its bitmap, which is outside \
-                     the volume or is the rootblock itself"
-                )));
-            }
-            if in_use.contains(&page) {
-                return Err(EditError::Damaged(format!(
-                    "bitmap block {page} is also used by the directory tree"
-                )));
-            }
-            if !pages.insert(page) {
-                return Err(EditError::Damaged(format!(
-                    "the rootblock names block {page} twice as part of its bitmap"
-                )));
-            }
-        }
-        if bitmap.incomplete || bitmap.blocks.is_empty() {
-            return Err(EditError::BitmapUntrusted(
-                "the bitmap does not cover the whole volume, so there is nowhere to record \
-                 some blocks"
-                    .to_owned(),
-            ));
-        }
 
         let mut target: HashSet<u32> = in_use.iter().copied().filter(|&b| inside(b)).collect();
         target.insert(root);
@@ -182,6 +149,60 @@ pub fn rebuild_bitmap<S: BuildHasher>(
     };
     apply(image, geometry, &writes);
     Ok(repair)
+}
+
+/// The bitmap's own blocks, if the map is laid out where a repair can write
+/// it: every block inside the volume, none named twice or used by the tree,
+/// no extension chain, and the whole volume covered.
+fn bitmap_layout<S: BuildHasher>(
+    bitmap: &Bitmap,
+    volume: &Volume<'_>,
+    geometry: &Geometry,
+    in_use: &HashSet<u32, S>,
+) -> Result<HashSet<u32>, EditError> {
+    // Before the extension check, whose reason would be wrong for a pointer
+    // that is noise rather than a chain (BUG-015).
+    if let Some(bad) = bitmap.out_of_range.first() {
+        return Err(EditError::Damaged(format!(
+            "the rootblock names block {bad} for the bitmap, which is outside the volume; \
+             ADE does not choose where a bitmap goes"
+        )));
+    }
+    if volume.rootblock().bitmap_extension != 0 {
+        return Err(EditError::Unsupported(
+            "this volume's bitmap continues in an extension chain, which ADE does not write"
+                .to_owned(),
+        ));
+    }
+    let root = volume.root();
+    let reserved = geometry.reserved();
+    let mut pages: HashSet<u32> = HashSet::new();
+    for &page in &bitmap.blocks {
+        if page < reserved || page == root {
+            return Err(EditError::Damaged(format!(
+                "the rootblock names block {page} as part of its bitmap, which is a boot \
+                 block or the rootblock itself"
+            )));
+        }
+        if in_use.contains(&page) {
+            return Err(EditError::Damaged(format!(
+                "bitmap block {page} is also used by the directory tree"
+            )));
+        }
+        if !pages.insert(page) {
+            return Err(EditError::Damaged(format!(
+                "the rootblock names block {page} twice as part of its bitmap"
+            )));
+        }
+    }
+    if bitmap.incomplete || bitmap.blocks.is_empty() {
+        return Err(EditError::BitmapUntrusted(
+            "the bitmap does not cover the whole volume, so there is nowhere to record some \
+             blocks"
+                .to_owned(),
+        ));
+    }
+    Ok(pages)
 }
 
 /// One bitmap block with the bit for every block of the volume it maps set

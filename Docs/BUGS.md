@@ -10,10 +10,14 @@ Severity vocabulary: low | medium | high.
 
 ## Open
 
+_None._
+
+## Fixed
+
 ### BUG-015 Bitmap pointers outside the volume are counted as live blocks marked free
 **Severity:** low
-**Status:** open
-**Found:** 2026-10-26, measuring the corpus for the repair suite (F-034).
+**Status:** fixed
+**Found:** 2026-10-26, measuring the corpus for the repair suite (F-034). **Fixed** 2026-10-26.
 **Where:** [src/api/src/health.rs](../src/api/src/health.rs) `cross_check_bitmap`, which adds every pointer in `Bitmap::blocks` to the referenced set before comparing it with the map.
 
 **What is wrong.** `1000 Miglia.adf` has a rootblock of noise: a 159-byte name in a 30-byte field, and bitmap pointers such as 1,840,699 and 50,349,389 on an 1,760-block disk. Those pointers go into the set of blocks in use, the map — which covers only real blocks — has no bit for them, and the report says *24 blocks are in use by files but marked free (1840699, 50349389, …)*. No file uses them, they are not blocks of this volume, and `referenced-but-free` is the finding that means data is about to be lost. It is the only corpus image affected.
@@ -22,7 +26,11 @@ Severity vocabulary: low | medium | high.
 
 **Not fixed here** (Maintenance Rule 8). The repair suite does not act on it: it refuses this disk because the rootblock names a bitmap extension chain, and would refuse it again for the out-of-range pointers.
 
-## Fixed
+**The fix.** `Bitmap::read` records every bitmap pointer outside the volume in `out_of_range` — page pointers and an extension pointer it could not follow — keeping them in `blocks` too, so the page order still matches the rootblock's. `ade check` counts only in-range bitmap blocks as in use, and reports the rest as **`bitmap-pointer-invalid`**, a warning: *the rootblock names 25 blocks for the bitmap outside the volume (354283552, 2952972431, …)*. On `1000 Miglia` that finding replaces the false `referenced-but-free`; over the corpus no other image's findings changed. Schema **1.16 → 1.17**.
+
+**What it exposed downstream.** With the error gone, the disk no longer counted as unsound, so it opened for editing — and an edit would have allocated through a map whose page pointers are noise. The edit planner now refuses a bitmap with any pointer out of range, as it refuses one that fails its checksum. `ade repair` declines it with the reason, *ADE does not choose where a bitmap goes*, checked before the extension-chain refusal, whose reason was wrong for a `bm_ext` that is noise rather than a chain.
+
+**Tests.** `health.rs` builds a page pointer and an extension pointer out of range and requires the new finding and no `referenced-but-free`; `repair.rs` requires an edit to refuse and a repair to decline, changing nothing. Each fails with its part of the fix reverted, including the extension pointer going unrecorded.
 
 ### BUG-016 The health report says nothing about a directory whose hash table points at non-entries
 **Severity:** medium
