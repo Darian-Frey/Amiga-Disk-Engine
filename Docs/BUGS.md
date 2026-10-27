@@ -24,19 +24,24 @@ Severity vocabulary: low | medium | high.
 
 **Not fixed here** (Maintenance Rule 8). The write suite now refuses an entry whose parent field does not name the directory listing it, with that reason, rather than acting through the wrong block.
 
+
+## Fixed
+
 ### BUG-017 `ade create --name` writes a name outside ASCII as UTF-8, not Latin-1
 **Severity:** low
-**Status:** open
-**Found:** 2026-10-27, writing format-in-place for F-031.
+**Status:** fixed
+**Found:** 2026-10-27, writing format-in-place for F-031. **Fixed** 2026-10-27.
 **Where:** [src/filesystem/src/format.rs](../src/filesystem/src/format.rs) `blank`, which stores `name.as_bytes()`, and its callers: `ade create`, `ade_create`, and the window's New disk.
 
 **What is wrong.** An Amiga name is Latin-1: it is what every reader in ADE decodes names as, and what every other write converts to. `ade create disk.adf --name=Größe` stores the 7 bytes `47 72 C3 B6 C3 9F 65` where AmigaDOS expects the 5 bytes `47 72 F6 DF 65`, so an Amiga shows `GrÃ¶Ãe`, and a name of 16 accented letters is refused as too long at 32 bytes. Every other write — `mkdir`, `put`, `rename` — converts with `amiga_name` first, and refuses a character Latin-1 lacks.
 
 **Correct behaviour.** Convert as `amiga_name` does, refusing what Latin-1 cannot hold, and store the bytes. `format::blank_named`, added for format-in-place, already takes the bytes; `blank` should convert and call it.
 
-**Not fixed here** (Maintenance Rule 8): `blank` keeps its behaviour, passing its UTF-8 bytes to `blank_named`.
+**Not fixed** in the change that found it (Maintenance Rule 8).
 
-## Fixed
+**The fix.** `blank` converts the name to Latin-1, a character a byte, and calls `blank_named` with the bytes; a character Latin-1 has no byte for is refused with the new `FormatError::NameNotLatin1` — *volume name contains '日', which has no Latin-1 byte, so it cannot be in an Amiga name* — and nothing is written. `Größe` is stored as `47 72 F6 DF 65`, `ade info` reads it back as `Größe`, and ADFlib prints the same five bytes. The 30-character limit now means thirty Latin-1 characters: thirty `é` fit, where they were 60 UTF-8 bytes and refused. One fix covers every caller — `ade create`, `ade_create` and the window's New disk all reach `blank`.
+
+**Tests.** `create.rs` checks the stored bytes, the refusal, the limit, and that ADFlib reads the name; `cli/tests/create.rs` the command end to end, and that a refused name writes no file. Putting the UTF-8 bytes back fails them.
 
 ### BUG-015 Bitmap pointers outside the volume are counted as live blocks marked free
 **Severity:** low

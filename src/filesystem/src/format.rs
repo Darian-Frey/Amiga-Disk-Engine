@@ -58,6 +58,12 @@ pub enum FormatError {
         /// The offending byte.
         byte: u8,
     },
+    /// The name holds a character Latin-1 has no byte for, so it cannot be
+    /// in an Amiga name at all.
+    NameNotLatin1 {
+        /// The offending character.
+        ch: char,
+    },
     /// The geometry describes a volume too small to hold a filesystem.
     TooSmall {
         /// Blocks the geometry offers.
@@ -87,6 +93,11 @@ impl core::fmt::Display for FormatError {
                     "volume name contains a byte AmigaDOS forbids: {byte:#04x}"
                 )
             }
+            Self::NameNotLatin1 { ch } => write!(
+                f,
+                "volume name contains {ch:?}, which has no Latin-1 byte, so it cannot be in an \
+                 Amiga name"
+            ),
             Self::TooSmall { blocks } => {
                 write!(f, "a volume needs more than {blocks} blocks")
             }
@@ -117,6 +128,8 @@ pub struct Stamp {
 
 /// Build a blank volume of `geometry`, returning the whole image.
 ///
+/// `name` is stored in Latin-1, the character set an Amiga name is in.
+///
 /// # Errors
 /// [`FormatError`] if the name will not fit or is not a legal AmigaDOS volume
 /// name, or the geometry is too small to hold a rootblock and a bitmap.
@@ -126,9 +139,14 @@ pub fn blank(
     name: &str,
     created: Stamp,
 ) -> Result<Vec<u8>, FormatError> {
-    // Its UTF-8 bytes, which for a name outside ASCII are not the Latin-1
-    // AmigaDOS reads (BUG-017).
-    blank_named(geometry, dostype, name.as_bytes(), created)
+    // Latin-1, a character a byte, as AmigaDOS stores a name. Its UTF-8
+    // bytes were stored until BUG-017: `Größe` became seven bytes an Amiga
+    // shows as `GrÃ¶Ã\x9fe`.
+    let latin1: Vec<u8> = name
+        .chars()
+        .map(|ch| u8::try_from(u32::from(ch)).map_err(|_| FormatError::NameNotLatin1 { ch }))
+        .collect::<Result<_, _>>()?;
+    blank_named(geometry, dostype, &latin1, created)
 }
 
 /// [`blank`], with the volume name given as the bytes to store: Latin-1, as

@@ -247,3 +247,24 @@ fn a_hard_disk_too_large_for_its_own_bitmap_is_refused() {
     assert!(!dir.join("huge.hdf").exists(), "nothing half-written");
     let _ = fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn an_accented_name_is_stored_in_latin1_and_one_latin1_lacks_is_refused() {
+    // BUG-017: `--name=Größe` was stored as its UTF-8 bytes.
+    let dir = scratch("latin1");
+    let disk = dir.join("named.adf");
+    let (_, err, code) = run(&["create", disk.to_str().unwrap(), "--name=Größe"]);
+    assert_eq!(code, Some(0), "{err}");
+    let bytes = fs::read(&disk).unwrap();
+    let root = 880 * 512 + 512 - 80;
+    assert_eq!(bytes.get(root..root + 6), Some(&b"\x05Gr\xF6\xDFe"[..]));
+    let (info, _, _) = run(&["info", disk.to_str().unwrap()]);
+    assert!(info.contains("Größe"), "read back as it was given: {info}");
+
+    let refused = dir.join("refused.adf");
+    let (_, err, code) = run(&["create", refused.to_str().unwrap(), "--name=日本"]);
+    assert_eq!(code, Some(2));
+    assert!(err.contains("Latin-1"), "{err}");
+    assert!(!refused.exists(), "nothing is written");
+    let _ = fs::remove_dir_all(&dir);
+}

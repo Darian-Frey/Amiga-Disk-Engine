@@ -136,6 +136,51 @@ fn a_name_that_amigados_could_not_hold_is_refused() {
     }
     // Thirty exactly is the limit, not one under it.
     assert!(format::blank(Geometry::DD_FLOPPY, ffs(), &"x".repeat(30), WHEN).is_ok());
+    // A character Latin-1 has no byte for cannot be in an Amiga name.
+    assert_eq!(
+        format::blank(Geometry::DD_FLOPPY, ffs(), "日本", WHEN),
+        Err(FormatError::NameNotLatin1 { ch: '日' })
+    );
+    // And the limit is thirty characters of Latin-1, not thirty UTF-8 bytes:
+    // `é` is two of those (BUG-017).
+    assert!(format::blank(Geometry::DD_FLOPPY, ffs(), &"é".repeat(30), WHEN).is_ok());
+}
+
+#[test]
+fn a_name_outside_ascii_is_stored_in_latin1_and_adflib_reads_it() {
+    // BUG-017: the name's UTF-8 bytes were stored, so `Größe` became seven
+    // bytes an Amiga shows as `GrÃ¶Ã\x9fe`.
+    let bytes = format::blank(Geometry::DD_FLOPPY, ffs(), "Größe", WHEN).unwrap();
+    let root = 880 * 512 + 512 - 80;
+    assert_eq!(&bytes[root..root + 6], b"\x05Gr\xF6\xDFe");
+    let image = ade_core::Image::from_bytes(bytes.clone()).unwrap();
+    assert_eq!(image.volume().unwrap().rootblock().name, b"Gr\xF6\xDFe");
+
+    // ADFlib prints the name's bytes as they are.
+    let dir = std::env::temp_dir().join(format!("ade-create-latin1-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("named.adf");
+    std::fs::write(&path, &bytes).unwrap();
+    let out = Command::new("sh")
+        .arg("-c")
+        .arg("ulimit -v 1048576; exec timeout 20 unadf -l \"$1\"")
+        .arg("sh")
+        .arg(&path)
+        .output();
+    let _ = std::fs::remove_dir_all(&dir);
+    let Ok(out) = out else {
+        eprintln!("skipping: unadf not installed");
+        return;
+    };
+    if out.stdout.is_empty() {
+        eprintln!("skipping: unadf produced nothing");
+        return;
+    }
+    assert!(
+        out.stdout.windows(7).any(|w| w == b"\"Gr\xF6\xDFe\""),
+        "ADFlib should read the Latin-1 name: {}",
+        String::from_utf8_lossy(&out.stdout)
+    );
 }
 
 #[test]
