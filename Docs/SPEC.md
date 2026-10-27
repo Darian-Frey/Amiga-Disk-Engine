@@ -1079,6 +1079,64 @@ The file the Kickstart 1.x Preferences tool saves and Intuition loads from `DEVS
 
 **Not decoded: the hot spot as a pixel.** `XOffset`/`YOffset` are reported as stored. Whether they count sprite pixels or the screen's high-resolution pixels decides where in the image the tip is, and the file does not say.
 
+## Workbench icons (`.info`)
+
+*For F-033. Measured 2026-10-26 over every icon in the corpus.*
+
+An icon is the `struct DiskObject` `icon.library` writes, followed by what its pointers pointed at. The structures are `workbench/workbench.h` and `intuition/intuition.h`; **the order is not in any header** and is taken from AROS's reader, `workbench/libs/icon/diskobjio.c` (read locally, not committed). A pointer in the file is only ever a flag: non-zero means "it follows".
+
+| Offset | Field | Notes |
+|---|---|---|
+| 0 | `do_Magic` | `$E310` |
+| 2 | `do_Version` | 1 on all 12,826 corpus icons |
+| 4 | `do_Gadget` | 44 bytes: size at 12/14, `Flags` at 16, `GadgetRender` 22, `SelectRender` 26, `UserData` 44 |
+| 48 | `do_Type` | 1 disk, 2 drawer, 3 tool, 4 project, 5 trashcan, 6 device, 7 Kickstart, 8 AppIcon |
+| 50, 54 | `do_DefaultTool`, `do_ToolTypes` | flags |
+| 58, 62 | `do_CurrentX`, `do_CurrentY` | `$80000000` (`NO_ICON_POSITION`): Workbench places it |
+| 66, 70 | `do_DrawerData`, `do_ToolWindow` | flags |
+| 74 | `do_StackSize` | |
+
+Then, each only when the header says so: the drawer's window, 56 bytes (a `NewWindow` and two scroll offsets), when `do_DrawerData` is set; the image — a 20-byte `struct Image` and its bitplanes, rows padded to 16 bits, plane after plane — when `GadgetRender` is set or the gadget has `GFLG_GADGIMAGE`; a second, selected image when `SelectRender` is set or the highlight bits are `GFLG_GADGHIMAGE`; the default tool, the tool types (a pointer-array size, `(n + 1) × 4`, then each string) and the tool window, each string a length counting its NUL; then six bytes of drawer settings (`dd_Flags`, `dd_ViewModes`) on a revision-1 icon with a drawer.
+
+**`UserData & $FF` is the revision**: 0 on 6,200 corpus icons (Workbench 1.x), 1 on 6,550 (2.0 and later, `WB_DISKREVISION`), and noise on four. It is the best evidence of the palette an icon was drawn for.
+
+**The six drawer-settings bytes are optional in practice.** 62 revision-1 icons with a drawer end exactly where they would start — Workbench saved and read them — so a missing extension is read as absent, not as damage.
+
+**An icon holds pens, not colours.** Pens 0–3 are the Workbench screen's first four colours, taken from the `devs/system-configuration` of real Workbench disks rather than from memory: 1.2 and 1.3 give `$05a $fff $002 $f80`, 2.05 and 3.1 give `$aaa $000 $fff $68b`. A revision-0 icon is drawn in the first, a revision-1 icon in the second. Pens 4 and up — 464 icons have more than two planes — depend on the screen, and are drawn in greys and said to be.
+
+**A Workbench screen's pixels are twice as tall as wide** (high resolution, not interlaced), so the view draws an icon's pixels 1 × 2, and an icon drawn square looks flattened. The CLI's character picture needs no correction: a character cell is already about twice as tall as wide.
+
+**Bounded (D-006).** An image of depth 0 stores no bitplanes, so a 20-byte header could ask for 65,535 × 65,535 pens from nothing; images over 1,024 on a side or 8 planes deep are refused. The corpus's widest icon is about 330 pixels. 300,000 fuzz cases, and the fuzz target is shown to find the unbounded allocation when the bound is removed.
+
+**Corpus, 2026-10-26:** 12,826 icons on 1,777 disks; **12,817 decode** — 106 of them from files ADE reads as damaged — and **12,807 account for every byte** of their file. The five intact files refused each end partway through a part their header says follows. No icon carries OS 3.5 colour data (`FORM ICON`); 9 carry a NewIcons image in their tool types, which is counted and not drawn. The 1,727 `.info` files that start `$F34C0012` are a different, older format — a datestamp, then names separated by newlines — with no independent source, and are named as not decoded.
+
+## IFF ILBM pictures
+
+*For F-033. Measured 2026-10-26 over every ILBM in the corpus.*
+
+A `FORM ILBM` of chunks, each an ID, a 32-bit length and the bytes, padded to an even length. Read from AROS's `ilbm.datatype` (`workbench/classes/datatypes/ilbm/ilbmclass.c`) and `datatypes/pictureclass.h`, read locally and not committed.
+
+| Chunk | What ADE reads |
+|---|---|
+| `BMHD` | width, height (0, 2); depth (8); masking (9): 0 none, 1 a mask plane, 2 a transparent colour, 3 lasso; compression (10): 0 none, 1 ByteRun1; transparent colour (12); pixel aspect (14, 15); page size (16, 18) |
+| `CMAP` | colours, three bytes each; a map whose every low nibble is zero is a 4-bit map and is widened, `$F0` to `$FF`, as AROS widens it |
+| `CAMG` | display mode: bit 2 interlace, 5 super-high resolution, 7 extra-half-brite, 11 hold-and-modify, 15 high resolution |
+| `BODY` | each row's planes in turn, rows padded to 16 bits, a mask plane after them under masking 1; ByteRun1 unpacked a row at a time |
+
+**ByteRun1:** a byte *n* from 0 to 127 copies the next *n* + 1 bytes; −1 to −127 repeats the next byte 1 − *n* times; −128 does nothing. **Extra-half-brite** (depth 6): pens 32–63 are pens 0–31 at half brightness. **Hold-and-modify** (depth 6 or 8): the top two planes say what the rest are — a colour from the map, or a new blue, red or green with the other two kept from the pixel before. HAM6's 4 bits are widened to 8 by repetition; HAM8's 6 keep the old low 2. **A hold-and-modify line starts from colour 0**, the background, as the hardware does; AROS starts from black. They differ on 36 corpus pictures, whose colour 0 is not black. **Depth 24** is true colour, planes 0–7 red, 8–15 green, 16–23 blue.
+
+**A transparent colour is drawn as its colour.** Deluxe Paint marks colour 0 transparent on 2,590 of 4,670 corpus pictures, full-screen ones included, for when a picture is pasted as a brush; drawing it as a hole would chequer most backgrounds. The view says which colour it is.
+
+**Pixel shape** comes from the file's own aspect bytes, or failing those its display mode: 147 corpus pictures have pixels twice as tall as wide (high resolution), 30 twice as wide (low resolution, interlaced).
+
+**A colour map with no picture is a palette.** Deluxe Paint's `.col` files and preferences' `palette.ilbm` are a `BMHD` of nothing and a `CMAP`: 102 in the corpus, decoded as their colours.
+
+**What a picture does not say.** `10 out of 10 – Dinosaurs`'s `Trex_Screen` decodes to solid green: its `BODY` holds a full drawing, but every one of its 32 map entries is `$509000`. The program sets the real colours when it shows the screen. ADE draws what the file says.
+
+**Bounded (D-006).** Sides over 4,096 are refused, and so is a `BODY` too short to fill the picture even at ByteRun1's best (64 times); otherwise a header claiming 4,096 × 4,096 reserves 64 MB on the strength of a few bytes. Found by the fuzz target; 300,000 cases.
+
+**Corpus, 2026-10-26:** 4,927 intact ILBM files; **4,664 pictures** decode — 4,383 indexed, 187 extra-half-brite, 94 hold-and-modify — and **4,637 use their `BODY` to the byte**, which a misread row length, plane count or ByteRun1 rule could not survive across thousands of files. 161 are refused, all game formats wearing an ILBM header: other compression numbers (Day of the Pharaoh's 4, RoboSport's 86), no `BMHD`, or a `BODY` packed some other way (Die Stadt der Löwen's pictures claim no compression in bodies too short to be uncompressed). `ANIM` files hold ILBMs inside another `FORM` and are not decoded.
+
 ## Flux formats
 
 - **Extended-ADF** — see above.

@@ -595,3 +595,150 @@ fn fuzz_the_preferences_decoder() {
         });
     }
 }
+
+#[test]
+#[allow(
+    clippy::disallowed_methods,
+    clippy::cast_possible_truncation,
+    reason = "a template written by hand, not with the helpers that read it (C-001's exception)"
+)]
+fn fuzz_the_icon_decoder() {
+    // F-033. Mutations of a real-shaped icon — header, drawer window, two
+    // images, a default tool and tool types — so they reach every part, plus
+    // truncation. Every size and count in an icon comes from the file, and
+    // none may make the decoder allocate what the file does not pay for: an
+    // image of depth 0 stores no planes, which is why sides are bounded.
+    let mut template = vec![0u8; 78];
+    template[0..2].copy_from_slice(&[0xE3, 0x10]);
+    template[3] = 1;
+    template[17] = 4 | 2; // an image, and a second one when selected
+    template[25] = 1; // GadgetRender
+    template[29] = 1; // SelectRender
+    template[47] = 1; // revision 1
+    template[48] = 2; // a drawer
+    template[53] = 1; // DefaultTool
+    template[57] = 1; // ToolTypes
+    template[69] = 1; // DrawerData
+    template.extend(vec![0u8; 56]);
+    for _ in 0..2 {
+        let mut image = vec![0u8; 20];
+        image[5] = 20;
+        image[7] = 6;
+        image[9] = 2;
+        image[14] = 3;
+        template.extend(image);
+        template.extend((0u8..2 * 6 * 4).map(|i| i.wrapping_mul(37)));
+    }
+    for s in [&b"SYS:Utilities/More"[..], b"FILETYPE=TEXT", b"DONOTWAIT"] {
+        if s == b"FILETYPE=TEXT" {
+            template.extend(12u32.to_be_bytes());
+        }
+        template.extend((s.len() as u32 + 1).to_be_bytes());
+        template.extend(s);
+        template.push(0);
+    }
+    template.extend([0, 0, 0, 1, 0, 2]);
+    assert!(
+        ade_core::decode::file(b"x.info", &template).is_ok(),
+        "the template decodes"
+    );
+
+    let mut rng = Rng::new(0x5EED_1C0A);
+    for i in 0..iterations(20_000) {
+        let seed = u64::from(i);
+        let mut buf = template.clone();
+        for _ in 0..=rng.below(6) {
+            mutate(&mut buf, &mut rng);
+        }
+        // Keep the magic most of the time, or nothing reaches the parser.
+        if rng.below(8) != 0 && buf.len() >= 2 {
+            buf[0..2].copy_from_slice(&[0xE3, 0x10]);
+        }
+        if rng.below(6) == 0 {
+            buf.truncate(rng.below(buf.len() + 1));
+        }
+        timed(seed, "icon decoder", || {
+            if let Ok(d) = ade_core::decode::file(b"x.info", &buf) {
+                if let Some(p) = &d.picture {
+                    assert_eq!(p.argb.len(), p.width * p.height, "seed {seed}");
+                }
+                let _ = d.lines();
+            }
+        });
+    }
+}
+
+#[test]
+#[allow(
+    clippy::disallowed_methods,
+    clippy::cast_possible_truncation,
+    reason = "a template written by hand, not with the helpers that read it (C-001's exception)"
+)]
+fn fuzz_the_picture_decoder() {
+    // F-033. Mutations of a HAM6 ILBM with a ByteRun1 body, so they reach
+    // the chunk walk, the unpacker and hold-and-modify, plus truncation.
+    // Sizes come from the header; none may make the decoder allocate what
+    // the file does not pay for beyond the bounded picture.
+    fn chunk(id: [u8; 4], data: &[u8]) -> Vec<u8> {
+        let mut c = id.to_vec();
+        c.extend((data.len() as u32).to_be_bytes());
+        c.extend(data);
+        if data.len() % 2 == 1 {
+            c.push(0);
+        }
+        c
+    }
+    let mut bmhd = vec![0u8; 20];
+    bmhd[0..2].copy_from_slice(&32u16.to_be_bytes());
+    bmhd[2..4].copy_from_slice(&8u16.to_be_bytes());
+    bmhd[8] = 6;
+    bmhd[10] = 1;
+    bmhd[14] = 10;
+    bmhd[15] = 11;
+    let cmap: Vec<u8> = (0..48u8).map(|i| i.wrapping_mul(17)).collect();
+    // Each row: 6 planes of 4 bytes, as one literal and one run.
+    let mut body = Vec::new();
+    for y in 0..8u8 {
+        body.extend([11, y, 0x55, 0xAA, y, 1, 2, 3, 4, 5, 6, 7, 8]);
+        body.extend([0xF5, y.wrapping_mul(29)]);
+    }
+    let mut inner = b"ILBM".to_vec();
+    inner.extend(chunk(*b"BMHD", &bmhd));
+    inner.extend(chunk(*b"CMAP", &cmap));
+    inner.extend(chunk(*b"CAMG", &0x800u32.to_be_bytes()));
+    inner.extend(chunk(*b"BODY", &body));
+    let mut template = b"FORM".to_vec();
+    template.extend((inner.len() as u32).to_be_bytes());
+    template.extend(inner);
+    assert!(
+        ade_core::decode::file(b"pic", &template)
+            .unwrap()
+            .picture
+            .is_some(),
+        "the template decodes"
+    );
+
+    let mut rng = Rng::new(0x5EED_1BB3);
+    for i in 0..iterations(20_000) {
+        let seed = u64::from(i);
+        let mut buf = template.clone();
+        for _ in 0..=rng.below(6) {
+            mutate(&mut buf, &mut rng);
+        }
+        if rng.below(8) != 0 && buf.len() >= 12 {
+            buf[0..4].copy_from_slice(b"FORM");
+            buf[8..12].copy_from_slice(b"ILBM");
+        }
+        if rng.below(6) == 0 {
+            buf.truncate(rng.below(buf.len() + 1));
+        }
+        timed(seed, "picture decoder", || {
+            if let Ok(d) = ade_core::decode::file(b"pic", &buf) {
+                if let Some(p) = &d.picture {
+                    assert_eq!(p.argb.len(), p.width * p.height, "seed {seed}");
+                }
+                let _ = d.lines();
+            }
+        });
+    }
+}

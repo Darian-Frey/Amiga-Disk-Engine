@@ -109,6 +109,7 @@ private slots:
     void aDiskMadeHereSavesWithoutAskingOrBackup();
     void aFileThatIsNotAProgramSaysWhyAndCanBeDecodedAnyway();
     void preferencesReadInWordsInTheDecodedView();
+    void anIconIsDrawnTwiceAsTallAsWideInItsWorkbenchColours();
     void theVolumeListedInItsOwnTableIsMarkedAndCannotBeOpened();
     void entriesAreRenamedAndDeletedAndUndoBringsThemBack();
     void aDiskIsRepairedFromTheDiskMenuAndUndoneInOneStep();
@@ -2400,6 +2401,59 @@ void TestMainWindow::preferencesReadInWordsInTheDecodedView() {
     window.setDiscardConfirmation([](const QString &) { return true; });
     QVERIFY(window.closeAll());
     QVERIFY2(!view->toPlainText().contains(QStringLiteral("Topaz")), qPrintable(view->toPlainText()));
+}
+
+void TestMainWindow::anIconIsDrawnTwiceAsTallAsWideInItsWorkbenchColours() {
+    // A revision-1 tool icon: 16 x 4, two planes, the top-left pixel pen 1,
+    // complemented when selected. Built by hand from the layout SPEC gives.
+    QByteArray icon(78, '\0');
+    auto put = [&icon](int at, quint32 v, int n) {
+        for (int i = 0; i < n; ++i) icon[at + i] = char(v >> (8 * (n - 1 - i)));
+    };
+    put(0, 0xE310, 2);
+    put(2, 1, 2);
+    put(16, 4, 2);          // GFLG_GADGIMAGE, complement on selection
+    put(22, 1, 4);          // GadgetRender
+    put(44, 1, 4);          // UserData: revision 1
+    icon[48] = 3;           // WBTOOL
+    put(58, 0x80000000, 4); // no position
+    QByteArray image(20, '\0');
+    image[5] = 16;
+    image[7] = 4;
+    image[9] = 2;
+    image[14] = 3;
+    icon += image;
+    QByteArray planes(2 * 4 * 2, '\0');
+    planes[0] = char(0x80);
+    icon += planes;
+
+    QTemporaryDir dir;
+    const QString disk = blankDisk(dir, QStringLiteral("icons.adf"));
+    const QString host = dir.filePath(QStringLiteral("Tool.info"));
+    writeFile(host, icon);
+    MainWindow window;
+    window.setDiscardConfirmation([](const QString &) { return true; });
+    window.openImage(disk);
+    QCOMPARE(window.addFiles(browser(window)->topLevelItem(0), {host}), 1);
+    QTreeWidgetItem *row = childNamed(browser(window)->topLevelItem(0), QStringLiteral("Tool.info"));
+    QVERIFY(row);
+
+    QTextBrowser *view = showDecoded(window, row);
+    QVERIFY(view);
+    const QString text = view->toPlainText();
+    QVERIFY2(text.contains(QStringLiteral("Workbench icon: Tool")), qPrintable(text));
+    QVERIFY2(text.contains(QStringLiteral("$aaa, Workbench 2.0's colour 0")), qPrintable(text));
+
+    // The icon and its complement, 36 x 4 with the gap, each pixel 8 wide
+    // and 16 tall; pen 1 in Workbench 2.0's black, pen 0 its grey.
+    const QImage image2 = view->document()
+                              ->resource(QTextDocument::ImageResource,
+                                         QUrl(QStringLiteral("ade-decoded:picture")))
+                              .value<QImage>();
+    QCOMPARE(image2.size(), QSize(36 * 8, 4 * 16));
+    QCOMPARE(QColor(image2.pixel(0, 15)), QColor(0, 0, 0));
+    QCOMPARE(QColor(image2.pixel(8, 0)), QColor(0xAA, 0xAA, 0xAA));
+    QCOMPARE(QColor(image2.pixel(0, 16)), QColor(0xAA, 0xAA, 0xAA));
 }
 
 void TestMainWindow::aFileTheDecodedViewDoesNotKnowSaysWhatItDoes() {

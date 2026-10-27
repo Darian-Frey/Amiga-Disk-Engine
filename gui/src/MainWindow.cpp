@@ -2329,15 +2329,29 @@ namespace {
 
 // The picture as crisp pixel art over a checkerboard, so its transparent
 // pixels read as transparent rather than as the page.
-QImage pixelArt(const QImage &picture, const QPalette &palette) {
-    constexpr int Scale = 8;
-    QImage out(picture.width() * Scale, picture.height() * Scale, QImage::Format_ARGB32);
+// Each Amiga pixel drawn as a block, as large as fits up to 8 times, in the
+// shape the Amiga showed it: a Workbench icon's pixels are twice as tall as
+// they are wide, and drawn square it looks flattened. A 16-pixel pointer is
+// drawn 8 times over; a 320-pixel picture at most twice.
+QImage pixelArt(const QImage &picture, const QPalette &palette, QSize shape) {
+    constexpr int MaxScale = 8;
+    constexpr int MaxWidth = 640;
+    constexpr int MaxHeight = 512;
+    const int wide = qMax(1, shape.width());
+    const int tall = qMax(1, shape.height());
+    const int s = qBound(1, qMin(MaxWidth / qMax(1, picture.width() * wide),
+                                 MaxHeight / qMax(1, picture.height() * tall)),
+                         MaxScale);
+    const int sx = s * wide;
+    const int sy = s * tall;
+    QImage out(picture.width() * sx, picture.height() * sy, QImage::Format_ARGB32);
     const QColor base = palette.color(QPalette::Base);
     const QColor shade = base.lightness() > 128 ? base.darker(112) : base.lighter(135);
+    const int cell = qMax(1, sx / 2);
     for (int y = 0; y < out.height(); ++y) {
         for (int x = 0; x < out.width(); ++x) {
-            const QRgb px = picture.pixel(x / Scale, y / Scale);
-            const bool check = ((x / (Scale / 2)) + (y / (Scale / 2))) % 2 != 0;
+            const QRgb px = picture.pixel(x / sx, y / sy);
+            const bool check = ((x / cell) + (y / cell)) % 2 != 0;
             out.setPixel(x, y, qAlpha(px) ? px : (check ? shade : base).rgb());
         }
     }
@@ -2397,7 +2411,7 @@ void MainWindow::refreshDecoded() {
     if (!decoded.picture.isNull()) {
         const QUrl url(QStringLiteral("ade-decoded:picture"));
         m_decoded->document()->addResource(QTextDocument::ImageResource, url,
-                                           pixelArt(decoded.picture, m_decoded->palette()));
+                                           pixelArt(decoded.picture, m_decoded->palette(), decoded.pixelShape));
         html += QStringLiteral("<p><img src='%1'><br>%2</p>")
                     .arg(url.toString(), decoded.caption.toHtmlEscaped());
     }

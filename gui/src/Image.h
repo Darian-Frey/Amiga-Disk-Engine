@@ -114,6 +114,8 @@ struct Decoded {
     /// Null when the file holds no picture.
     QImage picture;
     QString caption;
+    /// A picture pixel's shape, width to height: 1 x 2 for an icon.
+    QSize pixelShape{1, 1};
     /// False when the file could not be read at all.
     bool read = false;
 };
@@ -143,6 +145,11 @@ inline Decoded takeDecoded(AdeDecoded *raw) {
                              QImage::Format_ARGB32)
                           .copy();
         out.caption = QString::fromUtf8(bytes(ade_decoded_picture_caption(raw)));
+        uint32_t pw = 1;
+        uint32_t ph = 1;
+        if (ade_decoded_picture_pixel_shape(raw, &pw, &ph) == ADE_OK && pw > 0 && ph > 0) {
+            out.pixelShape = QSize(static_cast<int>(pw), static_cast<int>(ph));
+        }
     }
     ade_decoded_free(raw);
     return out;

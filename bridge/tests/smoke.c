@@ -203,7 +203,8 @@ int main(int argc, char **argv) {
                       ade_decoded_refusal(plain).len > 0 &&
                       ade_decoded_title(plain).len == 0 &&
                       ade_decoded_picture(plain, &w, &h) == NULL && w == 0 && h == 0 &&
-                      ade_decoded_field(plain, 0, &field) == ADE_NOT_FOUND,
+                      ade_decoded_field(plain, 0, &field) == ADE_NOT_FOUND &&
+                      ade_decoded_picture_pixel_shape(plain, &w, &h) == ADE_NOT_FOUND,
                   "a file ADE does not decode says why");
             ade_decoded_free(plain);
 

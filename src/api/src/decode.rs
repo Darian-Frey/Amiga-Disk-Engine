@@ -5,12 +5,19 @@
 //! belongs here rather than in a front end, for the same reason as the
 //! Assembly view's (F-032): the GUI and the CLI must give the same answer.
 //!
-//! One format so far, Intuition's Preferences. The shape — labelled fields in
-//! groups, colours carried as colours, and a picture — is meant for the next
-//! one too: an icon is fields and a picture, a font is fields and a picture.
+//! Three formats: Intuition's Preferences, Workbench icons and IFF ILBM
+//! pictures. All are the same shape — labelled fields in groups, colours
+//! carried as colours, and a picture — which is the shape the next one is
+//! meant to take too.
 
-pub use ade_object::prefs::Field;
+pub use ade_object::decoded::Field;
+use ade_object::icon::{self, Highlight, Icon};
+use ade_object::ilbm;
 use ade_object::prefs::{self, Pointer};
+
+/// What ADE decodes, for a file it does not.
+const DECODES: &str = "It decodes Workbench icons, IFF ILBM pictures and Intuition's \
+                       Preferences (devs/system-configuration).";
 
 /// A decoded file.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -34,6 +41,11 @@ pub struct Picture {
     pub height: usize,
     /// One `0xAARRGGBB` per pixel, row by row; alpha 0 is transparent.
     pub argb: Vec<u32>,
+    /// The shape of a pixel as the Amiga showed it, width to height: (1, 1)
+    /// square, (1, 2) a high-resolution non-interlaced screen's, twice as
+    /// tall as wide, (2, 1) a low-resolution interlaced one's. Drawn square,
+    /// a Workbench icon looks flattened.
+    pub pixel_shape: (u8, u8),
 }
 
 /// Why a file was not decoded.
@@ -54,6 +66,18 @@ impl core::error::Error for NotDecoded {}
 /// [`NotDecoded`] for a file ADE does not recognise, saying what it does
 /// decode — the view shows that rather than nothing.
 pub fn file(name: &[u8], bytes: &[u8]) -> Result<Decoded, NotDecoded> {
+    // By content, not by name: an icon is an icon whatever it is called, and
+    // 180 corpus icons are not called `.info`.
+    if icon::is_icon(bytes) {
+        return icon::parse(bytes)
+            .map(|i| icon_decoded(&i))
+            .map_err(|e| NotDecoded(format!("a Workbench icon, but {e}")));
+    }
+    if ilbm::is_ilbm(bytes) {
+        return ilbm::parse(bytes)
+            .map(|p| ilbm_decoded(&p))
+            .map_err(|e| NotDecoded(format!("an IFF ILBM picture, but {e}")));
+    }
     if prefs::is_preferences(name, bytes.len())
         && let Some(p) = prefs::decode(bytes)
     {
@@ -73,11 +97,154 @@ pub fn file(name: &[u8], bytes: &[u8]) -> Result<Decoded, NotDecoded> {
             prefs::SIZE
         )));
     }
-    Err(NotDecoded(
-        "not a format ADE decodes yet. It decodes Intuition's Preferences \
-         (devs/system-configuration)."
-            .to_owned(),
-    ))
+    Err(NotDecoded(format!(
+        "not a format ADE decodes yet. {DECODES}"
+    )))
+}
+
+/// The Workbench screen's first four colours, as `0xRRGGBB`: what an icon's
+/// pens 0 to 3 were drawn in. Taken from the `devs/system-configuration` of
+/// real Workbench disks rather than from memory — 1.2 and 1.3 both give
+/// `$05a $fff $002 $f80`, 2.05 and 3.1 both `$aaa $000 $fff $68b`.
+const WORKBENCH_1: [u32; 4] = [0x00_55AA, 0xFF_FFFF, 0x00_0022, 0xFF_8800];
+const WORKBENCH_2: [u32; 4] = [0xAA_AAAA, 0x00_0000, 0xFF_FFFF, 0x66_88BB];
+
+fn icon_decoded(i: &Icon) -> Decoded {
+    let (palette, which) = if i.revision == 0 {
+        (WORKBENCH_1, "Workbench 1.x")
+    } else {
+        (WORKBENCH_2, "Workbench 2.0")
+    };
+    let mut fields = i.fields();
+    let deepest = i
+        .image
+        .iter()
+        .chain(&i.selected)
+        .map(|img| img.depth)
+        .max()
+        .unwrap_or(0);
+    if deepest > 0 {
+        for (pen, &rgb) in palette.iter().enumerate() {
+            fields.push(Field {
+                group: "Drawn with",
+                label: format!("Pen {pen}"),
+                value: format!(
+                    "${:x}{:x}{:x}, {which}'s colour {pen}",
+                    rgb >> 20 & 0xF,
+                    rgb >> 12 & 0xF,
+                    rgb >> 4 & 0xF
+                ),
+                colour: Some(rgb),
+            });
+        }
+        if deepest > 2 {
+            fields.push(Field::new(
+                "Drawn with",
+                "Pens 4 and up",
+                "shades of grey: their colours depend on the screen, and the icon does not say",
+            ));
+        }
+    }
+    let picture = i.image.as_ref().map(|normal| {
+        let selected = match i.highlight {
+            Highlight::Image => i.selected.clone(),
+            Highlight::Complement => Some(complement(normal)),
+            Highlight::Box | Highlight::Nothing => None,
+        };
+        icon_picture(normal, selected.as_ref(), &palette, which)
+    });
+    Decoded {
+        title: format!(
+            "Workbench icon: {}",
+            i.kind.describe().split(" (").next().unwrap_or_default()
+        ),
+        fields,
+        picture,
+    }
+}
+
+/// The image with every pen inverted, as Intuition draws a complemented
+/// gadget.
+fn complement(img: &icon::Image) -> icon::Image {
+    let mask = u8::try_from((1u16 << img.depth.min(8)).saturating_sub(1)).unwrap_or(u8::MAX);
+    icon::Image {
+        pens: img.pens.iter().map(|&p| p ^ mask).collect(),
+        ..img.clone()
+    }
+}
+
+/// The icon, and beside it how it looks selected when that differs.
+fn icon_picture(
+    normal: &icon::Image,
+    selected: Option<&icon::Image>,
+    palette: &[u32; 4],
+    which: &str,
+) -> Picture {
+    const GAP: usize = 4;
+    let colour = |pen: u8| -> u32 {
+        let rgb = palette.get(usize::from(pen)).copied().unwrap_or_else(|| {
+            // A grey per pen, lightest first, distinct up to 256 pens.
+            let level = 0xC0u32.saturating_sub(u32::from(pen).saturating_mul(3) & 0xBF);
+            level << 16 | level << 8 | level
+        });
+        0xFF00_0000 | rgb
+    };
+    let width = normal
+        .width
+        .saturating_add(selected.map_or(0, |s| s.width.saturating_add(GAP)));
+    let height = normal.height.max(selected.map_or(0, |s| s.height));
+    let mut argb = vec![0u32; width.saturating_mul(height)];
+    let mut draw = |img: &icon::Image, left: usize| {
+        for y in 0..img.height {
+            for x in 0..img.width {
+                let pen = img
+                    .pens
+                    .get(y.saturating_mul(img.width).saturating_add(x))
+                    .copied()
+                    .unwrap_or(0);
+                if let Some(px) = argb.get_mut(
+                    y.saturating_mul(width)
+                        .saturating_add(left.saturating_add(x)),
+                ) {
+                    *px = colour(pen);
+                }
+            }
+        }
+    };
+    draw(normal, 0);
+    if let Some(s) = selected {
+        draw(s, normal.width.saturating_add(GAP));
+    }
+    Picture {
+        caption: if selected.is_some() {
+            format!("The icon, and selected, in {which}'s colours")
+        } else {
+            format!("The icon, in {which}'s colours")
+        },
+        width,
+        height,
+        argb,
+        pixel_shape: (1, 2),
+    }
+}
+
+fn ilbm_decoded(p: &ilbm::Ilbm) -> Decoded {
+    let picture = (!p.argb.is_empty()).then(|| Picture {
+        caption: "The picture".to_owned(),
+        width: p.width,
+        height: p.height,
+        argb: p.argb.clone(),
+        pixel_shape: p.pixel_shape(),
+    });
+    Decoded {
+        title: if picture.is_some() {
+            "IFF ILBM picture".to_owned()
+        } else {
+            "IFF ILBM colour map".to_owned()
+        },
+        fields: p.fields(),
+        picture,
+    }
 }
 
 fn pointer_picture(p: &Pointer) -> Picture {
@@ -100,6 +267,9 @@ fn pointer_picture(p: &Pointer) -> Picture {
         width: Pointer::SIDE,
         height: Pointer::SIDE,
         argb,
+        // A sprite is low-resolution: its pixels are as wide as they are
+        // tall.
+        pixel_shape: (1, 1),
     }
 }
 
@@ -127,7 +297,7 @@ impl Decoded {
         if let Some(p) = &self.picture {
             out.push(String::new());
             out.push(format!(
-                "{} ({} × {}; . is transparent, 1 to 3 are its colours):",
+                "{} ({} × {}; . is transparent, and each digit one colour):",
                 p.caption, p.width, p.height
             ));
             out.extend(p.ascii());
@@ -191,6 +361,7 @@ mod tests {
     fn anything_else_says_what_is_decoded() {
         let e = file(b"startup-sequence", b"echo hello").unwrap_err();
         assert!(e.0.contains("system-configuration"), "{e}");
+        assert!(e.0.contains("icons"), "{e}");
         let e = file(b"system-configuration", &[0; 100]).unwrap_err();
         assert!(e.0.contains("100 bytes"), "{e}");
     }

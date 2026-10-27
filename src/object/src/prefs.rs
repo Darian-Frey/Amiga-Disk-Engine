@@ -27,18 +27,7 @@ pub const SIZE: usize = 232;
 /// The name Intuition loads them from, in `DEVS:`.
 pub const FILE_NAME: &str = "system-configuration";
 
-/// One decoded setting.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Field {
-    /// The part of the Preferences tool it belongs to: "Screen", "Printer".
-    pub group: &'static str,
-    /// What it is.
-    pub label: &'static str,
-    /// What it is set to, in words.
-    pub value: String,
-    /// The colour it names, as `0xRRGGBB`, for a colour setting.
-    pub colour: Option<u32>,
-}
+pub use crate::decoded::Field;
 
 /// The mouse pointer: a 16 × 16 sprite in three colours and transparent.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -105,7 +94,7 @@ impl Out {
     fn add(&mut self, group: &'static str, label: &'static str, value: String) {
         self.0.push(Field {
             group,
-            label,
+            label: label.to_owned(),
             value,
             colour: None,
         });
@@ -114,7 +103,7 @@ impl Out {
     fn colour(&mut self, group: &'static str, label: &'static str, amiga: u16) {
         self.0.push(Field {
             group,
-            label,
+            label: label.to_owned(),
             value: format!("${:03x}", amiga & 0x0FFF),
             colour: Some(rgb(amiga)),
         });

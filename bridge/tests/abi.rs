@@ -2040,3 +2040,55 @@ fn a_disk_is_repaired_through_the_abi() {
     }
     let _ = std::fs::remove_file(&path);
 }
+
+#[test]
+fn a_decoded_picture_says_the_shape_of_its_pixels() {
+    use ade_core::layers::filesystem::edit;
+    let when = ade_core::layers::filesystem::format::Stamp {
+        days: 17_000,
+        mins: 1,
+        ticks: 0,
+    };
+    // A tool icon with a 16 x 1 image of one plane: drawn on a Workbench
+    // screen, its pixels are twice as tall as wide.
+    let mut icon = vec![0u8; 78];
+    put_u16(&mut icon, 0, 0xE310).unwrap();
+    put_u16(&mut icon, 2, 1).unwrap();
+    put_u16(&mut icon, 16, 4).unwrap();
+    put_u32(&mut icon, 22, 1).unwrap();
+    icon[48] = 3;
+    let mut image = vec![0u8; 20];
+    put_u16(&mut image, 4, 16).unwrap();
+    put_u16(&mut image, 6, 1).unwrap();
+    put_u16(&mut image, 8, 1).unwrap();
+    icon.extend(image);
+    icon.extend([0x80, 0]);
+    let mut disk = blank_disk();
+    let geometry = ade_core::layers::block::Geometry::DD_FLOPPY;
+    let block = edit::add_file(&mut disk, geometry, 880, b"Tool.info", &icon, when).unwrap();
+    let plain = edit::add_file(&mut disk, geometry, 880, b"notes", b"plain", when).unwrap();
+    let (path, c_path) = fixture("shape", &disk);
+    // SAFETY: a valid path; every handle is freed once.
+    unsafe {
+        let image = ade::ade_image_open(c_path.as_ptr(), std::ptr::null(), std::ptr::null_mut());
+        let shape = |block| {
+            let decoded = ade::ade_decoded_open(image, ade::ADE_WHOLE_IMAGE, block);
+            let (mut w, mut h) = (9u32, 9u32);
+            let result = ade::ade_decoded_picture_pixel_shape(decoded, &raw mut w, &raw mut h);
+            ade::ade_decoded_free(decoded);
+            (result, w, h)
+        };
+        assert_eq!(shape(block), (AdeResult::Ok, 1, 2));
+        assert_eq!(shape(plain), (AdeResult::NotFound, 0, 0), "no picture");
+        assert_eq!(
+            ade::ade_decoded_picture_pixel_shape(
+                std::ptr::null(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut()
+            ),
+            AdeResult::NullArgument
+        );
+        ade::ade_image_free(image);
+    }
+    let _ = std::fs::remove_file(&path);
+}

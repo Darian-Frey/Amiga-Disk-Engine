@@ -2909,6 +2909,46 @@ pub unsafe extern "C" fn ade_decoded_picture_caption(decoded: *const AdeDecoded)
     })
 }
 
+/// The shape of the picture's pixels as the Amiga showed them, width to
+/// height: 1 × 1 square, 1 × 2 twice as tall (a Workbench icon), 2 × 1 twice
+/// as wide (a low-resolution interlaced picture). [`AdeResult::NotFound`],
+/// with both 0, when there is no picture.
+///
+/// # Safety
+/// `decoded` must be a live handle or null; `width` and `height` writable or
+/// null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ade_decoded_picture_pixel_shape(
+    decoded: *const AdeDecoded,
+    width: *mut u32,
+    height: *mut u32,
+) -> AdeResult {
+    let set = |w: u32, h: u32| {
+        // SAFETY: each checked non-null; the caller promises they are writable.
+        unsafe {
+            if !width.is_null() {
+                *width = w;
+            }
+            if !height.is_null() {
+                *height = h;
+            }
+        }
+    };
+    set(0, 0);
+    if decoded.is_null() {
+        return AdeResult::NullArgument;
+    }
+    guard(AdeResult::Internal, || {
+        // SAFETY: checked non-null; the caller promises a live handle.
+        let decoded = unsafe { &*decoded };
+        let Some(p) = &decoded.picture else {
+            return AdeResult::NotFound;
+        };
+        set(u32::from(p.pixel_shape.0), u32::from(p.pixel_shape.1));
+        AdeResult::Ok
+    })
+}
+
 /// Release a decoded file.
 ///
 /// # Safety

@@ -571,6 +571,12 @@ AdeResult   ade_decoded_field(const AdeDecoded *decoded, size_t index, AdeDecode
 const uint32_t *ade_decoded_picture(const AdeDecoded *decoded, uint32_t *width,
                                     uint32_t *height);
 AdeBytes    ade_decoded_picture_caption(const AdeDecoded *decoded);
+/* The shape of a pixel as the Amiga showed it, width to height: 1x1 square,
+ * 1x2 twice as tall (a Workbench icon on a high-resolution screen), 2x1 twice
+ * as wide (a low-resolution interlaced picture). Draw it this way, or an icon
+ * looks flattened. ADE_NOT_FOUND, both 0, when there is no picture. */
+AdeResult   ade_decoded_picture_pixel_shape(const AdeDecoded *decoded, uint32_t *width,
+                                            uint32_t *height);
 void        ade_decoded_free(AdeDecoded *decoded);
 
 /* --- Writing into a disk (D-018) -----------------------------------------
