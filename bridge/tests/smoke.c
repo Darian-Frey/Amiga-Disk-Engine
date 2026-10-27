@@ -225,6 +225,14 @@ int main(int argc, char **argv) {
                       ade_edit_repair(NULL, false, NULL, NULL) == ADE_NULL_ARGUMENT,
                   "a repair says what it did");
             ade_string_free(report);
+
+            /* The rest of the write suite (F-031): NULL is tolerated, and a
+               wipe asked for nothing is refused before anything is touched. */
+            AdeBytes keep = {(const uint8_t *)"", 0};
+            check(ade_edit_move(NULL, 0, 0, NULL) == ADE_NULL_ARGUMENT &&
+                      ade_edit_format(NULL, keep, NULL) == ADE_NULL_ARGUMENT &&
+                      ade_edit_wipe(image, false, false, NULL, NULL) == ADE_REFUSED,
+                  "move, format and wipe check their arguments");
         }
         AdeDisasm *boot = ade_disasm_bootblock(image);
         check(boot != NULL && ade_disasm_count(boot) > 0, "the bootblock lists");

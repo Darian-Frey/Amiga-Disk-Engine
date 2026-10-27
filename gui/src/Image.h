@@ -536,6 +536,34 @@ public:
         r.block = block;
         return r;
     }
+    EditResult moveEntry(quint32 block, quint32 to) {
+        EditResult r;
+        char *why = nullptr;
+        r.code = ade_edit_move(m_raw, block, to, &why);
+        r.message = take(why);
+        r.block = block;
+        return r;
+    }
+    /// Quick-format in place; an empty `name` keeps the old one.
+    EditResult format(const QByteArray &name) {
+        EditResult r;
+        char *why = nullptr;
+        r.code = ade_edit_format(m_raw, view(name), &why);
+        r.message = take(why);
+        return r;
+    }
+    /// Zero file slack, free blocks or both. On success `message` is the
+    /// report; otherwise why not.
+    EditResult wipe(bool slack, bool free) {
+        EditResult r;
+        char *report = nullptr;
+        char *why = nullptr;
+        r.code = ade_edit_wipe(m_raw, slack, free, &report, &why);
+        const QString said = take(report);
+        const QString refused = take(why);
+        r.message = r.ok() ? said : refused;
+        return r;
+    }
     /// Repair the bitmap and misfiled entries (F-034). On success `message`
     /// is the report, a line per thing done or left; otherwise why not.
     EditResult repair(bool freeOrphans) {

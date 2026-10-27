@@ -34,18 +34,26 @@ public:
     // Off by default: the search results take no drops.
     void setAcceptsFiles(bool accept);
 
-    // Whether a drag from `source` carrying `mime` would be taken: files,
-    // from somewhere other than this tree. A drag that began here is a file
-    // being dragged *out*; let go a pixel from where it started, it would
-    // otherwise copy itself back in. Public because a test cannot give a drop
-    // a source without starting a real drag through the window system.
+    // Whether a drag from `source` carrying `mime` would be taken: files from
+    // somewhere other than this tree, or rows dragged within it. A drag that
+    // began here is never taken as files — let go a pixel from where it
+    // started, it would copy itself back in — but as rows, which the window
+    // may move. Public because a test cannot give a drop a source without
+    // starting a real drag through the window system.
     bool wouldAccept(const QObject *source, const QMimeData *mime) const;
+
+    // The format a drag that began in this tree carries, so a drop can tell
+    // rows being moved from files being copied.
+    static QString rowsFormat() { return QStringLiteral("application/x-ade-rows"); }
 
 signals:
     // Host files dropped onto `target`, or onto empty space when it is null.
     // The window decides what that means — copy them onto a disk, or open
     // them as disks — because the tree knows nothing about images.
     void filesDropped(QTreeWidgetItem *target, const QList<QUrl> &urls);
+    // Rows of this tree dragged onto `target`. The window decides what that
+    // means, which within one disk is a move.
+    void rowsDropped(QTreeWidgetItem *target, const QList<QTreeWidgetItem *> &rows);
 
 protected:
     void dragEnterEvent(QDragEnterEvent *event) override;

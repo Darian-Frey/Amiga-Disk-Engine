@@ -628,6 +628,22 @@ AdeResult ade_edit_delete(AdeImage *image, uint32_t block, bool all, char **out_
  * ade_edit_mkdir. ADE_ALREADY_EXISTS when another entry has the name; a change
  * of case alone is allowed. ADE_REFUSED for the root. */
 AdeResult ade_edit_rename(AdeImage *image, uint32_t block, AdeBytes name, char **out_message);
+/* Move the entry at `block` into the directory at `to`, keeping its name.
+ * ADE_REFUSED for the root, a folder moved inside itself, or one already
+ * there; ADE_ALREADY_EXISTS when the destination has the name. */
+AdeResult ade_edit_move(AdeImage *image, uint32_t block, uint32_t to, char **out_message);
+/* Quick-format in place, one undo step: a new bootblock, rootblock and bitmap
+ * of the same size and filesystem, named `name` (Latin-1; empty keeps the old
+ * name). Every other block is left, free, for a carve to find. Allowed on a
+ * disk too damaged for any other edit. */
+AdeResult ade_edit_format(AdeImage *image, AdeBytes name, char **out_message);
+/* Zero file slack, free blocks, or both, one undo step. `out_report` gets a
+ * line per part, and one per file left alone with why; free it with
+ * ade_string_free. Wiping free blocks destroys what a carve could recover,
+ * and is refused when the bitmap or the tree cannot say which blocks are
+ * free. ADE_REFUSED when asked for neither. */
+AdeResult ade_edit_wipe(AdeImage *image, bool slack, bool free, char **out_report,
+                        char **out_message);
 /* Repair the bitmap -- every block in use marked used, every bitmap block
  * sealed, the valid flag set -- and move entries filed under the wrong hash
  * slot to the one their name hashes to: one undo step. `out_report` receives a

@@ -2092,3 +2092,101 @@ fn a_decoded_picture_says_the_shape_of_its_pixels() {
     }
     let _ = std::fs::remove_file(&path);
 }
+
+#[test]
+fn an_entry_moves_and_a_disk_is_wiped_and_formatted_through_the_abi() {
+    let (path, c_path) = fixture("suite", &blank_disk());
+    let bytes = |b: &[u8]| ade::AdeBytes {
+        data: b.as_ptr(),
+        len: b.len(),
+    };
+    // SAFETY: a valid path; every handle and string is freed once.
+    unsafe {
+        let image = ade::ade_image_open(c_path.as_ptr(), std::ptr::null(), std::ptr::null_mut());
+        let root = ade::ade_image_root_block(image);
+        let (mut dir, mut file) = (0u32, 0u32);
+        assert_eq!(
+            ade::ade_edit_mkdir(
+                image,
+                root,
+                bytes(b"Box"),
+                &raw mut dir,
+                std::ptr::null_mut()
+            ),
+            AdeResult::Ok
+        );
+        assert_eq!(
+            ade::ade_edit_add_file(
+                image,
+                root,
+                bytes(b"note"),
+                bytes(b"contents"),
+                &raw mut file,
+                std::ptr::null_mut()
+            ),
+            AdeResult::Ok
+        );
+        let count = |image, dir| {
+            let listing = ade::ade_dir_open(image, ade::ADE_WHOLE_IMAGE, dir);
+            let n = ade::ade_listing_count(listing);
+            ade::ade_listing_free(listing);
+            n
+        };
+        assert_eq!(
+            ade::ade_edit_move(image, file, dir, std::ptr::null_mut()),
+            AdeResult::Ok
+        );
+        assert_eq!((count(image, root), count(image, dir)), (1, 1));
+        let mut why: *mut std::ffi::c_char = std::ptr::null_mut();
+        assert_eq!(
+            ade::ade_edit_move(image, dir, dir, &raw mut why),
+            AdeResult::Refused
+        );
+        assert!(!why.is_null());
+        ade::ade_string_free(why);
+
+        // A wipe says what it did; asked for nothing, it is refused.
+        let mut report: *mut std::ffi::c_char = std::ptr::null_mut();
+        assert_eq!(
+            ade::ade_edit_wipe(image, true, true, &raw mut report, std::ptr::null_mut()),
+            AdeResult::Ok
+        );
+        let text = CStr::from_ptr(report).to_string_lossy().into_owned();
+        ade::ade_string_free(report);
+        assert!(
+            text.contains("file slack") && text.contains("free blocks"),
+            "{text}"
+        );
+        assert_eq!(
+            ade::ade_edit_wipe(
+                image,
+                false,
+                false,
+                std::ptr::null_mut(),
+                std::ptr::null_mut()
+            ),
+            AdeResult::Refused
+        );
+
+        // Formatted under a new name: empty, and one undo brings it all back.
+        assert_eq!(
+            ade::ade_edit_format(image, bytes(b"Fresh"), std::ptr::null_mut()),
+            AdeResult::Ok
+        );
+        assert_eq!(count(image, root), 0);
+        assert_eq!(ade::ade_edit_undo(image), AdeResult::Ok);
+        assert_eq!(count(image, root), 1);
+
+        // Null is tolerated.
+        assert_eq!(
+            ade::ade_edit_move(std::ptr::null_mut(), 0, 0, std::ptr::null_mut()),
+            AdeResult::NullArgument
+        );
+        assert_eq!(
+            ade::ade_edit_format(std::ptr::null_mut(), bytes(b""), std::ptr::null_mut()),
+            AdeResult::NullArgument
+        );
+        ade::ade_image_free(image);
+    }
+    let _ = std::fs::remove_file(&path);
+}

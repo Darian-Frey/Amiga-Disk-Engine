@@ -126,6 +126,23 @@ pub fn blank(
     name: &str,
     created: Stamp,
 ) -> Result<Vec<u8>, FormatError> {
+    // Its UTF-8 bytes, which for a name outside ASCII are not the Latin-1
+    // AmigaDOS reads (BUG-017).
+    blank_named(geometry, dostype, name.as_bytes(), created)
+}
+
+/// [`blank`], with the volume name given as the bytes to store: Latin-1, as
+/// AmigaDOS stores it. What reformatting a disk under its own name needs,
+/// since that name came off the disk as bytes.
+///
+/// # Errors
+/// As [`blank`].
+pub fn blank_named(
+    geometry: Geometry,
+    dostype: Dostype,
+    name: &[u8],
+    created: Stamp,
+) -> Result<Vec<u8>, FormatError> {
     check_name(name)?;
     let block_size = geometry.block_size() as usize;
     let total = geometry.total_blocks();
@@ -180,8 +197,8 @@ const fn bits_per_bitmap_block(block_size: u32) -> u64 {
 /// The forbidden bytes are the two path separators and the control range:
 /// AmigaDOS parses `:` as the device terminator and `/` as the directory
 /// separator, so a name holding either cannot be typed at a prompt.
-fn check_name(name: &str) -> Result<(), FormatError> {
-    let bytes = name.as_bytes();
+fn check_name(name: &[u8]) -> Result<(), FormatError> {
+    let bytes = name;
     if bytes.len() > MAX_NAME {
         return Err(FormatError::NameTooLong { len: bytes.len() });
     }
@@ -213,7 +230,7 @@ fn write_bootblock(image: &mut [u8], dostype: Dostype, root: u64) {
 fn write_rootblock(
     image: &mut [u8],
     geometry: Geometry,
-    name: &str,
+    name: &[u8],
     created: Stamp,
     root: u64,
     bitmap: &[u64],
@@ -253,7 +270,7 @@ fn write_rootblock(
         let _ = put_u32(block, base.saturating_add(8), created.ticks);
     }
 
-    let bytes = name.as_bytes();
+    let bytes = name;
     // A byte at a time: `ade-endian` writes multi-byte integers, and a name
     // is neither an integer nor byte-order-dependent.
     if let Some(slot) = block.get_mut(end.saturating_sub(80)) {

@@ -10,7 +10,31 @@ Severity vocabulary: low | medium | high.
 
 ## Open
 
-_None._
+### BUG-018 The health report says nothing about an entry whose parent field names another directory
+**Severity:** low
+**Status:** open
+**Found:** 2026-10-27, moving a file on every corpus disk for F-031.
+**Where:** [src/api/src/health.rs](../src/api/src/health.rs) `scan_tree`: no check compares an entry's `parent` field with the directory that lists it.
+
+**What is wrong.** Every entry header names its directory (`parent`, `BSIZE-12`), and AmigaDOS uses it — `ParentDir()` follows it, and any edit of the entry finds its directory through it. On 3 of 3,606 corpus volumes, all of them Putty's (disks A, B and C), **18 entries** listed in the root name some other block: `COFFEBAR.BLK` says block 23, which is not a directory; `HOLSZONE.DRV` says 853. `ade check` reports nothing about it.
+
+**How it showed.** Moving `COFFEBAR.BLK` was refused with *block 23 is not a directory ADE can write into*, which blamed the destination for a fault in the entry. Delete and rename would have said the same.
+
+**Correct behaviour.** A warning per directory holding such entries, naming them and the blocks they claim, capped as other per-entry findings are. A new code on the JSON surface: an inventory entry (D-015) and a schema bump.
+
+**Not fixed here** (Maintenance Rule 8). The write suite now refuses an entry whose parent field does not name the directory listing it, with that reason, rather than acting through the wrong block.
+
+### BUG-017 `ade create --name` writes a name outside ASCII as UTF-8, not Latin-1
+**Severity:** low
+**Status:** open
+**Found:** 2026-10-27, writing format-in-place for F-031.
+**Where:** [src/filesystem/src/format.rs](../src/filesystem/src/format.rs) `blank`, which stores `name.as_bytes()`, and its callers: `ade create`, `ade_create`, and the window's New disk.
+
+**What is wrong.** An Amiga name is Latin-1: it is what every reader in ADE decodes names as, and what every other write converts to. `ade create disk.adf --name=Größe` stores the 7 bytes `47 72 C3 B6 C3 9F 65` where AmigaDOS expects the 5 bytes `47 72 F6 DF 65`, so an Amiga shows `GrÃ¶Ãe`, and a name of 16 accented letters is refused as too long at 32 bytes. Every other write — `mkdir`, `put`, `rename` — converts with `amiga_name` first, and refuses a character Latin-1 lacks.
+
+**Correct behaviour.** Convert as `amiga_name` does, refusing what Latin-1 cannot hold, and store the bytes. `format::blank_named`, added for format-in-place, already takes the bytes; `blank` should convert and call it.
+
+**Not fixed here** (Maintenance Rule 8): `blank` keeps its behaviour, passing its UTF-8 bytes to `blank_named`.
 
 ## Fixed
 

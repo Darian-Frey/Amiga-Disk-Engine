@@ -115,6 +115,18 @@ public:
     /// `reported` — or an empty string when the repair was refused, which is
     /// reported through `errorOccurred`.
     QString repairDisk(QTreeWidgetItem *item);
+    /// Move `rows` into the folder `target` is, or is in — the disk's root
+    /// for the disk's own row — as one step for Undo. Only within one disk:
+    /// between two it would be a copy. Returns how many moved; anything
+    /// refused is reported through `errorOccurred`, all of it in one message.
+    int moveItems(QTreeWidgetItem *target, const QList<QTreeWidgetItem *> &rows);
+    /// Quick-format the disk `item` belongs to, in place, under `name` —
+    /// empty keeps the old one. Undo brings everything back until saved.
+    bool formatDisk(QTreeWidgetItem *item, const QString &name);
+    /// Zero file slack, and with `freeBlocks` every free block, on the disk
+    /// `item` belongs to. The free-block wipe is made only if the wipe
+    /// confirmation agrees. Returns the report, or empty when refused.
+    QString wipeDisk(QTreeWidgetItem *item, bool freeBlocks);
     /// Save the disk `item` belongs to as a new file. Never the file it was
     /// opened from; never over another existing file.
     bool saveImageAs(QTreeWidgetItem *item, const QString &path);
@@ -139,6 +151,7 @@ public:
     void setSaveConfirmation(Confirm confirm) { m_confirmSave = std::move(confirm); }
     /// How the window asks before deleting a folder that holds anything.
     void setDeleteConfirmation(Confirm confirm) { m_confirmDelete = std::move(confirm); }
+    void setWipeConfirmation(Confirm confirm) { m_confirmWipe = std::move(confirm); }
 
     // How many images are open. Several can be, which is what makes
     // cross-image search meaningful.
@@ -170,6 +183,9 @@ private slots:
     void deleteSelected();
     void renameSelected();
     void repairSelected();
+    void formatSelected();
+    void wipeSlackSelected();
+    void wipeFreeSelected();
     void filesDropped(QTreeWidgetItem *target, const QList<QUrl> &urls);
     void extractSelected();
     void search();
@@ -325,4 +341,8 @@ private:
     QAction *m_delete = nullptr;
     QAction *m_rename = nullptr;
     QAction *m_repair = nullptr;
+    QAction *m_format = nullptr;
+    QAction *m_wipeSlack = nullptr;
+    QAction *m_wipeFree = nullptr;
+    Confirm m_confirmWipe;
 };

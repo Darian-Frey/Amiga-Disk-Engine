@@ -43,6 +43,7 @@ use ade_filesystem::entry::EntryKind;
 use ade_filesystem::format::Stamp;
 use ade_filesystem::repair;
 use ade_filesystem::volume::FsError;
+pub use ade_filesystem::wipe::Wiped;
 
 use crate::health::{self, Severity};
 
@@ -451,6 +452,117 @@ impl Session {
         Ok(done)
     }
 
+    /// Move the entry at `block` into the directory at `to`, keeping its
+    /// name.
+    ///
+    /// # Errors
+    /// See [`EditError`]. A refused edit leaves the session as it was.
+    pub fn move_entry(&mut self, block: u32, to: u32) -> Result<(), EditError> {
+        let geometry = self.geometry;
+        let when = self.now();
+        self.edit(|bytes| fs_edit::move_entry(bytes, geometry, block, to, when).map(|()| block))
+            .map(|_| ())
+    }
+
+    /// Format the disk in place, as AmigaDOS's quick format does: a new
+    /// bootblock, rootblock and bitmap, of the same size and filesystem,
+    /// named `name` or, given none, what it was called. Every other block is
+    /// left as it was — marked free, and findable by `carve` until something
+    /// is written over it. The boot code goes, as it does under AmigaDOS
+    /// without `Install` (AV-002).
+    ///
+    /// Allowed on a disk too damaged for any other edit: a format is the
+    /// answer to that. One step for undo.
+    ///
+    /// # Errors
+    /// [`EditError::NotEditable`] for a volume with no dostype, a long-name
+    /// volume, one too large for ADE's bitmap, or a name AmigaDOS would not
+    /// accept — the existing name included, when it is damaged.
+    pub fn format(&mut self, name: Option<&[u8]>) -> Result<(), EditError> {
+        let image = crate::Image::from_bytes(self.bytes.clone())
+            .map_err(|e| EditError::NotEditable(e.to_string()))?;
+        let volume = image.volume().map_err(EditError::Lookup)?;
+        let Some(dostype) = volume.dostype() else {
+            return Err(EditError::NotEditable(
+                "the bootblock carries no dostype, so there is no filesystem to format with"
+                    .to_owned(),
+            ));
+        };
+        let name = name.map_or_else(|| volume.rootblock().name.clone(), <[u8]>::to_vec);
+        let blank = ade_filesystem::format::blank_named(self.geometry, dostype, &name, self.now())
+            .map_err(|e| EditError::NotEditable(e.to_string()))?;
+        // The blocks a quick format writes: the reserved ones, the rootblock,
+        // and the bitmap. Read off the blank volume rather than computed, so
+        // they cannot disagree with what `blank_named` laid out.
+        let mut blocks: Vec<u32> = (0..self.geometry.reserved()).collect();
+        {
+            let fresh = crate::Image::from_bytes(blank.clone())
+                .map_err(|e| EditError::NotEditable(e.to_string()))?;
+            let fresh = fresh.volume().map_err(EditError::Lookup)?;
+            blocks.push(fresh.root());
+            blocks.extend(fresh.rootblock().bitmap_pages.iter().filter(|&&b| b != 0));
+        }
+        let bsize = self.geometry.block_size() as usize;
+        let mut next = self.bytes.clone();
+        for b in blocks {
+            let at = (b as usize).saturating_mul(bsize);
+            if let (Some(dst), Some(src)) = (
+                next.get_mut(at..at.saturating_add(bsize)),
+                blank.get(at..at.saturating_add(bsize)),
+            ) {
+                dst.copy_from_slice(src);
+            }
+        }
+        let report = health::examine(next.clone());
+        self.keep(next, &report, &[])
+    }
+
+    /// Zero every file's slack — the bytes after its last one, in its last
+    /// block — and, with `free`, every block the bitmap marks free that
+    /// nothing uses, which destroys anything `carve` could have recovered
+    /// from them. Both or neither, as one step for undo. Files ADE cannot
+    /// account for are left, and listed.
+    ///
+    /// # Errors
+    /// [`EditError::Unsound`] when the bitmap marks live blocks free, or —
+    /// for free blocks — the tree cannot be read in full: either way a block
+    /// in use could be zeroed. [`EditError::Refused`] when the bitmap is not
+    /// trusted to say which blocks are free. A refusal leaves the session as
+    /// it was.
+    pub fn wipe(&mut self, slack: bool, free: bool) -> Result<Wipe, EditError> {
+        if let Some(why) = &self.unsound {
+            return Err(EditError::Unsound(format!("{why}; repair the disk first")));
+        }
+        let mut next = self.bytes.clone();
+        let mut done = Wipe::default();
+        if free {
+            let (report, in_use) = health::examine_in_use(self.bytes.clone());
+            let image = crate::Image::from_bytes(self.bytes.clone())
+                .map_err(|e| EditError::NotEditable(e.to_string()))?;
+            let volume = image.volume().map_err(EditError::Lookup)?;
+            let walk = volume.walk(volume.root()).map_err(EditError::Lookup)?;
+            if let Some(why) = unwalked(&report, &walk) {
+                return Err(EditError::Unsound(why.replace(
+                    "a block in use could be marked free",
+                    "a block in use could be wiped",
+                )));
+            }
+            done.free = Some(ade_filesystem::wipe::free_space(
+                &mut next,
+                self.geometry,
+                &in_use,
+            )?);
+        }
+        if slack {
+            done.slack = Some(ade_filesystem::wipe::slack(&mut next, self.geometry)?);
+        }
+        if done.blocks() > 0 {
+            let report = health::examine(next.clone());
+            self.keep(next, &report, &[])?;
+        }
+        Ok(done)
+    }
+
     /// Make an empty directory in the directory at `parent`.
     ///
     /// # Errors
@@ -746,6 +858,40 @@ fn problems(report: &health::Health) -> HashMap<&'static str, usize> {
         *n = n.saturating_add(1);
     }
     out
+}
+
+/// What [`Session::wipe`] did: each part asked for.
+#[derive(Debug, Clone, Default)]
+pub struct Wipe {
+    /// File slack, when asked for.
+    pub slack: Option<Wiped>,
+    /// Free blocks, when asked for.
+    pub free: Option<Wiped>,
+}
+
+impl Wipe {
+    /// Blocks written, both parts together.
+    #[must_use]
+    pub fn blocks(&self) -> usize {
+        self.slack.iter().chain(&self.free).map(|w| w.blocks).sum()
+    }
+
+    /// What was done, one line per part and one per file left, for a person.
+    #[must_use]
+    pub fn lines(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        for (what, w) in [("file slack", &self.slack), ("free blocks", &self.free)] {
+            let Some(w) = w else { continue };
+            out.push(format!(
+                "{what}: {} {} zeroed, {} bytes that held something",
+                w.blocks,
+                if w.blocks == 1 { "block" } else { "blocks" },
+                w.bytes
+            ));
+            out.extend(w.skipped.iter().map(|why| format!("  left — {why}")));
+        }
+        out
+    }
 }
 
 /// What [`Session::repair`] did, and what it left.

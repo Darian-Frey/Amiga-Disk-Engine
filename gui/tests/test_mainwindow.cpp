@@ -113,6 +113,7 @@ private slots:
     void theVolumeListedInItsOwnTableIsMarkedAndCannotBeOpened();
     void entriesAreRenamedAndDeletedAndUndoBringsThemBack();
     void aDiskIsRepairedFromTheDiskMenuAndUndoneInOneStep();
+    void rowsDroppedOnAFolderMoveAndAFormatAndWipesUndo();
     void aFileTheDecodedViewDoesNotKnowSaysWhatItDoes();
     void theDiskRowShowsItsBootCodeAndAFolderSaysItHasNone();
     void anImageIsARootWithItsEntriesBeneath();
@@ -386,7 +387,8 @@ void TestMainWindow::draggingAFileOutCarriesItsBytes() {
 
 void TestMainWindow::draggingADirectoryCarriesNothing() {
     // A directory has no bytes to hand over. Writing a zero-byte file named
-    // after it would be worse than refusing.
+    // after it would be worse than refusing — so the drag offers a file
+    // manager no file, only the marker that lets it be moved within the tree.
     MainWindow window;
     window.openImage(m_image);
     auto *tree = browser(window);
@@ -395,7 +397,9 @@ void TestMainWindow::draggingADirectoryCarriesNothing() {
     QTreeWidgetItem *tools = childNamed(tree->topLevelItem(0), QStringLiteral("Tools"));
     QVERIFY(tools);
     QScopedPointer<QMimeData> mime(tree->mimeData({tools}));
-    QVERIFY(!mime);
+    QVERIFY(mime);
+    QVERIFY(!mime->hasUrls());
+    QVERIFY(mime->hasFormat(ImageTree::rowsFormat()));
 }
 
 void TestMainWindow::closingForgetsEveryImage() {
@@ -2566,6 +2570,73 @@ void TestMainWindow::aDiskIsRepairedFromTheDiskMenuAndUndoneInOneStep() {
     window.openImage(sound);
     QTreeWidgetItem *second = tree->topLevelItem(1);
     QCOMPARE(window.repairDisk(second), QStringLiteral("nothing to repair"));
+}
+
+void TestMainWindow::rowsDroppedOnAFolderMoveAndAFormatAndWipesUndo() {
+    QTemporaryDir dir;
+    const QString disk = blankDisk(dir, QStringLiteral("suite.adf"));
+    const QString note = dir.filePath(QStringLiteral("note"));
+    writeFile(note, QByteArray("a note"));
+    const QString other = dir.filePath(QStringLiteral("other"));
+    writeFile(other, QByteArray("another"));
+
+    MainWindow window;
+    window.setDiscardConfirmation([](const QString &) { return true; });
+    QStringList errors;
+    connect(&window, &MainWindow::errorOccurred, [&errors](const QString &m) { errors << m; });
+    window.openImage(disk);
+    auto *tree = browser(window);
+    QCOMPARE(window.addFiles(tree->topLevelItem(0), {note, other}), 2);
+    QVERIFY(window.makeFolder(tree->topLevelItem(0), QStringLiteral("Box")));
+    QTreeWidgetItem *root = tree->topLevelItem(0);
+
+    // A drag that began in the tree is taken as rows, and files from
+    // elsewhere still as files.
+    QScopedPointer<QMimeData> mime(tree->mimeData({childNamed(root, QStringLiteral("Box"))}));
+    QVERIFY(tree->wouldAccept(tree, mime.data()));
+
+    // Both files dropped on the folder: moved, as one step.
+    const QList<QTreeWidgetItem *> rows{childNamed(root, QStringLiteral("note")),
+                                        childNamed(root, QStringLiteral("other"))};
+    QCOMPARE(window.moveItems(childNamed(root, QStringLiteral("Box")), rows), 2);
+    root = tree->topLevelItem(0);
+    QVERIFY(!childNamed(root, QStringLiteral("note")));
+    QTreeWidgetItem *box = childNamed(root, QStringLiteral("Box"));
+    box->setExpanded(true);
+    QVERIFY(childNamed(box, QStringLiteral("note")) && childNamed(box, QStringLiteral("other")));
+    // Let go on itself, a pixel from where it started: nothing, silently.
+    QCOMPARE(window.moveItems(box, {box}), 0);
+    QVERIFY2(errors.isEmpty(), qPrintable(errors.join(QLatin1Char('\n'))));
+    // Into a folder inside itself: refused, and said.
+    QVERIFY(window.makeFolder(box, QStringLiteral("Inner")));
+    root = tree->topLevelItem(0);
+    box = childNamed(root, QStringLiteral("Box"));
+    box->setExpanded(true);
+    QCOMPARE(window.moveItems(childNamed(box, QStringLiteral("Inner")), {box}), 0);
+    QVERIFY2(!errors.isEmpty() && errors.last().contains(QStringLiteral("inside itself")),
+             qPrintable(errors.join(QLatin1Char('\n'))));
+    QVERIFY(window.undoEdit());
+    QVERIFY(window.undoEdit());
+    root = tree->topLevelItem(0);
+    QVERIFY(childNamed(root, QStringLiteral("note")) && childNamed(root, QStringLiteral("other")));
+
+    // Wiping free space asks first; no means nothing happens.
+    QString asked;
+    window.setWipeConfirmation([&asked](const QString &q) {
+        asked = q;
+        return false;
+    });
+    QCOMPARE(window.wipeDisk(root, true), QString());
+    QVERIFY(asked.contains(QStringLiteral("recovered")));
+    QVERIFY(window.wipeDisk(root, false).contains(QStringLiteral("file slack")));
+
+    // Formatted: empty, renamed, and Undo brings it all back.
+    QVERIFY(window.formatDisk(root, QStringLiteral("Fresh")));
+    root = tree->topLevelItem(0);
+    QCOMPARE(root->childCount(), 0);
+    QVERIFY(window.undoEdit());
+    root = tree->topLevelItem(0);
+    QVERIFY(childNamed(root, QStringLiteral("note")));
 }
 
 void TestMainWindow::entriesAreRenamedAndDeletedAndUndoBringsThemBack() {

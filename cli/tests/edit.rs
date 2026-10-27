@@ -443,3 +443,48 @@ fn repair_saves_only_when_something_changed() {
     );
     let _ = fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn mv_format_and_wipe_write_new_images() {
+    let dir = scratch("suite");
+    let image = disk(&dir);
+    let host = dir.join("notes.txt");
+    fs::write(&host, b"moving notes").unwrap();
+    let out = |n: &str| format!("--output={}", dir.join(n).display());
+    let at = |n: &str| dir.join(n).to_str().unwrap().to_owned();
+    assert_eq!(run(&["mkdir", &image, "Box", &out("1.adf")]).2, Some(0));
+    assert_eq!(
+        run(&["put", &at("1.adf"), host.to_str().unwrap(), &out("2.adf")]).2,
+        Some(0)
+    );
+
+    // Move it into the folder; the original copy keeps it where it was.
+    let (text, err, code) = run(&["mv", &at("2.adf"), "notes.txt", "Box", &out("3.adf")]);
+    assert_eq!(code, Some(0), "{err}");
+    assert!(text.contains("moved notes.txt into Box"), "{text}");
+    let (listing, _, _) = run(&["ls", &at("3.adf"), "Box"]);
+    assert!(listing.contains("notes.txt"), "{listing}");
+    let (_, err, code) = run(&["mv", &at("3.adf"), "Box", "Box", &out("x.adf")]);
+    assert_eq!(code, Some(2), "a folder does not go inside itself");
+    assert!(err.contains("inside itself"), "{err}");
+
+    // Wipe needs to be told what.
+    let (_, err, code) = run(&["wipe", &at("3.adf"), &out("w.adf")]);
+    assert_eq!(code, Some(2));
+    assert!(err.contains("--slack"), "{err}");
+    let (text, err, code) = run(&["wipe", &at("3.adf"), "--slack", "--free", &out("4.adf")]);
+    assert_eq!(code, Some(0), "{err}");
+    assert!(
+        text.contains("file slack") && text.contains("free blocks"),
+        "{text}"
+    );
+
+    // Format, under a new name; nothing is left to list.
+    let (_, err, code) = run(&["format", &at("4.adf"), "--name=Fresh", &out("5.adf")]);
+    assert_eq!(code, Some(0), "{err}");
+    let (info, _, _) = run(&["info", &at("5.adf")]);
+    assert!(info.contains("Fresh"), "{info}");
+    let (listing, _, _) = run(&["ls", &at("5.adf")]);
+    assert!(listing.contains("0 entries"), "{listing}");
+    let _ = fs::remove_dir_all(&dir);
+}

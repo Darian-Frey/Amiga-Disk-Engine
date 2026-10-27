@@ -153,6 +153,10 @@ struct Args {
     all: bool,
     /// `repair` frees blocks the bitmap marks used that nothing reaches.
     free_orphans: bool,
+    /// `wipe` zeroes the slack after each file's last byte.
+    slack: bool,
+    /// `wipe` zeroes every free block.
+    free: bool,
     /// `find` reads its pattern as text even if it looks like hex.
     text: bool,
     /// `find` matches ASCII letters in either case.
@@ -190,6 +194,8 @@ fn parse_args(raw: Vec<String>) -> Result<Args, String> {
     let mut hd = false;
     let mut all = false;
     let mut free_orphans = false;
+    let mut slack = false;
+    let mut free = false;
     let mut dd525 = false;
     let mut size: Option<u64> = None;
     let mut text = false;
@@ -205,6 +211,8 @@ fn parse_args(raw: Vec<String>) -> Result<Args, String> {
             "--hd" => hd = true,
             "--all" => all = true,
             "--free-orphans" => free_orphans = true,
+            "--slack" => slack = true,
+            "--free" => free = true,
             "--dd525" | "--525" => dd525 = true,
             _ if arg.starts_with("--size=") => {
                 size = arg.trim_start_matches("--size=").parse().ok();
@@ -258,6 +266,8 @@ fn parse_args(raw: Vec<String>) -> Result<Args, String> {
         hd,
         all,
         free_orphans,
+        slack,
+        free,
         dd525,
         size,
         text,
@@ -315,7 +325,9 @@ fn main() -> ExitCode {
         ("extract", 2 | 3) => extract(&args),
         ("convert", 2) => convert(Path::new(p(0)), Path::new(p(1)), args.raw, args.format),
         ("create", 1) => create(&args),
-        ("mkdir" | "put" | "rm" | "rename" | "repair", _) => edit_command(&args),
+        ("mkdir" | "put" | "rm" | "rename" | "repair" | "mv" | "format" | "wipe", _) => {
+            edit_command(&args)
+        }
         ("disasm", 1 | 2) => disasm(&args),
         ("decode", 2) => decode(&args),
         ("scan", 1) => scan(Path::new(p(0)), args.format),
@@ -389,6 +401,11 @@ fn usage() {
         "    ade repair <image> [--free-orphans] --output=<new> fix the bitmap and misfiled \
          entries"
             .to_owned(),
+        "    ade mv <image> <path> <folder> --output=<new>  move an entry into another folder"
+            .to_owned(),
+        "    ade format <image> [--name=NAME] --output=<new>  quick-format it in place".to_owned(),
+        "    ade wipe <image> --slack|--free --output=<new>  zero file slack, or free blocks too"
+            .to_owned(),
         "    ade disasm <image> [path]          a program's 68000 code; no path: the bootblock"
             .to_owned(),
         "    ade decode <image> <path>          what a file says, in words (F-033)".to_owned(),
@@ -416,7 +433,8 @@ fn usage() {
         "    --raw           convert writes raw MFM tracks (an extended ADF)".to_owned(),
         "                    disasm decodes a file that is not a program, as a guess".to_owned(),
         "    --hash          include SHA-1 content hashes (not free; see VOCABULARY.md)".to_owned(),
-        "    --name=NAME     create: the volume name (default \"Empty\")".to_owned(),
+        "    --name=NAME     create: the volume name (default \"Empty\"); format: a new one"
+            .to_owned(),
         "    --type=T        create: ofs, ffs, ofs-intl, ffs-intl, ofs-dc, ffs-dc".to_owned(),
         "                    (default ffs-intl; DOS\\6 and DOS\\7 are deferred by D-013)"
             .to_owned(),
@@ -424,6 +442,11 @@ fn usage() {
         "    --size=N        create: an unpartitioned hard disk of N megabytes".to_owned(),
         "    --hd            create: a 1.76 MB high-density disk instead of 880 KB".to_owned(),
         "    --all           extract: take every file on the disk, not one path".to_owned(),
+        "    --slack         wipe: zero the bytes after each file's last, in its last block"
+            .to_owned(),
+        "    --free          wipe: zero every free block too — nothing deleted can be carved"
+            .to_owned(),
+        "                    after, and a game reading blocks directly may lose data".to_owned(),
         "    --free-orphans  repair: free blocks marked used that nothing reaches, as".to_owned(),
         "                    AmigaDOS's validator does; a trackloader's data is lost".to_owned(),
         "    --text          find: read the pattern as text even if it looks like hex".to_owned(),
@@ -494,8 +517,8 @@ fn edit_and_save(
     ExitCode::from(EXIT_CLEAN)
 }
 
-/// `mkdir`, `put`, `rm`, `rename` and `repair`, the commands that write into
-/// a disk (D-018).
+/// `mkdir`, `put`, `rm`, `rename`, `mv`, `repair`, `format` and `wipe`, the
+/// commands that write into a disk (D-018).
 fn edit_command(args: &Args) -> ExitCode {
     // Refused rather than ignored: a script passing the flag must be able to
     // tell an unsupported command from a successful one (BUG-007).
@@ -513,6 +536,9 @@ fn edit_command(args: &Args) -> ExitCode {
         ("rm", 2) => remove(Path::new(p(0)), p(1), args.all, output),
         ("rename", 3) => rename(Path::new(p(0)), p(1), p(2), output),
         ("repair", 1) => repair(Path::new(p(0)), args.free_orphans, output),
+        ("mv", 3) => move_entry(Path::new(p(0)), p(1), p(2), output),
+        ("format", 1) => format_in_place(Path::new(p(0)), args.volume_name.as_deref(), output),
+        ("wipe", 1) => wipe(Path::new(p(0)), args.slack, args.free, output),
         ("put", 2 | 3) => put(
             Path::new(p(0)),
             Path::new(p(1)),
@@ -589,6 +615,55 @@ fn repair(image: &Path, free_orphans: bool, output: Option<&Path>) -> ExitCode {
         EXIT_CLEAN
     } else {
         EXIT_FAULTS
+    })
+}
+
+/// `ade mv`: move an entry into another directory, keeping its name.
+fn move_entry(image: &Path, path: &str, folder: &str, output: Option<&Path>) -> ExitCode {
+    edit_and_save(image, output, |session| {
+        let block = session.entry(path)?;
+        let to = session.directory(folder)?;
+        session.move_entry(block, to)?;
+        let folder = folder.trim_matches('/');
+        Ok(format!(
+            "moved {} into {}",
+            path.trim_end_matches('/'),
+            if folder.is_empty() {
+                "the root"
+            } else {
+                folder
+            }
+        ))
+    })
+}
+
+/// `ade format`: a quick format in place, keeping the name unless given one.
+fn format_in_place(image: &Path, name: Option<&str>, output: Option<&Path>) -> ExitCode {
+    let amiga = match name.map(ade_core::edit::amiga_name).transpose() {
+        Ok(a) => a,
+        Err(c) => {
+            eprintln!("ade: {c:?} has no Latin-1 byte, so it cannot be in an Amiga name");
+            return ExitCode::from(EXIT_USAGE);
+        }
+    };
+    edit_and_save(image, output, |session| {
+        session.format(amiga.as_deref())?;
+        Ok(
+            "formatted: an empty volume; the old blocks are free and left as they were, so \
+            `ade carve` can still find what was on it"
+                .to_owned(),
+        )
+    })
+}
+
+/// `ade wipe`: zero file slack, and with `--free` every free block.
+fn wipe(image: &Path, slack: bool, free: bool, output: Option<&Path>) -> ExitCode {
+    if !slack && !free {
+        eprintln!("ade: wipe needs --slack, --free or both, to say what to zero");
+        return ExitCode::from(EXIT_USAGE);
+    }
+    edit_and_save(image, output, |session| {
+        Ok(session.wipe(slack, free)?.lines().join("\n"))
     })
 }
 

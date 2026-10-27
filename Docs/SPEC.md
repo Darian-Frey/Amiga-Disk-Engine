@@ -576,6 +576,22 @@ A new directory or file changes more blocks than the one it occupies. For one en
 
 **The check that matters most cannot be made by walking.** An entry in the wrong hash slot is still listed by every reader that visits every slot — ADE, `ade check`, `unadf -r` — and found by none that looks a name up. Only accented names hash differently between the international and plain functions (C-006), so a test with ASCII names cannot tell them apart either. ADE's writer is tested by reading the slot directly and by asking ADFlib for files by name; IMP-012 records that `ade check` should do the first of those for every disk.
 
+### Moving, formatting and wiping
+
+*The rest of F-031. Measured 2026-10-27.*
+
+**A move is a delete from one directory and an add to another, without the blocks moving.** The entry leaves its old directory's hash chain and cache, its `parent` field (`BSIZE-12`) names the new directory, and it joins that directory's hash chain under the slot its name hashes to there and its cache — the old cache record carried across as it was, not rebuilt. Both directories' datestamps move, and the volume's; the entry's own does not, as a rename keeps its own. A directory moves with everything in it, since its children name it, not its parent. Refused: the root; a directory into itself or anything inside it, found by walking `parent` up from the destination with a visited set; an entry already there; a name the destination has. Both halves are planned on a copy, and the image changes only when both are built. **Corpus:** a root file moved into a new folder on 3,000 disks, found there by name by ADFlib on 2,971.
+
+**Every edit of an entry now checks the entry's `parent` field** names the directory that lists it, since delete, rename and move all find the directory through it. 18 corpus entries, all on Putty's three disks, name another block; they are refused with that reason (BUG-018, which the health report does not yet see).
+
+**Format in place is AmigaDOS's quick format:** the reserved blocks, the rootblock and the bitmap are written as `ade create` would write them, at the same geometry and with the same dostype, and every other block is left as it was — free, and findable by `carve`. The boot code goes, as it does under AmigaDOS without `Install` (AV-002). The name is kept unless a new one is given; kept as the bytes it was, since it came off the disk. Allowed on a disk too damaged for any other edit.
+
+**Wiping slack** zeroes the bytes after each file's last one, in its last data block — after `data_size` and reseal on OFS, from the size's remainder on FFS. A file is skipped, and said to be, when its tables do not list exactly the blocks its size needs, when its last block is one another file also uses, or — on OFS — when that block does not name the file as its owner, holds a different `data_size`, or fails its checksum. **Wiping free space** zeroes every block the bitmap marks free that nothing in the tree reaches, never the rootblock or the bitmap; refused unless the bitmap is trusted and the tree can be read in full, as the bitmap repair is. Blocks marked used that nothing reaches are left: they are not free, and may be a trackloader's. Neither changes a file — **on every editable corpus disk, 3,600, no file ADE or ADFlib reads changed**; slack held something on 3,420 of them and free space on 1,169. Both together are one step, and if free space is refused the slack is not wiped either.
+
+**What a free-space wipe can destroy that no tool can see:** a game that reads blocks directly may keep data in blocks its bitmap marks free. The command, the ABI and the window all say so before it runs.
+
+**Hard links stay unwritten.** `unadf` leaves link entries out of its listings and no corpus disk has one (§The oracle cannot check links), so creating or removing a link could be checked only against this specification and ADE's own reader — the trap LNFS is deferred for. Deferred on verifiability, 2026-10-27.
+
 ### Repairing a volume
 
 *What `ade repair` changes (F-034), and what it will not. Measured 2026-10-26.*

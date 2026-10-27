@@ -450,6 +450,120 @@ pub fn rename(
     Ok(())
 }
 
+/// Move the entry at `block` into the directory at `to`, keeping its name.
+///
+/// It leaves its old directory's hash chain and cache and joins the new
+/// one's; its `parent` field names the new directory. Both directories'
+/// datestamps move, and the volume's. The entry's own does not: as with a
+/// rename, the file did not change, where it lives did. A cache record is
+/// carried across as it was, rather than rebuilt from ADE's reading of the
+/// entry.
+///
+/// # Errors
+/// [`EditError::NotRemovable`] for the root, or a directory moved into
+/// itself or anything inside it; [`EditError::NotNeeded`] when it is already
+/// there; [`EditError::Exists`] when the destination has the name; otherwise
+/// as [`make_dir`] for either directory. The image is unchanged whenever one
+/// is returned.
+pub fn move_entry(
+    image: &mut [u8],
+    geometry: Geometry,
+    block: u32,
+    to: u32,
+    when: Stamp,
+) -> Result<(), EditError> {
+    // Two directories, so two plans, the second built on the first's result.
+    // Both run on a copy, which is only copied back when both have worked.
+    let mut work = image.to_vec();
+    let (entry, record) = {
+        let source = Slice {
+            image: &work,
+            geometry,
+        };
+        let (entry, from) = removable_for_rename(&source, block)?;
+        if from == to {
+            return Err(EditError::NotNeeded(format!(
+                "{} is already in that directory",
+                entry.name_lossy()
+            )));
+        }
+        // A directory cannot go inside itself: walk up from the destination.
+        let volume = Volume::mount(&source)?;
+        let mut up = to;
+        let mut seen: HashSet<u32> = HashSet::new();
+        while up != 0 && up != volume.root() && seen.insert(up) {
+            if up == block {
+                return Err(EditError::NotRemovable(format!(
+                    "{} cannot be moved inside itself",
+                    entry.name_lossy()
+                )));
+            }
+            up = volume
+                .entry_at(up)
+                .map_err(|_| EditError::NotADirectory { block: to })?
+                .parent;
+        }
+        let mut plan = Plan::open(&source, from)?;
+        let record = if plan.volume.has_dircache() {
+            plan.volume
+                .dircache(from)?
+                .records()
+                .into_iter()
+                .find(|r| r.header == block)
+                .cloned()
+        } else {
+            None
+        };
+        plan.unlink(block)?;
+        if plan.volume.has_dircache() {
+            plan.rewrite_cache(|records| records.retain(|r| r.header != block))?;
+        }
+        plan.touch(when)?;
+        let writes = plan.finish();
+        apply(&mut work, geometry, &writes);
+        (entry, record)
+    };
+    let writes = {
+        let source = Slice {
+            image: &work,
+            geometry,
+        };
+        let mut plan = Plan::new(&source, to, &entry.name)?;
+        let mut raw = plan.read(block)?;
+        let _ = put_back(&mut raw, 12, to);
+        seal(&mut raw);
+        plan.put(block, raw);
+        plan.insert(block, &entry.name)?;
+        if plan.volume.has_dircache() {
+            let record = match record {
+                Some(r) => r,
+                // A cache with no record for it was already disagreeing;
+                // the new one is made from the entry, as AmigaDOS makes one.
+                None => Record {
+                    header: block,
+                    size: entry.byte_size,
+                    protection: entry.protection,
+                    uid: entry.uid,
+                    gid: entry.gid,
+                    altered: entry.altered,
+                    // The record keeps the secondary type's low byte, signed.
+                    secondary_type: i8::from_ne_bytes([
+                        u8::try_from(entry.secondary_type & 0xFF).unwrap_or(0)
+                    ]),
+                    name: entry.name.clone(),
+                    comment: entry.comment.clone(),
+                },
+            };
+            plan.rewrite_cache(|records| records.push(record))?;
+        }
+        plan.touch(when)?;
+        plan.finish()
+    };
+    apply(&mut work, geometry, &writes);
+    image.copy_from_slice(&work);
+    Ok(())
+}
+
 /// Move the entry at `block` from a hash slot its name does not hash to
 /// (IMP-012) into the one it does, so AmigaDOS can open it by name.
 ///
@@ -562,7 +676,20 @@ fn removable_for_rename(
             "that is the volume itself, not an entry in it".to_owned(),
         ));
     }
+    // Every edit of an entry finds its directory through this field, so it
+    // must be the directory that lists it. 18 entries on three corpus disks
+    // (Putty's) name another block (BUG-018).
     let parent = entry.parent;
+    let listed = volume
+        .list(parent)
+        .is_ok_and(|l| l.entries.iter().any(|e| e.block == block));
+    if !listed {
+        return Err(EditError::Damaged(format!(
+            "{}'s header names block {parent} as its directory, and that block does not list \
+             it; ADE will not edit an entry that disagrees with where it is",
+            entry.name_lossy()
+        )));
+    }
     Ok((entry, parent))
 }
 

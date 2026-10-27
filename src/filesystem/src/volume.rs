@@ -963,18 +963,41 @@ impl<'a> Volume<'a> {
     /// # Errors
     /// A read error on the file header.
     pub fn file_blocks(&self, entry: &Entry) -> Result<Vec<u32>, FsError> {
+        let mut blocks = vec![entry.block];
+        self.file_table(entry, |b, _| blocks.push(b))?;
+        Ok(blocks)
+    }
+
+    /// A file's data blocks, first to last, as its header and extension
+    /// blocks list them — without the header and extension blocks
+    /// themselves. Bounded as [`Self::file_blocks`] is.
+    ///
+    /// # Errors
+    /// A read error on the file header.
+    pub fn data_blocks(&self, entry: &Entry) -> Result<Vec<u32>, FsError> {
+        let mut blocks = Vec::new();
+        self.file_table(entry, |b, is_data| {
+            if is_data {
+                blocks.push(b);
+            }
+        })?;
+        Ok(blocks)
+    }
+
+    /// Every block a file's tables name, in order, each with whether it is
+    /// a data block (`true`) or an extension block (`false`).
+    fn file_table(&self, entry: &Entry, mut each: impl FnMut(u32, bool)) -> Result<(), FsError> {
         let cap = usize::try_from(self.geometry.total_blocks()).unwrap_or(usize::MAX);
         let ht = self.hash_table_size() as usize;
-        let mut blocks = vec![entry.block];
-        let mut header_block = entry.block;
-        let mut header_raw = self.read_block(header_block)?;
-        let mut seen: HashSet<u32> = HashSet::from([header_block]);
+        let mut count = 1usize;
+        let mut header_raw = self.read_block(entry.block)?;
+        let mut seen: HashSet<u32> = HashSet::from([entry.block]);
 
         loop {
             let high_seq = ade_endian::u32_at(&header_raw, 8).unwrap_or(0) as usize;
             for i in 0..high_seq.min(ht) {
-                if blocks.len() >= cap {
-                    return Ok(blocks);
+                if count >= cap {
+                    return Ok(());
                 }
                 let index = ht.saturating_sub(1).saturating_sub(i);
                 let offset = 24usize.saturating_add(index.saturating_mul(4));
@@ -982,12 +1005,13 @@ impl<'a> Volume<'a> {
                     continue;
                 };
                 if ptr != 0 && self.geometry.validate(BlockIndex(u64::from(ptr))).is_ok() {
-                    blocks.push(ptr);
+                    each(ptr, true);
+                    count = count.saturating_add(1);
                 }
             }
             let next =
                 ade_endian::u32_at(&header_raw, header_raw.len().saturating_sub(8)).unwrap_or(0);
-            if next == 0 || !seen.insert(next) || blocks.len() >= cap {
+            if next == 0 || !seen.insert(next) || count >= cap {
                 break;
             }
             if self.geometry.validate(BlockIndex(u64::from(next))).is_err() {
@@ -999,12 +1023,11 @@ impl<'a> Volume<'a> {
             if ade_endian::u32_at(&raw, 0).unwrap_or(0) != T_LIST {
                 break;
             }
-            blocks.push(next);
+            each(next, false);
+            count = count.saturating_add(1);
             header_raw = raw;
-            header_block = next;
         }
-        let _ = header_block;
-        Ok(blocks)
+        Ok(())
     }
 
     /// Walk the whole tree from `start`, depth first.

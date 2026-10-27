@@ -2230,6 +2230,81 @@ pub unsafe extern "C" fn ade_edit_rename(
     })
 }
 
+/// Move the entry at `block` into the directory at `to`, keeping its name.
+///
+/// # Safety
+/// `image` must be a live handle or null; `out_message` as for
+/// [`ade_edit_mkdir`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ade_edit_move(
+    image: *mut AdeImage,
+    block: u32,
+    to: u32,
+    out_message: *mut *mut c_char,
+) -> AdeResult {
+    edit(image, std::ptr::null_mut(), out_message, |s| {
+        s.move_entry(block, to).map(|()| block)
+    })
+}
+
+/// Quick-format the disk in place, as one undo step: a new bootblock,
+/// rootblock and bitmap of the same size and filesystem, named `name` —
+/// Latin-1 bytes, or empty to keep the name it had. Every other block is
+/// left as it was, free, for `carve` to find. Allowed on a disk too damaged
+/// for any other edit.
+///
+/// # Safety
+/// As [`ade_edit_mkdir`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ade_edit_format(
+    image: *mut AdeImage,
+    name: AdeBytes,
+    out_message: *mut *mut c_char,
+) -> AdeResult {
+    // SAFETY: the caller's contract.
+    let Some(name) = (unsafe { borrowed(name) }) else {
+        return AdeResult::NullArgument;
+    };
+    edit(image, std::ptr::null_mut(), out_message, |s| {
+        s.format((!name.is_empty()).then_some(name)).map(|()| 0)
+    })
+}
+
+/// Zero file slack, free blocks, or both, as one undo step. `out_report`
+/// receives a line per part — blocks zeroed, bytes that held something, and
+/// each file left alone with why — freed with [`ade_string_free`]. Wiping
+/// free blocks destroys what `carve` could recover, and is refused when the
+/// bitmap or the tree cannot be trusted to say which blocks are free.
+///
+/// # Safety
+/// `image` must be a live handle or null; `out_report` and `out_message` as
+/// `out_message` is for [`ade_edit_mkdir`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ade_edit_wipe(
+    image: *mut AdeImage,
+    slack: bool,
+    free: bool,
+    out_report: *mut *mut c_char,
+    out_message: *mut *mut c_char,
+) -> AdeResult {
+    if !slack && !free {
+        set_message(
+            out_message,
+            "nothing to wipe: ask for slack, free blocks or both",
+        );
+        return AdeResult::Refused;
+    }
+    let mut report = Vec::new();
+    let result = edit(image, std::ptr::null_mut(), out_message, |s| {
+        report = s.wipe(slack, free)?.lines();
+        Ok(0)
+    });
+    if result == AdeResult::Ok {
+        set_message(out_report, &report.join("\n"));
+    }
+    result
+}
+
 /// Repair the bitmap and any entries filed under the wrong hash slot, as one
 /// step for undo. `out_report` receives what was done and what was left, one
 /// line each — "nothing to repair" when nothing needed it — freed with

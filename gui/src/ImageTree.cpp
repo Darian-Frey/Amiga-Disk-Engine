@@ -28,7 +28,11 @@ ImageTree::ImageTree(QWidget *parent) : QTreeWidget(parent) {
 }
 
 QMimeData *ImageTree::mimeData(const QList<QTreeWidgetItem *> &items) const {
-    if (!m_extractor || items.isEmpty() || !dragDir().isValid()) return nullptr;
+    if (items.isEmpty()) return nullptr;
+    auto *mime = new QMimeData;
+    // Always, so folders can be dragged within the tree: they carry no file.
+    mime->setData(rowsFormat(), QByteArray("1"));
+    if (!m_extractor || !dragDir().isValid()) return mime;
 
     QList<QUrl> urls;
     for (QTreeWidgetItem *item : items) {
@@ -44,10 +48,7 @@ QMimeData *ImageTree::mimeData(const QList<QTreeWidgetItem *> &items) const {
         out.close();
         urls << QUrl::fromLocalFile(target);
     }
-    if (urls.isEmpty()) return nullptr;
-
-    auto *mime = new QMimeData;
-    mime->setUrls(urls);
+    if (!urls.isEmpty()) mime->setUrls(urls);
     return mime;
 }
 
@@ -60,7 +61,9 @@ void ImageTree::setAcceptsFiles(bool accept) {
 }
 
 bool ImageTree::wouldAccept(const QObject *source, const QMimeData *mime) const {
-    return m_acceptsFiles && source != this && mime && mime->hasUrls();
+    if (!m_acceptsFiles || !mime) return false;
+    if (source == this) return mime->hasFormat(rowsFormat());
+    return mime->hasUrls();
 }
 
 void ImageTree::dragEnterEvent(QDragEnterEvent *event) {
@@ -86,8 +89,15 @@ void ImageTree::dropEvent(QDropEvent *event) {
         event->ignore();
         return;
     }
-    // Copy, never move: a move would ask the source to delete its file.
+    // Copy, never move: a move would ask the source to delete its file —
+    // and from within this tree, would have Qt delete the dragged rows
+    // itself, under the window that is about to rebuild them.
     event->setDropAction(Qt::CopyAction);
     event->accept();
-    emit filesDropped(itemAt(event->position().toPoint()), event->mimeData()->urls());
+    QTreeWidgetItem *target = itemAt(event->position().toPoint());
+    if (event->source() == this) {
+        emit rowsDropped(target, selectedItems());
+        return;
+    }
+    emit filesDropped(target, event->mimeData()->urls());
 }

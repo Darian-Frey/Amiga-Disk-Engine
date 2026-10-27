@@ -333,6 +333,30 @@ fn every_command_either_emits_json_or_refuses_it() {
             Json::Refuses,
         ),
         (
+            "mv",
+            vec![
+                d.clone(),
+                "X".into(),
+                "Y".into(),
+                format!("--output={}", out_path("mv.adf")),
+            ],
+            Json::Refuses,
+        ),
+        (
+            "format",
+            vec![d.clone(), format!("--output={}", out_path("fm.adf"))],
+            Json::Refuses,
+        ),
+        (
+            "wipe",
+            vec![
+                d.clone(),
+                "--slack".into(),
+                format!("--output={}", out_path("wp.adf")),
+            ],
+            Json::Refuses,
+        ),
+        (
             "put",
             vec![
                 d.clone(),

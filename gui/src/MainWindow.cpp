@@ -173,6 +173,10 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
     // onto that disk (D-018); dropped on empty space they are opened as disks.
     m_tree->setAcceptsFiles(true);
     connect(m_tree, &ImageTree::filesDropped, this, &MainWindow::filesDropped);
+    connect(m_tree, &ImageTree::rowsDropped, this,
+            [this](QTreeWidgetItem *target, const QList<QTreeWidgetItem *> &rows) {
+                moveItems(target, rows);
+            });
     m_tree->setColumnCount(4);
     m_tree->setHeaderLabels({QStringLiteral("Name"), QStringLiteral("Size"),
                              QStringLiteral("Modified"), QStringLiteral("Protection")});
@@ -537,6 +541,11 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
                                      QMessageBox::Yes | QMessageBox::Cancel,
                                      QMessageBox::Cancel) == QMessageBox::Yes;
     };
+    m_confirmWipe = [this](const QString &question) {
+        return QMessageBox::question(this, QStringLiteral("Wipe free space"), question,
+                                     QMessageBox::Yes | QMessageBox::Cancel,
+                                     QMessageBox::Cancel) == QMessageBox::Yes;
+    };
     m_confirmDiscard = [this](const QString &question) {
         return QMessageBox::question(this, QStringLiteral("Unsaved changes"), question,
                                      QMessageBox::Discard | QMessageBox::Cancel,
@@ -578,6 +587,29 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
         "move entries filed under the wrong hash slot to the right one.\n"
         "Blocks nothing reaches stay marked used: a game may keep data there."));
     connect(m_repair, &QAction::triggered, this, &MainWindow::repairSelected);
+
+    // Edits of the disk as a whole, like Repair: undoable until saved, and
+    // saved only to a file of the user's choosing.
+    m_format = disk->addAction(QStringLiteral("&Format..."));
+    m_format->setEnabled(false);
+    m_format->setToolTip(QStringLiteral(
+        "A quick format, as AmigaDOS's: an empty disk of the same size and filesystem.\n"
+        "The old blocks are left as they were, free, so Recover lost files can still "
+        "find them."));
+    connect(m_format, &QAction::triggered, this, &MainWindow::formatSelected);
+    m_wipeSlack = disk->addAction(QStringLiteral("Wipe file &slack"));
+    m_wipeSlack->setEnabled(false);
+    m_wipeSlack->setToolTip(QStringLiteral(
+        "Zero the bytes after each file's last, in its last block: whatever an older "
+        "version of it left there.\nNo file changes."));
+    connect(m_wipeSlack, &QAction::triggered, this, &MainWindow::wipeSlackSelected);
+    m_wipeFree = disk->addAction(QStringLiteral("Wipe free spac&e..."));
+    m_wipeFree->setEnabled(false);
+    m_wipeFree->setToolTip(QStringLiteral(
+        "Zero file slack and every free block. Nothing deleted can be recovered after, "
+        "and a game that reads blocks directly may keep data in blocks its bitmap calls "
+        "free."));
+    connect(m_wipeFree, &QAction::triggered, this, &MainWindow::wipeFreeSelected);
 
     // Help. The manual will join About here; nothing stands in for it in the
     // meantime, because a menu item that is greyed out or opens an apology is
@@ -2070,6 +2102,120 @@ QString MainWindow::repairDisk(QTreeWidgetItem *item) {
 
 void MainWindow::repairSelected() { repairDisk(m_selected); }
 
+int MainWindow::moveItems(QTreeWidgetItem *target, const QList<QTreeWidgetItem *> &rows) {
+    Open *open = imageFor(target);
+    if (!open || rows.isEmpty()) return 0;
+    const quint32 to = directoryFor(target, *open);
+    if (to == 0) {
+        emit errorOccurred(QStringLiteral(
+            "ADE moves entries on plain ADF and hardfile images only, not in a partition "
+            "of a hard disk."));
+        return 0;
+    }
+    // Blocks and names first: the rows are rebuilt after the first move.
+    QList<QPair<quint32, QString>> moving;
+    QStringList refused;
+    for (QTreeWidgetItem *row : rows) {
+        if (!isEditableEntry(row, m_tree)) continue;
+        if (imageFor(row) != open) {
+            refused.append(QStringLiteral("%1: on another disk; drag it out and in to copy it")
+                               .arg(row->text(ColName)));
+            continue;
+        }
+        // Dropped on itself — let go a pixel from where the drag began — or
+        // where it already is: nothing to do, and nothing to report.
+        if (row == target || directoryFor(row->parent(), *open) == to) continue;
+        moving.append({row->data(0, RoleBlock).toUInt(), row->text(ColName)});
+    }
+    int moved = 0;
+    open->image.beginGroup();
+    for (const auto &[block, name] : moving) {
+        const ade::EditResult r = open->image.moveEntry(block, to);
+        if (r.ok()) {
+            ++moved;
+        } else {
+            refused.append(QStringLiteral("%1: %2").arg(name, r.message));
+        }
+    }
+    open->image.endGroup();
+    m_lastEdited = open->index;
+    if (moved > 0) reloadImage(*open);
+    if (!refused.isEmpty()) {
+        emit errorOccurred(QStringLiteral("Not everything could be moved:\n\n%1")
+                               .arg(refused.join(QLatin1Char('\n'))));
+    }
+    if (moved > 0) {
+        statusBar()->showMessage(QStringLiteral("Moved %1 item%2 on %3 — not saved yet")
+                                     .arg(moved)
+                                     .arg(moved == 1 ? "" : "s")
+                                     .arg(open->name));
+    }
+    return moved;
+}
+
+bool MainWindow::formatDisk(QTreeWidgetItem *item, const QString &name) {
+    Open *open = item ? imageFor(item) : editTarget();
+    if (!open) return false;
+    QByteArray amiga;
+    if (!name.isEmpty() && !ade::amigaName(name, &amiga)) {
+        emit errorOccurred(QStringLiteral("%1: an Amiga name is Latin-1, and this has a "
+                                          "character outside it.")
+                               .arg(name));
+        return false;
+    }
+    const ade::EditResult r = open->image.format(amiga);
+    m_lastEdited = open->index;
+    if (!r.ok()) {
+        emit errorOccurred(QStringLiteral("Could not format %1: %2").arg(open->name, r.message));
+        return false;
+    }
+    reloadImage(*open);
+    statusBar()->showMessage(QStringLiteral("Formatted %1 — not saved yet; Undo brings "
+                                            "everything back")
+                                 .arg(open->name));
+    return true;
+}
+
+QString MainWindow::wipeDisk(QTreeWidgetItem *item, bool freeBlocks) {
+    Open *open = item ? imageFor(item) : editTarget();
+    if (!open) return {};
+    if (freeBlocks && m_confirmWipe &&
+        !m_confirmWipe(QStringLiteral("Zero every free block of %1, and each file's slack?\n\n"
+                                      "Nothing deleted from it can be recovered after. A game "
+                                      "that reads blocks directly may keep data in blocks its "
+                                      "bitmap calls free, and would lose it.\n\nUndo brings "
+                                      "it back until you save the disk.")
+                           .arg(open->name))) {
+        return {};
+    }
+    const ade::EditResult r = open->image.wipe(true, freeBlocks);
+    m_lastEdited = open->index;
+    if (!r.ok()) {
+        emit errorOccurred(QStringLiteral("Could not wipe %1: %2").arg(open->name, r.message));
+        return {};
+    }
+    reloadImage(*open);
+    emit reported(QStringLiteral("Wipe — %1").arg(open->name), r.message);
+    return r.message;
+}
+
+void MainWindow::formatSelected() {
+    Open *open = imageFor(m_selected);
+    if (!open) return;
+    bool ok = false;
+    const QString name = QInputDialog::getText(
+        this, QStringLiteral("Format %1").arg(open->name),
+        QStringLiteral("Everything on it leaves its folders; Undo brings it back until you "
+                       "save.\n\nVolume name (empty keeps the one it has):"),
+        QLineEdit::Normal, QString(), &ok);
+    if (!ok) return;
+    formatDisk(m_selected, name);
+}
+
+void MainWindow::wipeSlackSelected() { wipeDisk(m_selected, false); }
+
+void MainWindow::wipeFreeSelected() { wipeDisk(m_selected, true); }
+
 void MainWindow::deleteSelected() { deleteItem(m_selected); }
 
 void MainWindow::renameSelected() {
@@ -2271,6 +2417,9 @@ void MainWindow::updateEditActions() {
                                            ADE_WHOLE_IMAGE);
     if (m_newFolder) m_newFolder->setEnabled(plain);
     if (m_repair) m_repair->setEnabled(plain);
+    if (m_format) m_format->setEnabled(plain);
+    if (m_wipeSlack) m_wipeSlack->setEnabled(plain);
+    if (m_wipeFree) m_wipeFree->setEnabled(plain);
     const bool entry = plain && isEditableEntry(m_selected, m_tree);
     if (m_delete) m_delete->setEnabled(entry);
     if (m_rename) m_rename->setEnabled(entry);

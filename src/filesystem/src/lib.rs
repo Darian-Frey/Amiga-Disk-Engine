@@ -22,3 +22,4 @@ pub mod rdb;
 pub mod repair;
 pub mod rootblock;
 pub mod volume;
+pub mod wipe;
