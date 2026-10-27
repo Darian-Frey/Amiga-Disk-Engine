@@ -742,3 +742,143 @@ fn fuzz_the_picture_decoder() {
         });
     }
 }
+
+#[allow(
+    clippy::disallowed_methods,
+    clippy::cast_possible_truncation,
+    reason = "templates written by hand, not with the helpers that read them (C-001's exception)"
+)]
+/// A proportional, kerned font of 'A'..'D', as a one-hunk executable.
+fn font_template() -> Vec<u8> {
+    let mut h = vec![0x70, 0xFF, 0x4E, 0x75];
+    h.extend([0u8; 14]);
+    h.extend(0x0F80u16.to_be_bytes());
+    h.extend([0u8; 2 + 4 + 32 + 20]);
+    h.extend(3u16.to_be_bytes()); // YSize
+    h.extend([0, 0x20]);
+    h.extend([0, 4, 0, 2, 0, 1, 0, 0, b'A', b'D']);
+    let at = h.len();
+    h.extend([0u8; 18]);
+    let bitmap = h.len() as u32;
+    h.extend([0xA5, 0x5A, 0xFF, 0x00, 0x0F, 0xF0]);
+    h[at..at + 4].copy_from_slice(&bitmap.to_be_bytes());
+    h[at + 4..at + 6].copy_from_slice(&2u16.to_be_bytes());
+    let loc = h.len() as u32;
+    for i in 0..5u16 {
+        h.extend((i * 3).to_be_bytes());
+        h.extend(3u16.to_be_bytes());
+    }
+    h[at + 6..at + 10].copy_from_slice(&loc.to_be_bytes());
+    for off in [10usize, 14] {
+        let p = h.len() as u32;
+        for v in [4i16, -1, 3, 0, 2] {
+            h.extend(v.to_be_bytes());
+        }
+        h[at + off..at + off + 4].copy_from_slice(&p.to_be_bytes());
+    }
+    while h.len() % 4 != 0 {
+        h.push(0);
+    }
+    let mut font = Vec::new();
+    for v in [
+        0x3F3u32,
+        0,
+        1,
+        0,
+        0,
+        (h.len() / 4) as u32,
+        0x3E9,
+        (h.len() / 4) as u32,
+    ] {
+        font.extend(v.to_be_bytes());
+    }
+    font.extend(&h);
+    font.extend(0x3F2u32.to_be_bytes());
+    font
+}
+
+#[allow(
+    clippy::disallowed_methods,
+    clippy::cast_possible_truncation,
+    reason = "templates written by hand, not with the helpers that read them (C-001's exception)"
+)]
+/// An 8SVX of three octaves in stereo.
+fn sound_template() -> Vec<u8> {
+    let mut inner = b"8SVX".to_vec();
+    let mut vhdr = vec![0u8; 20];
+    vhdr[3] = 8;
+    vhdr[7] = 4;
+    vhdr[12..14].copy_from_slice(&8000u16.to_be_bytes());
+    vhdr[14] = 3;
+    vhdr[16..20].copy_from_slice(&0x10000u32.to_be_bytes());
+    for (id, data) in [
+        (b"VHDR", vhdr),
+        (b"NAME", b"tone".to_vec()),
+        (b"CHAN", 6u32.to_be_bytes().to_vec()),
+        (b"BODY", (0..168u8).map(|i| i.wrapping_mul(37)).collect()),
+    ] {
+        inner.extend(id);
+        inner.extend((data.len() as u32).to_be_bytes());
+        inner.extend(data);
+    }
+    let mut sound = b"FORM".to_vec();
+    sound.extend((inner.len() as u32).to_be_bytes());
+    sound.extend(inner);
+    sound
+}
+
+#[test]
+#[allow(
+    clippy::disallowed_methods,
+    clippy::cast_possible_truncation,
+    reason = "templates written by hand, not with the helpers that read them (C-001's exception)"
+)]
+fn fuzz_the_font_and_sound_decoders() {
+    // F-033. A proportional, kerned font of 'A'..'D' as a one-hunk
+    // executable, and an 8SVX of three octaves in stereo: mutated, so the
+    // table pointers, counts and lengths — every one of them from the file —
+    // land anywhere, plus truncation. Nothing may allocate what the file
+    // does not pay for beyond the bounded specimen.
+    let font = font_template();
+    assert!(
+        ade_core::decode::file(b"8", &font)
+            .unwrap()
+            .picture
+            .is_some(),
+        "the font template decodes"
+    );
+
+    let sound = sound_template();
+    assert!(
+        ade_core::decode::file(b"tone", &sound)
+            .unwrap()
+            .picture
+            .is_some(),
+        "the sound template decodes"
+    );
+
+    let mut rng = Rng::new(0x5EED_F0E7);
+    for i in 0..iterations(20_000) {
+        let seed = u64::from(i);
+        let (name, template): (&[u8], &Vec<u8>) = if i % 2 == 0 {
+            (b"8", &font)
+        } else {
+            (b"tone", &sound)
+        };
+        let mut buf = template.clone();
+        for _ in 0..=rng.below(6) {
+            mutate(&mut buf, &mut rng);
+        }
+        if rng.below(6) == 0 {
+            buf.truncate(rng.below(buf.len() + 1));
+        }
+        timed(seed, "font and sound decoders", || {
+            if let Ok(d) = ade_core::decode::file(name, &buf) {
+                if let Some(p) = &d.picture {
+                    assert_eq!(p.argb.len(), p.width * p.height, "seed {seed}");
+                }
+                let _ = d.lines();
+            }
+        });
+    }
+}

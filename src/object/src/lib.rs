@@ -20,6 +20,7 @@ pub mod explain;
 )]
 mod explain_audit;
 pub mod find;
+pub mod font;
 pub mod hardware;
 pub mod hunk;
 pub mod icon;
@@ -28,3 +29,4 @@ pub mod listing;
 pub mod m68k;
 pub mod prefs;
 pub mod signature;
+pub mod svx;

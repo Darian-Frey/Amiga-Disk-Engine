@@ -5,19 +5,20 @@
 //! belongs here rather than in a front end, for the same reason as the
 //! Assembly view's (F-032): the GUI and the CLI must give the same answer.
 //!
-//! Three formats: Intuition's Preferences, Workbench icons and IFF ILBM
-//! pictures. All are the same shape — labelled fields in groups, colours
-//! carried as colours, and a picture — which is the shape the next one is
-//! meant to take too.
+//! Five formats: Intuition's Preferences, Workbench icons, IFF ILBM
+//! pictures, bitmap fonts and IFF 8SVX sounds. All are the same shape —
+//! labelled fields in groups, colours carried as colours, and a picture: a
+//! font's is a specimen, a sound's its waveform.
 
 pub use ade_object::decoded::Field;
 use ade_object::icon::{self, Highlight, Icon};
 use ade_object::ilbm;
 use ade_object::prefs::{self, Pointer};
+use ade_object::{font, svx};
 
 /// What ADE decodes, for a file it does not.
-const DECODES: &str = "It decodes Workbench icons, IFF ILBM pictures and Intuition's \
-                       Preferences (devs/system-configuration).";
+const DECODES: &str = "It decodes Workbench icons, IFF ILBM pictures, IFF 8SVX sounds, \
+                       bitmap fonts and Intuition's Preferences (devs/system-configuration).";
 
 /// A decoded file.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -77,6 +78,25 @@ pub fn file(name: &[u8], bytes: &[u8]) -> Result<Decoded, NotDecoded> {
         return ilbm::parse(bytes)
             .map(|p| ilbm_decoded(&p))
             .map_err(|e| NotDecoded(format!("an IFF ILBM picture, but {e}")));
+    }
+    if svx::is_svx(bytes) {
+        return svx::parse(bytes)
+            .map(|s| svx_decoded(&s))
+            .map_err(|e| NotDecoded(format!("an IFF 8SVX sound, but {e}")));
+    }
+    if font::is_contents(name, bytes) {
+        return font::contents(bytes)
+            .map(|c| Decoded {
+                title: "Font contents: the sizes of a font, each in a file of its own".to_owned(),
+                fields: c.fields(),
+                picture: None,
+            })
+            .map_err(|e| NotDecoded(format!("a font's contents file, but {e}")));
+    }
+    if font::is_font(bytes) {
+        return font::parse(bytes)
+            .map(|f| font_decoded(&f))
+            .map_err(|e| NotDecoded(format!("a font, but {e}")));
     }
     if prefs::is_preferences(name, bytes.len())
         && let Some(p) = prefs::decode(bytes)
@@ -225,6 +245,63 @@ fn icon_picture(
         height,
         argb,
         pixel_shape: (1, 2),
+    }
+}
+
+fn font_decoded(f: &font::Font) -> Decoded {
+    let picture = f
+        .specimen(&font::SPECIMEN)
+        .map(|(width, height, ink)| Picture {
+            caption: "A specimen, set as Text() sets it".to_owned(),
+            width,
+            height,
+            argb: ink
+                .iter()
+                .map(|&on| if on { 0xFF00_0000 } else { 0xFFFF_FFFF })
+                .collect(),
+            pixel_shape: f.pixel_shape(),
+        });
+    Decoded {
+        title: format!("Font, {} pixels", f.height),
+        fields: f.fields(),
+        picture,
+    }
+}
+
+fn svx_decoded(s: &svx::Sound) -> Decoded {
+    const WIDTH: usize = 128;
+    const HEIGHT: usize = 32;
+    let picture = s.waveform(WIDTH, HEIGHT).map(|columns| {
+        let mut argb = vec![0xFFFF_FFFF; WIDTH * HEIGHT];
+        for x in 0..WIDTH {
+            if let Some(px) = argb.get_mut((HEIGHT / 2 * WIDTH).saturating_add(x)) {
+                *px = 0xFFCC_CCCC;
+            }
+        }
+        for (x, (top, bottom, repeats)) in columns.into_iter().enumerate() {
+            let ink = if repeats { 0xFFCC_6622 } else { 0xFF22_55AA };
+            for y in top..=bottom {
+                if let Some(px) = argb.get_mut(y.saturating_mul(WIDTH).saturating_add(x)) {
+                    *px = ink;
+                }
+            }
+        }
+        Picture {
+            caption: if s.repeat > 0 {
+                "The waveform, the part that repeats in orange".to_owned()
+            } else {
+                "The waveform".to_owned()
+            },
+            width: WIDTH,
+            height: HEIGHT,
+            argb,
+            pixel_shape: (1, 1),
+        }
+    });
+    Decoded {
+        title: "IFF 8SVX sound".to_owned(),
+        fields: s.fields(),
+        picture,
     }
 }
 

@@ -109,3 +109,53 @@ fn icons_and_pictures_decode_by_path() {
     assert!(text.contains("  1222222222222222"), "{text}");
     let _ = fs::remove_dir_all(&dir);
 }
+
+/// An 8SVX of four samples, all silence but one.
+fn sound() -> Vec<u8> {
+    let mut vhdr = vec![0u8; 20];
+    vhdr[3] = 4;
+    vhdr[12..14].copy_from_slice(&8000u16.to_be_bytes());
+    vhdr[14] = 1;
+    vhdr[16..20].copy_from_slice(&0x10000u32.to_be_bytes());
+    let mut inner = b"8SVX".to_vec();
+    for (id, data) in [
+        (b"VHDR", vhdr),
+        (b"NAME", b"blip".to_vec()),
+        (b"BODY", vec![0, 100, 0, 0]),
+    ] {
+        inner.extend(id);
+        inner.extend((data.len() as u32).to_be_bytes());
+        inner.extend(data);
+    }
+    let mut out = b"FORM".to_vec();
+    out.extend((inner.len() as u32).to_be_bytes());
+    out.extend(inner);
+    out
+}
+
+#[test]
+fn a_sound_decodes_by_path_with_its_waveform() {
+    let dir = std::env::temp_dir().join(format!("ade-decode-svx-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    let (blank, one) = (dir.join("blank.adf"), dir.join("one.adf"));
+    fs::write(dir.join("blip"), sound()).unwrap();
+    let s = |p: &PathBuf| p.to_str().unwrap().to_owned();
+    assert_eq!(run(&["create", &s(&blank)]).2, Some(0));
+    let (_, err, code) = run(&[
+        "put",
+        &s(&blank),
+        &s(&dir.join("blip")),
+        &format!("--output={}", s(&one)),
+    ]);
+    assert_eq!(code, Some(0), "{err}");
+    let (text, err, code) = run(&["decode", &s(&one), "blip"]);
+    assert_eq!(code, Some(0), "{err}");
+    assert!(text.starts_with("IFF 8SVX sound"), "{text}");
+    assert!(
+        text.contains("blip") && text.contains("8000 samples a second"),
+        "{text}"
+    );
+    assert!(text.contains("The waveform (128 × 32"), "{text}");
+    let _ = fs::remove_dir_all(&dir);
+}

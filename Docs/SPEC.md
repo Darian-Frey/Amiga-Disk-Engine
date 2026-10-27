@@ -1153,6 +1153,46 @@ A `FORM ILBM` of chunks, each an ID, a 32-bit length and the bytes, padded to an
 
 **Corpus, 2026-10-26:** 4,927 intact ILBM files; **4,664 pictures** decode — 4,383 indexed, 187 extra-half-brite, 94 hold-and-modify — and **4,637 use their `BODY` to the byte**, which a misread row length, plane count or ByteRun1 rule could not survive across thousands of files. 161 are refused, all game formats wearing an ILBM header: other compression numbers (Day of the Pharaoh's 4, RoboSport's 86), no `BMHD`, or a `BODY` packed some other way (Die Stadt der Löwen's pictures claim no compression in bodies too short to be uncompressed). `ANIM` files hold ILBMs inside another `FORM` and are not decoded.
 
+## Bitmap fonts
+
+*For F-033. Measured 2026-10-27 over every font in the corpus.*
+
+A font is two kinds of file. **The contents file**, `FONTS:name.font`: an ID — `$0F00`, `$0F02` when the entries carry tags, `$0F03` for an outline font — a count, and that many 260-byte `FontContents` entries: a file name relative to `FONTS:` (`ruby/12`), a height, a style and flags. **Each size** is then a hunk executable whose one hunk begins `MOVEQ #-1,D0; RTS`, so running it does nothing, followed by a `DiskFontHeader` and the `TextFont` inside it. Layouts from `diskfont/diskfont.h` and `graphics/text.h`; the reading follows AROS's `diskfont_io.c`, read locally and not committed.
+
+| Hunk offset | Field | Notes |
+|---|---|---|
+| 0 | `MOVEQ #-1,D0; RTS` | `70FF 4E75` |
+| 18 | `dfh_FileID` | `$0F80` |
+| 26 | `dfh_Name[32]` | often empty: AmigaDOS fills it in |
+| 58 | `dfh_TF` | the `TextFont`, its 20-byte `Message` first |
+| 78, 80, 81 | `tf_YSize`, `tf_Style`, `tf_Flags` | flags: `TALLDOT` 8, `WIDEDOT` 16, `PROPORTIONAL` 32, `DESIGNED` 64 |
+| 82, 84, 86 | `tf_XSize`, `tf_Baseline`, `tf_BoldSmear` | |
+| 90, 91 | `tf_LoChar`, `tf_HiChar` | |
+| 92, 96 | `tf_CharData`, `tf_Modulo` | the bitmap: `YSize` rows of `Modulo` bytes |
+| 98, 102, 106 | `tf_CharLoc`, `tf_CharSpace`, `tf_CharKern` | `HiChar − LoChar + 2` entries: one per character and one for any other |
+
+**The pointers are offsets into the hunk**, which `HUNK_RELOC32` turns into addresses on loading. A location entry is a bit offset into the bitmap's row in its high 16 bits and a width in its low 16. **`Text()` sets a character** by adding its kerning to the pen before drawing the glyph, and its spacing — or `XSize` when there is no spacing table — after (AROS's `rom/graphics/text.c`). A character outside `LoChar`..`HiChar` draws the last glyph.
+
+**The contents file and the size file check each other.** Both state the size's height, written separately: across the corpus **2,552 of 2,561** agree, which a misplaced field in either reading could not survive. The nine that do not are the files' own disagreements — First Shapes lists 19 for a 16-pixel font.
+
+**Tables cut short.** 21 size files end a few bytes before their last table does — the entry for the "any other character" glyph, usually, the file padded to a whole long and the Amiga reading on past it. ADE reads a table as far as the file goes and takes the rest as zero, and says so.
+
+**Corpus, 2026-10-27:** 1,426 contents files listing 2,856 sizes, 293 of them not on the disk; **2,575 size files, every one decoded**, 2,574 drawn as a three-line specimen — the other is a colour font, whose glyphs are in planes ADE does not read. 1,883 are proportional, 2,116 carry kerning, 37 were drawn for high-resolution screens' tall pixels and 7 for interlaced screens' wide ones, which the picture honours. 55 have glyphs reaching past their bitmap's row; they are drawn as the Amiga drew them, from the bytes that follow. The 57 outline fonts (`$0F03`) list no bitmap sizes, and are decoded as what they are.
+
+## IFF 8SVX sounds
+
+*For F-033. Measured 2026-10-27 over every 8SVX in the corpus.*
+
+A `FORM 8SVX`. `VHDR` (`datatypes/soundclass.h`): samples that play once in the highest octave, samples that then repeat, samples per cycle, the rate, the number of octaves, the compression and the volume in 16.16 fixed point. `BODY`: signed 8-bit samples, the first octave then each next one twice as long; `CHAN` 2 left, 4 right, 6 stereo — the left channel's samples, then the right's. `NAME`, `AUTH`, `ANNO`, `(c) ` say what it is. The reading follows AROS's `8svx.datatype`, read locally and not committed.
+
+**The header says how long the body is:** first octave × (2^octaves − 1), twice for stereo. Across the corpus **2,525 of 2,599** bodies are exactly that long; most of the rest are shorter, files cut off. ADE says when they differ.
+
+**Not decoded: Fibonacci-delta compression**, on 6 corpus files. AROS's datatype refuses it too, and there is no second statement of the encoding here to check a decoder against; the fields say so and there is no waveform.
+
+**The picture is the first octave's waveform**, of the first channel: 128 columns of 32 rows, each column the reach above and below silence of the samples it covers, the repeating part in orange.
+
+**Corpus, 2026-10-27:** 2,599 sounds on 300 disks, every one decoded; 2,588 drawn — the 6 compressed and 5 with an empty body are not. 88 are marked left, 64 right and 3 stereo; 71 hold more than one octave.
+
 ## Flux formats
 
 - **Extended-ADF** — see above.
