@@ -10,10 +10,14 @@ Severity vocabulary: low | medium | high.
 
 ## Open
 
+_None._
+
+## Fixed
+
 ### BUG-018 The health report says nothing about an entry whose parent field names another directory
 **Severity:** low
-**Status:** open
-**Found:** 2026-10-27, moving a file on every corpus disk for F-031.
+**Status:** fixed
+**Found:** 2026-10-27, moving a file on every corpus disk for F-031. **Fixed** 2026-10-27.
 **Where:** [src/api/src/health.rs](../src/api/src/health.rs) `scan_tree`: no check compares an entry's `parent` field with the directory that lists it.
 
 **What is wrong.** Every entry header names its directory (`parent`, `BSIZE-12`), and AmigaDOS uses it — `ParentDir()` follows it, and any edit of the entry finds its directory through it. On 3 of 3,606 corpus volumes, all of them Putty's (disks A, B and C), **18 entries** listed in the root name some other block: `COFFEBAR.BLK` says block 23, which is not a directory; `HOLSZONE.DRV` says 853. `ade check` reports nothing about it.
@@ -22,10 +26,13 @@ Severity vocabulary: low | medium | high.
 
 **Correct behaviour.** A warning per directory holding such entries, naming them and the blocks they claim, capped as other per-entry findings are. A new code on the JSON surface: an inventory entry (D-015) and a schema bump.
 
-**Not fixed here** (Maintenance Rule 8). The write suite now refuses an entry whose parent field does not name the directory listing it, with that reason, rather than acting through the wrong block.
+**Not fixed** in the change that found it (Maintenance Rule 8); the write suite began refusing such an entry there, with the reason, rather than acting through the wrong block.
 
+**The fix.** `ade check` compares every listed entry's `parent` field with the directory listing it and raises **`entry-wrong-parent`**, a warning per entry, capped at twenty as `entry-wrong-slot` is, saying what the named block is: *COFFEBAR.BLK: listed in the root, but its header names block 23 as its directory — NIPP4TO6.SPR, which is not a directory.* The volume's own row (IMP-015) is the root, not an entry, and is left to its own finding. Schema **1.17 → 1.18**.
 
-## Fixed
+**What it shows.** Exactly the 18 entries measured, 5, 11 and 2 on Putty's disks A, B and C, all in the root, and **every one names another file's header** — never an unrelated block — which looks like the mastering tool's doing rather than damage. No other corpus disk gains the finding.
+
+**Tests.** `parents.rs` builds both shapes — a root file naming a file's header, a file in a folder naming the root — and checks the words; its corpus half requires the finding on Putty's three disks, 5, 11 and 2, and nowhere else.
 
 ### BUG-017 `ade create --name` writes a name outside ASCII as UTF-8, not Latin-1
 **Severity:** low

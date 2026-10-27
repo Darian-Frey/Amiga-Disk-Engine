@@ -385,6 +385,7 @@ fn scan_tree(volume: &Volume<'_>, findings: &mut Vec<Finding>) -> TreeScan {
     scan_damaged_directories(&walked, findings);
     scan_dircaches(volume, &walked, &mut scan, findings);
     scan_hash_slots(volume, &walked, findings);
+    scan_parents(volume, &walked, findings);
     scan_duplicate_names(volume, &walked, findings);
     scan_root_in_tables(volume, &walked, findings);
     scan
@@ -519,6 +520,85 @@ fn scan_hash_slots(
             Severity::Warning,
             format!(
                 "{} more entries are filed under the wrong hash slot",
+                reported.saturating_sub(MAX_SLOT_FINDINGS)
+            ),
+        ));
+    }
+}
+
+/// Entries whose header names a directory other than the one listing them
+/// (BUG-018).
+///
+/// Every entry's `parent` field names its directory, and AmigaDOS follows
+/// it: `ParentDir()` does, and so does every edit, which finds the entry's
+/// directory through it. Measured 2026-10-27 over 3,606 corpus volumes: 18
+/// entries on 3 disks, all Putty's, listed in the root and naming other
+/// blocks — some not directories at all. The volume's own row (a root listed
+/// in a hash table, IMP-015) is the root, not an entry, and is left to its
+/// own finding.
+fn scan_parents(
+    volume: &Volume<'_>,
+    walked: &ade_filesystem::volume::Walk,
+    findings: &mut Vec<Finding>,
+) {
+    let directories = core::iter::once((String::new(), volume.root())).chain(
+        walked
+            .entries
+            .iter()
+            .filter(|(_, e)| e.kind == EntryKind::Directory)
+            .map(|(path, e)| (path.clone(), e.block)),
+    );
+    let mut reported = 0usize;
+    for (dir_path, dir) in directories {
+        let Ok(listing) = volume.list(dir) else {
+            continue;
+        };
+        for e in listing
+            .entries
+            .iter()
+            .filter(|e| e.kind != EntryKind::Root && e.parent != dir)
+        {
+            reported = reported.saturating_add(1);
+            if reported > MAX_SLOT_FINDINGS {
+                continue;
+            }
+            let name = e.name_lossy();
+            let path = if dir_path.is_empty() {
+                name
+            } else {
+                format!("{dir_path}/{name}")
+            };
+            let named = match volume.entry_at(e.parent) {
+                _ if e.parent == volume.root() => "the root".to_owned(),
+                Ok(p) if p.kind.is_directory() => format!("the directory {}", p.name_lossy()),
+                Ok(p) => format!("{}, which is not a directory", p.name_lossy()),
+                Err(_) => "a block that is not an entry".to_owned(),
+            };
+            let listed = if dir == volume.root() {
+                "the root".to_owned()
+            } else {
+                dir_path.clone()
+            };
+            findings.push(
+                Finding::new(
+                    "entry-wrong-parent",
+                    Severity::Warning,
+                    format!(
+                        "{path}: listed in {listed}, but its header names block {} as its \
+                         directory — {named}",
+                        e.parent
+                    ),
+                )
+                .at(e.block),
+            );
+        }
+    }
+    if reported > MAX_SLOT_FINDINGS {
+        findings.push(Finding::new(
+            "entry-wrong-parent",
+            Severity::Warning,
+            format!(
+                "{} more entries name a directory other than the one listing them",
                 reported.saturating_sub(MAX_SLOT_FINDINGS)
             ),
         ));
