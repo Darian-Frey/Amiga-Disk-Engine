@@ -882,3 +882,52 @@ fn fuzz_the_font_and_sound_decoders() {
         });
     }
 }
+
+#[test]
+fn fuzz_free_blocks_left_by_deleting() {
+    // IMP-019. On an empty volume the health report reads every free block
+    // and follows what looks like a deleted file's header: its data table and
+    // its extension chain, all from blocks nothing vouches for. Headers are
+    // planted with valid checksums, so the mutation reaches the tables and
+    // the chain — counts past the table, pointers outside the volume, chains
+    // that loop. The count can never exceed the volume.
+    use ade_core::layers::{block::checksum, endian::put_u32};
+    let dostype = Dostype::from_raw(0x444F_5301).unwrap();
+    let when = ade_core::layers::filesystem::format::Stamp {
+        days: 17_000,
+        mins: 1,
+        ticks: 0,
+    };
+    let blank =
+        ade_core::layers::filesystem::format::blank(Geometry::DD_FLOPPY, dostype, "Free", when)
+            .unwrap();
+    let mut rng = Rng::new(0x5EED_F2EE);
+    for i in 0..iterations(2_000) {
+        let seed = u64::from(i);
+        let mut img = blank.clone();
+        for _ in 0..=rng.below(4) {
+            let b = 882 + rng.below(800);
+            let block = &mut img[b * 512..(b + 1) * 512];
+            block.fill(0);
+            put_u32(block, 0, 2).unwrap();
+            put_u32(block, 4, b as u32).unwrap();
+            put_u32(block, 8, rng.below(200) as u32).unwrap();
+            for slot in 0..72 {
+                let at = 512 - 204 - slot * 4;
+                put_u32(block, at, (rng.next_u64() % 2000) as u32).unwrap();
+            }
+            put_u32(block, 512 - 8, (rng.next_u64() % 2000) as u32).unwrap();
+            put_u32(block, 512 - 4, (-3i32).cast_unsigned()).unwrap();
+            for _ in 0..rng.below(3) {
+                mutate(block, &mut rng);
+            }
+            let sum = checksum::normal_at(block, 20).unwrap();
+            put_u32(block, 20, sum).unwrap();
+        }
+        timed(seed, "free blocks left by deleting", || {
+            let report = ade_core::health::examine(img);
+            let held = report.bitmap.map_or(0, |b| b.free_holding_data);
+            assert!(held <= 1760, "seed {seed}: {held}");
+        });
+    }
+}

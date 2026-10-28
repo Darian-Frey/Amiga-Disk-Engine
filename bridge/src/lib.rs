@@ -258,6 +258,15 @@ pub struct AdeImage {
     /// running it per call — which is what a badge in a GUI asks for — cost
     /// more than everything else the window did.
     findings: usize,
+    /// On a volume with no entries, free blocks holding data (IMP-019),
+    /// counted with the findings at open. Once there is a session, it is
+    /// the one that knows.
+    free_holding_data: usize,
+    /// What the disk is, counted with the findings; its words are kept
+    /// beside it so a front end can borrow them.
+    kind: ade_core::DiskKind,
+    kind_summary: CString,
+    kind_explanation: CString,
     container: CString,
     absent: Option<CString>,
     /// The file this was opened from: where an edit session reads its bytes,
@@ -272,6 +281,9 @@ pub struct AdeImage {
     /// Groups opened before the first edit created the session; handed to it
     /// when it is (IMP-014).
     group_depth: u32,
+    /// Whether writing over free blocks that hold data was allowed before
+    /// the first edit created the session; handed to it when it is.
+    overwrite_free_data: bool,
 }
 
 /// A directory listing or a whole-volume walk, owned by the caller until freed.
@@ -397,7 +409,10 @@ pub unsafe extern "C" fn ade_image_open(
                 .map(|entry| entry.name.clone())
         });
         let inspection = inspect_bytes(bytes.clone());
-        let findings = examine(bytes.clone()).findings.len();
+        let report = examine(bytes.clone());
+        let findings = report.findings.len();
+        let free_holding_data = report.bitmap.as_ref().map_or(0, |b| b.free_holding_data);
+        let kind = report.kind;
         // A container ADE cannot mount still gets a handle: the caller wants
         // the container and the reason. The reading calls simply find nothing.
         //
@@ -418,11 +433,16 @@ pub unsafe extern "C" fn ade_image_open(
             identified,
             inspection,
             findings,
+            free_holding_data,
+            kind,
+            kind_summary: CString::new(kind.summary()).unwrap_or_default(),
+            kind_explanation: CString::new(kind.explanation()).unwrap_or_default(),
             container,
             absent,
             path,
             session: None,
             group_depth: 0,
+            overwrite_free_data: false,
         }))
     })
 }
@@ -474,6 +494,49 @@ pub unsafe extern "C" fn ade_image_volume_absent(image: *const AdeImage) -> *con
     with_image(image, std::ptr::null(), |i| {
         i.absent.as_ref().map_or(std::ptr::null(), |s| s.as_ptr())
     })
+}
+
+/// What the disk is, as `AdeDiskKind`: above all, why a disk with nothing to
+/// list has nothing — its own loader, another disk's, a game behind an empty
+/// volume, raw tracks, or blank. `ADE_KIND_UNREADABLE` for null.
+///
+/// # Safety
+/// `image` must be a live handle or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ade_image_kind(image: *const AdeImage) -> u32 {
+    use ade_core::DiskKind;
+    with_image(image, 8, |i| match i.kind {
+        DiskKind::Files => 0,
+        DiskKind::Device => 1,
+        DiskKind::Blank => 2,
+        DiskKind::Emptied => 3,
+        DiskKind::GameBehindEmptyRoot => 4,
+        DiskKind::OwnLoader => 5,
+        DiskKind::DataDisk => 6,
+        DiskKind::CustomTracks => 7,
+        DiskKind::Unreadable => 8,
+        DiskKind::Unformatted => 9,
+    })
+}
+
+/// What the disk is in a few words, for a row or a status line: borrowed,
+/// valid until the handle is freed or edited. Null for null.
+///
+/// # Safety
+/// `image` must be a live handle or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ade_image_kind_summary(image: *const AdeImage) -> *const c_char {
+    with_image(image, std::ptr::null(), |i| i.kind_summary.as_ptr())
+}
+
+/// What the disk is, explained in a sentence or three for a person looking
+/// at a disk with nothing listed: borrowed, as [`ade_image_kind_summary`].
+///
+/// # Safety
+/// `image` must be a live handle or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ade_image_kind_explanation(image: *const AdeImage) -> *const c_char {
+    with_image(image, std::ptr::null(), |i| i.kind_explanation.as_ptr())
 }
 
 /// The image's size in bytes.
@@ -2071,7 +2134,15 @@ fn refresh(image: &mut AdeImage) {
         return;
     };
     let bytes = session.bytes().to_vec();
-    image.findings = examine(bytes.clone()).findings.len();
+    let report = examine(bytes.clone());
+    image.findings = report.findings.len();
+    // An edit can change what a disk is: a file put on a blank disk, the last
+    // one deleted.
+    if image.kind != report.kind {
+        image.kind = report.kind;
+        image.kind_summary = CString::new(report.kind.summary()).unwrap_or_default();
+        image.kind_explanation = CString::new(report.kind.explanation()).unwrap_or_default();
+    }
     image.inspection = inspect_bytes(bytes.clone());
     image.container = CString::new(image.inspection.detection.kind.to_string()).unwrap_or_default();
     image.absent = image
@@ -2096,6 +2167,9 @@ fn edit(
                 Ok(mut s) => {
                     for _ in 0..image.group_depth {
                         s.begin_group();
+                    }
+                    if image.overwrite_free_data {
+                        s.allow_overwriting_free_data();
                     }
                     image.session = Some(s);
                 }
@@ -2333,6 +2407,41 @@ pub unsafe extern "C" fn ade_edit_repair(
         set_message(out_report, &report);
     }
     result
+}
+
+/// On a volume with no files, how many blocks the bitmap marks free hold
+/// data — usually a game its own loader reads (IMP-019). Zero on any other
+/// volume, and for null. While it is not zero, adding a file or a directory
+/// and wiping free blocks are refused until
+/// [`ade_edit_allow_overwriting_free_data`] is called; a front end asks first.
+///
+/// # Safety
+/// `image` must be a live handle or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ade_image_free_blocks_holding_data(image: *const AdeImage) -> usize {
+    with_image(image, 0, |i| {
+        i.session.as_ref().map_or(
+            i.free_holding_data,
+            ade_core::edit::Session::free_blocks_holding_data,
+        )
+    })
+}
+
+/// Allow edits to write over free blocks that hold data, for as long as the
+/// handle is open: the person has said the disk is being reused, and what a
+/// loader read from those blocks is given up.
+///
+/// # Safety
+/// `image` must be a live handle or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ade_edit_allow_overwriting_free_data(image: *mut AdeImage) -> AdeResult {
+    with_image_mut(image, AdeResult::NullArgument, |i| {
+        i.overwrite_free_data = true;
+        if let Some(s) = i.session.as_mut() {
+            s.allow_overwriting_free_data();
+        }
+        AdeResult::Ok
+    })
 }
 
 /// Open a group: every edit until the matching [`ade_edit_group_end`] undoes

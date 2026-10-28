@@ -546,6 +546,11 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
                                      QMessageBox::Yes | QMessageBox::Cancel,
                                      QMessageBox::Cancel) == QMessageBox::Yes;
     };
+    m_confirmFreeData = [this](const QString &question) {
+        return QMessageBox::warning(this, QStringLiteral("Free blocks hold data"), question,
+                                    QMessageBox::Yes | QMessageBox::Cancel,
+                                    QMessageBox::Cancel) == QMessageBox::Yes;
+    };
     m_confirmDiscard = [this](const QString &question) {
         return QMessageBox::question(this, QStringLiteral("Unsaved changes"), question,
                                      QMessageBox::Discard | QMessageBox::Cancel,
@@ -749,11 +754,7 @@ void MainWindow::addImageRoot(Open &open) {
     // The dataset's name goes in the tooltip beside the path: the row itself
     // is already carrying the file, the container and the volume, and a TOSEC
     // name is eighty characters on its own.
-    const QString named = open.image.identified();
-    root->setToolTip(ColName,
-                     named.isEmpty()
-                         ? QStringLiteral("%1\n%2").arg(open.path, describe(open))
-                         : QStringLiteral("%1\n%2\n%3").arg(open.path, named, describe(open)));
+    root->setToolTip(ColName, rootToolTip(open));
 
     QFont bold = m_tree->font();
     bold.setBold(true);
@@ -774,10 +775,67 @@ void MainWindow::addImageRoot(Open &open) {
         return;
     }
 
-    if (!open.image.hasVolume()) return;
+    if (!open.image.hasVolume()) {
+        addKindRow(root, open);
+        root->setExpanded(true);
+        return;
+    }
     root->setData(0, RolePartition, ADE_WHOLE_IMAGE);
     populate(root, open, ADE_WHOLE_IMAGE, open.image.rootBlock());
+    addKindRow(root, open);
     root->setExpanded(true);
+}
+
+void MainWindow::addKindRow(QTreeWidgetItem *root, const Open &open) {
+    // Only the kinds a person would otherwise read as broken: a blank disk is
+    // plainly blank, and an unreadable one already says why on its row.
+    QString where;
+    switch (open.image.kind()) {
+    case ADE_KIND_OWN_LOADER:
+        where = QStringLiteral("its boot code is in the Assembly tab, and the whole disk in the "
+                               "Hex tab");
+        break;
+    case ADE_KIND_DATA_DISK:
+    case ADE_KIND_GAME_BEHIND_EMPTY_ROOT:
+        where = QStringLiteral("the whole disk is in the Hex tab");
+        break;
+    case ADE_KIND_CUSTOM_TRACKS:
+        where = QStringLiteral("what came off each track is under Disk ▸ Disk surface");
+        break;
+    default:
+        return;
+    }
+    auto *note = new QTreeWidgetItem(root);
+    // The row above says what the disk is; this says where to look instead,
+    // and the tooltip why.
+    note->setText(ColName, QStringLiteral("Nothing to list here: %1").arg(where));
+    note->setToolTip(ColName, open.image.kindExplanation());
+    note->setFirstColumnSpanned(true);
+    // Enabled, so its tooltip shows, but not selectable, draggable or a drop
+    // target: it is the window speaking, not something on the disk.
+    note->setFlags(Qt::ItemIsEnabled);
+    QFont italic = note->font(ColName);
+    italic.setItalic(true);
+    note->setFont(ColName, italic);
+    if (const QTreeWidget *tree = root->treeWidget()) {
+        note->setForeground(ColName, tree->palette().brush(QPalette::Disabled, QPalette::Text));
+    }
+}
+
+QString MainWindow::rootToolTip(const Open &open) {
+    QStringList lines{open.path};
+    const QString destination = open.image.saveDestination();
+    if (!destination.isEmpty()) lines << QStringLiteral("saved as %1").arg(destination);
+    const QString named = open.image.identified();
+    if (!named.isEmpty()) lines << named;
+    lines << describe(open);
+    // The plain words are on the row; the evidence they came from is here,
+    // for anybody who wants to know why ADE says so.
+    const QString absent = open.image.volumeAbsent();
+    if (!open.image.hasVolume() && !absent.isEmpty() && open.image.kind() != ADE_KIND_UNREADABLE) {
+        lines << absent;
+    }
+    return lines.join(QLatin1Char('\n'));
 }
 
 // What an image is, in one line: container, volume, size, and anything the
@@ -808,8 +866,20 @@ QString MainWindow::describe(const Open &open) {
         // A missing volume is not an error here either: a quarter of real
         // images are not AmigaDOS disks, and the container is still worth
         // showing.
-        parts << (open.image.hasVolume() ? QStringLiteral("\"%1\"").arg(open.image.volumeName())
-                                         : open.image.volumeAbsent());
+        // Without a volume, what the disk *is* says more than why it has no
+        // volume: "no rootblock at block 880" is true of a quarter of real
+        // disks and explains none of them. The technical reason stays in the
+        // tooltip. An unreadable container keeps its own reason, which is
+        // the more specific of the two.
+        const AdeDiskKind kind = open.image.kind();
+        if (open.image.hasVolume()) {
+            QString volume = QStringLiteral("\"%1\"").arg(open.image.volumeName());
+            if (kind != ADE_KIND_FILES) volume += QStringLiteral(" — %1").arg(open.image.kindSummary());
+            parts << volume;
+        } else {
+            parts << (kind == ADE_KIND_UNREADABLE ? open.image.volumeAbsent()
+                                                  : open.image.kindSummary());
+        }
     }
     parts << QStringLiteral("%1 bytes").arg(open.image.size());
     const size_t findings = open.image.findingCount();
@@ -1961,6 +2031,29 @@ void MainWindow::addPath(Open &open, quint32 dir, const QString &path, int depth
     ++*made;
 }
 
+bool MainWindow::mayOverwriteFreeData(Open &open, const QString &doing) {
+    const size_t held = open.image.freeBlocksHoldingData();
+    if (held == 0 || open.freeDataAllowed) return true;
+    // Asked rather than refused: reusing an old game disk as a blank is a
+    // fair thing to do, and the person is the one who knows which this is.
+    if (!m_confirmFreeData ||
+        !m_confirmFreeData(
+            QStringLiteral("%1 holds no files, but %2 block%3 its bitmap calls free hold%4 "
+                           "data. On a disk like this that is usually a game its own loader "
+                           "reads, and %5 would overwrite it.\n\nWrite on it anyway? Undo "
+                           "brings it back until you save the disk.")
+                .arg(open.name)
+                .arg(held)
+                .arg(held == 1 ? "" : "s")
+                .arg(held == 1 ? "s" : "")
+                .arg(doing))) {
+        return false;
+    }
+    open.image.allowOverwritingFreeData();
+    open.freeDataAllowed = true;
+    return true;
+}
+
 int MainWindow::addFiles(QTreeWidgetItem *target, const QStringList &paths) {
     Open *open = imageFor(target);
     if (!open) return 0;
@@ -1971,6 +2064,7 @@ int MainWindow::addFiles(QTreeWidgetItem *target, const QStringList &paths) {
             "partition of a hard disk."));
         return 0;
     }
+    if (!mayOverwriteFreeData(*open, QStringLiteral("copying files there"))) return 0;
     int made = 0;
     QStringList refused;
     // One drop is one action, so one Undo takes all of it back (IMP-014).
@@ -2010,6 +2104,7 @@ bool MainWindow::makeFolder(QTreeWidgetItem *target, const QString &name) {
                                .arg(name));
         return false;
     }
+    if (!mayOverwriteFreeData(*open, QStringLiteral("making a folder"))) return false;
     const ade::EditResult r = open->image.makeDir(dir, amiga);
     m_lastEdited = open->index;
     if (!r.ok()) {
@@ -2179,7 +2274,11 @@ bool MainWindow::formatDisk(QTreeWidgetItem *item, const QString &name) {
 QString MainWindow::wipeDisk(QTreeWidgetItem *item, bool freeBlocks) {
     Open *open = item ? imageFor(item) : editTarget();
     if (!open) return {};
-    if (freeBlocks && m_confirmWipe &&
+    // A disk whose free blocks hold a game is asked about in those terms;
+    // the general question would only be the same answer asked twice.
+    if (freeBlocks && open->image.freeBlocksHoldingData() > 0) {
+        if (!mayOverwriteFreeData(*open, QStringLiteral("wiping free space"))) return {};
+    } else if (freeBlocks && m_confirmWipe &&
         !m_confirmWipe(QStringLiteral("Zero every free block of %1, and each file's slack?\n\n"
                                       "Nothing deleted from it can be recovered after. A game "
                                       "that reads blocks directly may keep data in blocks its "
@@ -2383,13 +2482,10 @@ void MainWindow::reloadImage(Open &open) {
     qDeleteAll(root->takeChildren());
 
     root->setText(ColName, QStringLiteral("%1   %2").arg(open.name, describe(open)));
-    const QString destination = open.image.saveDestination();
-    root->setToolTip(ColName, destination.isEmpty()
-                                  ? QStringLiteral("%1\n%2").arg(open.path, describe(open))
-                                  : QStringLiteral("%1\nsaved as %2\n%3")
-                                        .arg(open.path, destination, describe(open)));
+    root->setToolTip(ColName, rootToolTip(open));
     if (open.image.hasVolume()) {
         populate(root, open, ADE_WHOLE_IMAGE, open.image.rootBlock());
+        addKindRow(root, open);
         root->setExpanded(true);
         // Breadth first: expanding a row populates it, and only then are its
         // own children there to be expanded.

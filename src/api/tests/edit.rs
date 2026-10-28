@@ -644,6 +644,13 @@ fn corpus_disks_take_an_edit_and_stay_sound() {
                 *refused.entry("unsound".to_owned()).or_insert(0) += 1;
                 continue;
             }
+            // A trackloaded game behind an empty root (IMP-019).
+            Err(EditError::FreeBlocksHoldData(_)) => {
+                *refused
+                    .entry("free blocks hold data".to_owned())
+                    .or_insert(0) += 1;
+                continue;
+            }
             Err(e) => panic!("{}: {e}", path.display()),
         };
         match s.add_file(dir, b"added", &data) {

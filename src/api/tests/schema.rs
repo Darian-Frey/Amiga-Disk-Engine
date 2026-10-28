@@ -232,6 +232,9 @@ fn check_emits_exactly_these_fields() {
         &[
             "schema",
             "image",
+            "kind",
+            "kind.code",
+            "kind.summary",
             "examined",
             "examined.partition",
             "examined.rootblock",
@@ -246,6 +249,7 @@ fn check_emits_exactly_these_fields() {
             "bitmap.covered",
             "bitmap.fill_percent",
             "bitmap.flagged_valid",
+            "bitmap.free_holding_data",
             "bitmap.marked_used",
             "bitmap.orphaned",
             "bitmap.referenced_but_free",

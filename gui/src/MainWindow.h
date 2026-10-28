@@ -152,6 +152,9 @@ public:
     /// How the window asks before deleting a folder that holds anything.
     void setDeleteConfirmation(Confirm confirm) { m_confirmDelete = std::move(confirm); }
     void setWipeConfirmation(Confirm confirm) { m_confirmWipe = std::move(confirm); }
+    /// How the window asks before writing on a disk with no files whose free
+    /// blocks hold data (IMP-019).
+    void setFreeDataConfirmation(Confirm confirm) { m_confirmFreeData = std::move(confirm); }
 
     // How many images are open. Several can be, which is what makes
     // cross-image search meaningful.
@@ -202,9 +205,18 @@ private:
         bool createdHere = false;
         /// Where the original was kept the first time Save wrote over it.
         QString backup;
+        /// Whether the person said yes to writing over free blocks that hold
+        /// data (IMP-019); asked once for as long as the disk is open.
+        bool freeDataAllowed = false;
     };
 
     void addImageRoot(Open &open);
+    // A disk with nothing to list says why, in a row of its own beneath it,
+    // rather than showing an empty tree that reads as a failure to read it.
+    static void addKindRow(QTreeWidgetItem *root, const Open &open);
+    // The disk row's tooltip: where it came from, what it is, and — for a
+    // disk with no volume — the technical reason as well as the plain one.
+    static QString rootToolTip(const Open &open);
     // One row per partition of a device, each with its files beneath it.
     void addPartition(QTreeWidgetItem *root, const Open &open, quint32 index,
                       const AdePartition &partition);
@@ -345,4 +357,10 @@ private:
     QAction *m_wipeSlack = nullptr;
     QAction *m_wipeFree = nullptr;
     Confirm m_confirmWipe;
+    Confirm m_confirmFreeData;
+
+    // Whether `open` may be written to: yes, unless it is a disk with no
+    // files whose free blocks hold data and the free-data confirmation says
+    // no. A yes is given to the image for as long as it is open (IMP-019).
+    bool mayOverwriteFreeData(Open &open, const QString &doing);
 };

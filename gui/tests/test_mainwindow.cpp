@@ -114,6 +114,8 @@ private slots:
     void entriesAreRenamedAndDeletedAndUndoBringsThemBack();
     void aDiskIsRepairedFromTheDiskMenuAndUndoneInOneStep();
     void rowsDroppedOnAFolderMoveAndAFormatAndWipesUndo();
+    void aDiskWhoseFreeBlocksHoldAGameAsksBeforeWriting();
+    void aDiskWithNothingToListSaysWhatItIs();
     void aFileTheDecodedViewDoesNotKnowSaysWhatItDoes();
     void theDiskRowShowsItsBootCodeAndAFolderSaysItHasNone();
     void anImageIsARootWithItsEntriesBeneath();
@@ -2637,6 +2639,102 @@ void TestMainWindow::rowsDroppedOnAFolderMoveAndAFormatAndWipesUndo() {
     QVERIFY(window.undoEdit());
     root = tree->topLevelItem(0);
     QVERIFY(childNamed(root, QStringLiteral("note")));
+}
+
+void TestMainWindow::aDiskWhoseFreeBlocksHoldAGameAsksBeforeWriting() {
+    // An empty volume with what a trackloader reads in blocks its bitmap
+    // calls free (IMP-019): the window asks before writing, in those terms.
+    QTemporaryDir dir;
+    const QString disk = blankDisk(dir, QStringLiteral("game.adf"));
+    QByteArray bytes = readAll(disk);
+    for (int b = 882; b < 890; ++b) {
+        bytes.replace(b * 512, 512, QByteArray(512, char(0x4E)));
+        bytes[(b + 1) * 512 - 1] = 1;
+    }
+    writeFile(disk, bytes);
+    const QString note = dir.filePath(QStringLiteral("note"));
+    writeFile(note, QByteArray("a note"));
+
+    MainWindow window;
+    window.setDiscardConfirmation([](const QString &) { return true; });
+    QStringList errors;
+    connect(&window, &MainWindow::errorOccurred, [&errors](const QString &m) { errors << m; });
+    QStringList asked;
+    bool answer = false;
+    window.setFreeDataConfirmation([&asked, &answer](const QString &q) {
+        asked << q;
+        return answer;
+    });
+    bool wipeAsked = false;
+    window.setWipeConfirmation([&wipeAsked](const QString &) {
+        wipeAsked = true;
+        return true;
+    });
+    window.openImage(disk);
+    auto *tree = browser(window);
+    QTreeWidgetItem *root = tree->topLevelItem(0);
+    QVERIFY2(root->text(0).contains(QStringLiteral("a game behind an empty volume")),
+             qPrintable(root->text(0)));
+
+    // No: nothing is written, and nothing is reported as a failure.
+    QCOMPARE(window.addFiles(root, {note}), 0);
+    QVERIFY(!window.makeFolder(root, QStringLiteral("Box")));
+    QCOMPARE(window.wipeDisk(root, true), QString());
+    QCOMPARE(asked.size(), 3);
+    QVERIFY2(asked.first().contains(QStringLiteral("8 blocks its bitmap calls free hold data")),
+             qPrintable(asked.first()));
+    QVERIFY(!wipeAsked);
+    QVERIFY2(errors.isEmpty(), qPrintable(errors.join(QLatin1Char('\n'))));
+    QVERIFY(!window.undoEdit());
+
+    // Yes: written, and not asked again while the disk is open.
+    answer = true;
+    QCOMPARE(window.addFiles(root, {note}), 1);
+    root = tree->topLevelItem(0);
+    QVERIFY(childNamed(root, QStringLiteral("note")));
+    QVERIFY(window.undoEdit());
+    QVERIFY(window.makeFolder(tree->topLevelItem(0), QStringLiteral("Box")));
+    QCOMPARE(asked.size(), 4);
+    QVERIFY2(errors.isEmpty(), qPrintable(errors.join(QLatin1Char('\n'))));
+}
+
+void TestMainWindow::aDiskWithNothingToListSaysWhatItIs() {
+    // A disk whose loader reads it directly has no volume, and "no rootblock
+    // at block 880" explained none of the 1,166 corpus disks like it. The
+    // row says what the disk is, a note beneath it says why there is
+    // nothing to list, and the technical reason stays in the tooltip.
+    QTemporaryDir dir;
+    const QString disk = blankDisk(dir, QStringLiteral("data.adf"));
+    QByteArray bytes = readAll(disk);
+    // No bootblock and no rootblock: a data disk for another disk's loader.
+    bytes.replace(0, 1024, QByteArray(1024, '\0'));
+    bytes.replace(880 * 512, 512, QByteArray(512, char(0x4E)));
+    writeFile(disk, bytes);
+
+    MainWindow window;
+    window.openImage(disk);
+    auto *tree = browser(window);
+    QTreeWidgetItem *root = tree->topLevelItem(0);
+    QVERIFY(root);
+    QVERIFY2(root->text(0).contains(QStringLiteral("a data disk for another disk's loader")),
+             qPrintable(root->text(0)));
+    QVERIFY(!root->text(0).contains(QStringLiteral("no rootblock")));
+    QVERIFY2(root->toolTip(0).contains(QStringLiteral("no rootblock at block 880")),
+             qPrintable(root->toolTip(0)));
+
+    QCOMPARE(root->childCount(), 1);
+    QTreeWidgetItem *note = root->child(0);
+    QCOMPARE(note->text(0), QStringLiteral("Nothing to list here: the whole disk is in the Hex tab"));
+    QVERIFY(note->toolTip(0).contains(QStringLiteral("usually the first disk of its set")));
+    // The window speaking, not something on the disk: it cannot be selected
+    // or dragged out.
+    QVERIFY(!(note->flags() & Qt::ItemIsSelectable));
+    QVERIFY(!(note->flags() & Qt::ItemIsDragEnabled));
+
+    // An ordinary disk has no note.
+    const QString blank = blankDisk(dir, QStringLiteral("blank.adf"));
+    window.openImage(blank);
+    QCOMPARE(tree->topLevelItem(1)->childCount(), 0);
 }
 
 void TestMainWindow::entriesAreRenamedAndDeletedAndUndoBringsThemBack() {

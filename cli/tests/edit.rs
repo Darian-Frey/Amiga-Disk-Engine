@@ -488,3 +488,58 @@ fn mv_format_and_wipe_write_new_images() {
     assert!(listing.contains("0 entries"), "{listing}");
     let _ = fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn free_blocks_holding_data_are_written_over_only_when_told_to() {
+    // An empty volume with what a trackloader would read in free blocks
+    // (IMP-019): `check` warns, and `put`, `mkdir` and `wipe --free` refuse
+    // until `--overwrite-free-data` says it is meant.
+    let dir = scratch("freedata");
+    let image = disk(&dir);
+    let mut bytes = fs::read(&image).unwrap();
+    for b in 882..890usize {
+        bytes[b * 512..(b + 1) * 512].fill(0x4E);
+        bytes[(b + 1) * 512 - 1] = 1;
+    }
+    fs::write(&image, &bytes).unwrap();
+    let note = dir.join("note");
+    fs::write(&note, b"a note").unwrap();
+    let out = |name: &str| format!("--output={}", dir.join(name).display());
+
+    let (text, _, code) = run(&["check", &image]);
+    assert_eq!(code, Some(1));
+    assert!(text.contains("[free-blocks-hold-data]"), "{text}");
+
+    for args in [
+        vec!["put", &image, note.to_str().unwrap()],
+        vec!["mkdir", &image, "Box"],
+        vec!["wipe", &image, "--free"],
+    ] {
+        let mut args = args;
+        let target = out("refused.adf");
+        args.push(&target);
+        let (_, err, code) = run(&args);
+        assert_eq!(code, Some(2), "{args:?}: {err}");
+        assert!(err.contains("--overwrite-free-data"), "{err}");
+        assert!(!dir.join("refused.adf").exists());
+    }
+
+    let target = out("written.adf");
+    let (said, err, code) = run(&[
+        "put",
+        &image,
+        note.to_str().unwrap(),
+        "--overwrite-free-data",
+        &target,
+    ]);
+    assert_eq!(code, Some(0), "{err}");
+    assert!(said.contains("added note"), "{said}");
+    let (listing, _, _) = run(&["ls", dir.join("written.adf").to_str().unwrap()]);
+    assert!(listing.contains("note"), "{listing}");
+    assert_eq!(
+        fs::read(&image).unwrap(),
+        bytes,
+        "the original is untouched"
+    );
+    let _ = fs::remove_dir_all(&dir);
+}

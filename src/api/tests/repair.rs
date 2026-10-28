@@ -440,7 +440,7 @@ fn corpus_disks_repair_and_take_a_full_write_without_losing_a_file() {
     paths.sort();
 
     let (mut repaired, mut filled, mut confirmed, mut declined) = (0usize, 0usize, 0usize, 0usize);
-    let (mut flags, mut live, mut refiled) = (0usize, 0usize, 0usize);
+    let (mut flags, mut live, mut refiled, mut held) = (0usize, 0usize, 0usize, 0usize);
     for path in &paths {
         let Ok(mut s) = Session::open(path) else {
             continue;
@@ -479,6 +479,13 @@ fn corpus_disks_repair_and_take_a_full_write_without_losing_a_file() {
         } else {
             None
         };
+        // A game behind an empty root is held from writes (IMP-019), and
+        // has no file a fill could lose.
+        if s.free_blocks_holding_data() > 0 {
+            assert!(ours.is_empty(), "{}", path.display());
+            held += 1;
+            continue;
+        }
         if fill(&mut s).is_none() {
             continue;
         }
@@ -510,14 +517,14 @@ fn corpus_disks_repair_and_take_a_full_write_without_losing_a_file() {
     let _ = std::fs::remove_dir_all(&scratch);
     eprintln!(
         "repaired {repaired} ({flags} flags set, {live} with live blocks marked used, {refiled} \
-         entries refiled), {declined} with something declined; filled {filled}, ADFlib confirmed \
-         {confirmed}"
+         entries refiled), {declined} with something declined; filled {filled}, held {held} \
+         as games behind an empty root, ADFlib confirmed {confirmed}"
     );
     // Measured 2026-10-26: 270 repaired, 259 flags, 12 with live blocks.
     assert!((250..300).contains(&repaired), "{repaired}");
     assert!(live >= 10, "{live}");
     assert!(
-        filled * 10 >= repaired * 9,
+        (filled + held) * 10 >= repaired * 9,
         "most repaired disks take a write: {filled}"
     );
 }

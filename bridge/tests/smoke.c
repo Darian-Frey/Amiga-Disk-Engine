@@ -366,6 +366,17 @@ int main(int argc, char **argv) {
               "a file with a Latin-1 name is added inside it");
         check(ade_image_is_modified(fresh), "the image says it is modified");
         check(ade_edit_group_end(fresh) == ADE_NOT_FOUND, "no group to close");
+        check(ade_image_free_blocks_holding_data(fresh) == 0 &&
+                  ade_image_free_blocks_holding_data(NULL) == 0,
+              "a disk with files has no free data to protect");
+        check(ade_edit_allow_overwriting_free_data(NULL) == ADE_NULL_ARGUMENT,
+              "allow_overwriting_free_data(NULL) is refused");
+        check(ade_image_kind(fresh) == ADE_KIND_FILES &&
+                  ade_image_kind_summary(fresh) != NULL &&
+                  ade_image_kind_explanation(fresh) != NULL,
+              "a disk with files says so");
+        check(ade_image_kind(NULL) == ADE_KIND_UNREADABLE && ade_image_kind_summary(NULL) == NULL,
+              "kind(NULL) is unreadable, with no words");
         check(ade_image_save_over(NULL, true, NULL, NULL) == ADE_NULL_ARGUMENT,
               "save_over(NULL) is refused");
         check(ade_edit_group_begin(fresh) == ADE_OK &&

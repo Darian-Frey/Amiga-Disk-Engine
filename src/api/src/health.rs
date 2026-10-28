@@ -28,7 +28,13 @@ use std::collections::{HashMap, HashSet};
 /// How many cache disagreements to report before saying so in one line.
 const MAX_DIRCACHE_FINDINGS: usize = 20;
 
-use ade_filesystem::{bitmap::Bitmap, dircache, dostype::Mode, entry::EntryKind, volume::Volume};
+use ade_filesystem::{
+    bitmap::Bitmap,
+    dircache::{self, T_DIRCACHE},
+    dostype::Mode,
+    entry::{EntryKind, T_DATA, T_HEADER, T_LIST},
+    volume::Volume,
+};
 
 use crate::{
     inspect::{Inspection, inspect_bytes},
@@ -114,6 +120,11 @@ pub struct BitmapHealth {
     pub covered: u32,
     /// Whether `bm_flag` claimed the map was valid.
     pub flagged_valid: bool,
+    /// On a volume with no entries, the blocks the bitmap marks free that
+    /// hold something other than zeros or a formatter's fill (IMP-019),
+    /// whether or not deleting left them. Always zero on a volume with
+    /// entries.
+    pub free_holding_data: usize,
 }
 
 /// The condition of one image.
@@ -139,6 +150,9 @@ pub struct Health {
     /// `None` means nothing mounted, which is why a report can be empty without
     /// the image being sound.
     pub examined: Option<Examined>,
+    /// What the disk is, in the terms a person browsing it needs: above all,
+    /// why a disk with no files has none.
+    pub kind: DiskKind,
 }
 
 /// What the directory-cache cross-check found.
@@ -156,6 +170,164 @@ pub struct DirCacheHealth {
     pub records: usize,
     /// How many ways the caches and the directories differ.
     pub disagreements: usize,
+}
+
+/// What a disk is, read from the evidence the report already has.
+///
+/// A quarter of real images hold no AmigaDOS files, and "no rootblock at
+/// block 880" is true of all of them and explains none. Measured 2026-10-28
+/// over the 4,653 corpus images: of the 1,166 with nothing to list, 702 boot
+/// into a loader of their own, 339 are data disks that cannot boot — 322 of
+/// them disk 2 or later of a set — 87 are games behind an empty root
+/// (IMP-019), 5 are raw-track images of protected disks, and the rest are
+/// blank or every block marked used.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DiskKind {
+    /// An AmigaDOS volume with something on it.
+    Files,
+    /// A partitioned hard disk: its volumes are in its partitions.
+    Device,
+    /// An AmigaDOS volume with nothing on it, and nothing in its free space.
+    Blank,
+    /// No volume, and every byte zero: a disk never formatted, or a dump of
+    /// nothing.
+    Unformatted,
+    /// An AmigaDOS volume with nothing on it, whose free blocks hold only
+    /// what deleting left.
+    Emptied,
+    /// An empty AmigaDOS volume over a game its own loader reads: data in
+    /// blocks the bitmap marks free, or blocks marked used that no file
+    /// reaches (IMP-019).
+    GameBehindEmptyRoot,
+    /// No AmigaDOS volume, and a bootblock Kickstart will run: the disk boots
+    /// into a loader of its own, which reads the tracks directly.
+    OwnLoader,
+    /// No AmigaDOS volume, and a bootblock that cannot boot — no `DOS`, a bad
+    /// checksum, or no code: read by another disk's loader.
+    DataDisk,
+    /// Raw tracks rather than sectors, without a volume: a custom format, as
+    /// copy protection used, that only its own loader reads.
+    CustomTracks,
+    /// Not readable as a disk at all: no geometry, a container ADE does not
+    /// unpack, or an image shorter than its geometry.
+    Unreadable,
+}
+
+impl DiskKind {
+    /// Stable identifier for the JSON surface (F-015).
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Files => "files",
+            Self::Device => "device",
+            Self::Blank => "blank",
+            Self::Unformatted => "unformatted",
+            Self::Emptied => "emptied",
+            Self::GameBehindEmptyRoot => "game-behind-empty-root",
+            Self::OwnLoader => "own-loader",
+            Self::DataDisk => "data-disk",
+            Self::CustomTracks => "custom-tracks",
+            Self::Unreadable => "unreadable",
+        }
+    }
+
+    /// Whether the disk holds AmigaDOS files a person could list.
+    #[must_use]
+    pub const fn has_files(self) -> bool {
+        matches!(self, Self::Files | Self::Device)
+    }
+
+    /// A few words for a row or a status line.
+    #[must_use]
+    pub const fn summary(self) -> &'static str {
+        match self {
+            Self::Files => "AmigaDOS files",
+            Self::Device => "a hard disk; its volumes are in its partitions",
+            Self::Blank => "blank: an AmigaDOS volume with nothing on it",
+            Self::Unformatted => "unformatted: every byte is zero",
+            Self::Emptied => "no files; its free space holds what deleting left",
+            Self::GameBehindEmptyRoot => "a game behind an empty volume, read by its own loader",
+            Self::OwnLoader => "boots into its own loader; no AmigaDOS files",
+            Self::DataDisk => "a data disk for another disk's loader; no AmigaDOS files",
+            Self::CustomTracks => "custom track format, read by its own loader",
+            Self::Unreadable => "not readable as a disk",
+        }
+    }
+
+    /// What it means, for a person looking at a disk with nothing listed.
+    #[must_use]
+    pub const fn explanation(self) -> &'static str {
+        match self {
+            Self::Files => "An AmigaDOS volume: its files and folders are listed.",
+            Self::Device => {
+                "A hard disk holds no volume of its own: each partition is a volume, listed \
+                 beneath it."
+            }
+            Self::Blank => {
+                "An AmigaDOS volume with nothing on it, and nothing left in its free space."
+            }
+            Self::Unformatted => {
+                "Every byte of this disk is zero: it was never formatted, or the dump holds \
+                 nothing."
+            }
+            Self::Emptied => {
+                "An AmigaDOS volume with no files, whose free blocks still hold what deleting \
+                 left. Carve may recover it."
+            }
+            Self::GameBehindEmptyRoot => {
+                "An AmigaDOS volume with nothing in it, so Workbench shows a named disk, over a \
+                 game that its own loader reads straight from the tracks. Writing a file to it \
+                 would overwrite the game, so ADE asks first."
+            }
+            Self::OwnLoader => {
+                "This disk boots into code of its own, which reads the tracks directly instead \
+                 of through AmigaDOS, as most games did. There is no directory to list."
+            }
+            Self::DataDisk => {
+                "This disk neither boots nor holds AmigaDOS files. Another disk's loader reads \
+                 it directly, usually the first disk of its set."
+            }
+            Self::CustomTracks => {
+                "This disk is kept as raw tracks, not all of them AmigaDOS sectors: a custom \
+                 format, often copy protection, that only its own loader reads."
+            }
+            Self::Unreadable => "ADE cannot read this image as a disk; the container says why.",
+        }
+    }
+}
+
+/// What a disk with no mountable volume is.
+fn kind_without_volume(inspection: &Inspection) -> DiskKind {
+    if !inspection.partitions.is_empty() {
+        return DiskKind::Device;
+    }
+    // Before the geometry: a raw-track image with no ordinary sector on any
+    // track has none, and is a protected disk, not an unreadable file.
+    if inspection.tracks.is_some() || inspection.flux.is_some() {
+        return DiskKind::CustomTracks;
+    }
+    if inspection.geometry.is_none() {
+        return DiskKind::Unreadable;
+    }
+    match &inspection.bootblock {
+        // Kickstart runs a bootblock that says `DOS` and sums correctly; one
+        // with no code would boot into nothing.
+        Some(bb) if bb.is_dos() && bb.checksum_valid && bb.has_boot_code => DiskKind::OwnLoader,
+        Some(_) => DiskKind::DataDisk,
+        None => DiskKind::Unreadable,
+    }
+}
+
+/// What a mounted volume with nothing on it is.
+fn kind_of_empty(findings: &[Finding], bitmap: Option<&BitmapHealth>) -> DiskKind {
+    let has = |code: &str| findings.iter().any(|f| f.code == code);
+    if has("free-blocks-hold-data") || bitmap.is_some_and(|b| b.orphaned > 0) {
+        DiskKind::GameBehindEmptyRoot
+    } else if has("free-blocks-hold-deleted-files") {
+        DiskKind::Emptied
+    } else {
+        DiskKind::Blank
+    }
 }
 
 /// The volume a health report describes.
@@ -257,6 +429,10 @@ fn examine_into(bytes: Vec<u8>, partition: Option<&str>, in_use: &mut HashSet<u3
         return barren(inspection, findings);
     };
 
+    // Asked here, while the bytes are at hand, for the one kind a disk with
+    // no volume cannot be told apart from without them. Stops at the first
+    // non-zero byte, which on a real disk is in the first few.
+    let unformatted = bytes.iter().all(|&b| b == 0);
     let Ok(image) = ade_container::RawImage::new(bytes, geometry) else {
         findings.push(Finding::new(
             "image-truncated",
@@ -292,7 +468,11 @@ fn examine_into(bytes: Vec<u8>, partition: Option<&str>, in_use: &mut HashSet<u3
                 .clone()
                 .unwrap_or_else(|| "no AmigaDOS volume".to_owned()),
         ));
-        return barren(inspection, findings);
+        let mut health = barren(inspection, findings);
+        if unformatted {
+            health.kind = DiskKind::Unformatted;
+        }
+        return health;
     };
 
     volume_prelude(&inspection, &volume, &mut findings);
@@ -302,14 +482,24 @@ fn examine_into(bytes: Vec<u8>, partition: Option<&str>, in_use: &mut HashSet<u3
         Ok(Some(w)) => w,
         _ => &image,
     };
-    let bitmap = cross_check_bitmap(&volume, source, &scan.referenced, &mut findings);
+    // Nothing reached but the root: no file, directory or link.
+    let empty = scan.referenced.len() <= 1;
+    let bitmap = cross_check_bitmap(&volume, source, &scan.referenced, empty, &mut findings);
     in_use.clone_from(&scan.referenced);
+    let kind = if !inspection.partitions.is_empty() {
+        DiskKind::Device
+    } else if empty {
+        kind_of_empty(&findings, bitmap.as_ref())
+    } else {
+        DiskKind::Files
+    };
 
     // Worst first, so the first line a reader sees is the one that matters.
     findings.sort_by_key(|f| core::cmp::Reverse(f.severity));
     Health {
         dircache: scan.dircache.clone(),
         bitmap,
+        kind,
         directories: scan.directories,
         files: scan.files,
         bytes_recovered: scan.bytes,
@@ -909,6 +1099,7 @@ fn cross_check_bitmap(
     volume: &Volume<'_>,
     image: &dyn ade_block::BlockSource,
     referenced: &HashSet<u32>,
+    empty: bool,
     findings: &mut Vec<Finding>,
 ) -> Option<BitmapHealth> {
     let bitmap = Bitmap::read(image, volume.geometry(), volume.rootblock()).ok()?;
@@ -997,6 +1188,12 @@ fn cross_check_bitmap(
         ));
     }
 
+    let free_holding_data = if empty {
+        report_free_data(image, volume.geometry(), &bitmap, &referenced, findings)
+    } else {
+        0
+    };
+
     Some(BitmapHealth {
         marked_used: bitmap.used_count(),
         at_risk_blocks,
@@ -1006,7 +1203,211 @@ fn cross_check_bitmap(
         referenced_but_free,
         covered: bitmap.covered(),
         flagged_valid: bitmap.flagged_valid,
+        free_holding_data,
     })
+}
+
+/// On a volume with no entries, report free blocks that hold data, and
+/// return how many there are.
+fn report_free_data(
+    image: &dyn ade_block::BlockSource,
+    geometry: &ade_block::Geometry,
+    bitmap: &Bitmap,
+    referenced: &HashSet<u32>,
+    findings: &mut Vec<Finding>,
+) -> usize {
+    // A game that loads its own tracks can still carry a valid, empty root,
+    // so Workbench shows a named disk — and leave the blocks it reads marked
+    // free, since it never asked AmigaDOS for them. Such a disk reads as empty
+    // and unused, and the next write lands on the game (IMP-019). Measured
+    // 2026-10-28: of 120 floppy-sized corpus volumes with no entries, 87 hold
+    // data in free blocks, 68 of them in more than a thousand. Asked only of
+    // an empty volume, because free blocks holding deleted files are ordinary.
+    let (holding, listed) = free_holding_data(image, geometry, bitmap, referenced);
+    if holding.is_empty() {
+        return 0;
+    }
+    let (blocks, hold) = if holding.len() == 1 {
+        ("1 block".to_owned(), "holds")
+    } else {
+        (format!("{} blocks", holding.len()), "hold")
+    };
+    if listed == holding.len() {
+        // Only what deleting left: the volume was emptied, and nothing says a
+        // loader reads it. Still counted, and still guarded by an edit
+        // session, because a game mastered as files and then cleared looks the
+        // same less one stray block — Starush disk 2 is 1,755 of 1,756.
+        findings.push(Finding::new(
+            "free-blocks-hold-deleted-files",
+            Severity::Info,
+            format!(
+                "the volume holds no files, but {blocks} the bitmap marks free {hold} what \
+                 deleting left ({}) — `ade carve` may recover it, and writing to the volume \
+                 would overwrite it",
+                summarise(&holding)
+            ),
+        ));
+        return holding.len();
+    }
+    let deleted = match listed {
+        0 => String::new(),
+        1 => "; 1 of them listed by a deleted file's header".to_owned(),
+        n => format!("; {n} of them listed by deleted files' headers"),
+    };
+    findings.push(Finding::new(
+        "free-blocks-hold-data",
+        Severity::Warning,
+        format!(
+            "the volume holds no files, but {blocks} the bitmap marks free {hold} data \
+             ({}{deleted}) — on a disk like this it is usually a game its own loader reads, \
+             and writing to the volume would overwrite it",
+            summarise(&holding)
+        ),
+    ));
+    holding.len()
+}
+
+/// The bitmap cross-check as JSON, split out to keep `Health::to_json`
+/// readable.
+fn bitmap_json(b: &BitmapHealth) -> Value {
+    Value::Obj(vec![
+        ("marked_used", Value::Num(b.marked_used as u64)),
+        (
+            "at_risk_blocks",
+            Value::Arr(
+                b.at_risk_blocks
+                    .iter()
+                    .map(|x| Value::Num(u64::from(*x)))
+                    .collect(),
+            ),
+        ),
+        ("actually_used", Value::Num(b.actually_used as u64)),
+        ("orphaned", Value::Num(b.orphaned as u64)),
+        (
+            "referenced_but_free",
+            Value::Num(b.referenced_but_free as u64),
+        ),
+        ("flagged_valid", Value::Bool(b.flagged_valid)),
+        ("free_holding_data", Value::Num(b.free_holding_data as u64)),
+        ("covered", Value::Num(u64::from(b.covered))),
+        (
+            // Integer arithmetic: a percentage derived from
+            // block counts has no business going through a
+            // float and back.
+            "fill_percent",
+            Value::Num(
+                (b.marked_used as u64)
+                    .saturating_mul(100)
+                    .checked_div(u64::from(b.covered))
+                    .unwrap_or(0),
+            ),
+        ),
+    ])
+}
+
+/// Blocks the bitmap marks free, that nothing reaches, holding something
+/// other than one 32-bit word repeated — zeros, or the fill a formatter
+/// wrote: `DOS\0` from AmigaDOS's, `0xE5` from a PC's, and others the corpus
+/// shows — with how many of them deleting left behind.
+///
+/// Deleting leaves what was deleted where it was: a file's or directory's
+/// header, its extension blocks, its OFS data blocks and a directory's cache
+/// blocks each still carry their type and a valid checksum, and a file's
+/// header still lists its data blocks, which on FFS carry nothing of their
+/// own. When every block is one of those, the volume was emptied by deleting,
+/// which is information rather than a warning: without this, deleting the
+/// last file on a disk called it a game. When some are not, it is a warning,
+/// and every block counts, because a disk mastered by writing files and then
+/// clearing the directory leaves exactly that for its loader to read.
+fn free_holding_data(
+    image: &dyn ade_block::BlockSource,
+    geometry: &ade_block::Geometry,
+    bitmap: &Bitmap,
+    referenced: &HashSet<u32>,
+) -> (Vec<u32>, usize) {
+    let read = |b: u32| {
+        let mut raw = vec![0u8; geometry.block_size() as usize];
+        ade_block::read_at(image, ade_block::BlockIndex(u64::from(b)), &mut raw)
+            .ok()
+            .map(|()| raw)
+    };
+    let start = u64::from(geometry.reserved());
+    let end = start
+        .saturating_add(u64::from(bitmap.covered()))
+        .min(geometry.total_blocks());
+    let mut holding = Vec::new();
+    let mut deleted: HashSet<u32> = HashSet::new();
+    for b in start..end {
+        let Ok(b) = u32::try_from(b) else { break };
+        if bitmap.is_allocated(b) || referenced.contains(&b) || bitmap.blocks.contains(&b) {
+            continue;
+        }
+        let Some(raw) = read(b) else { continue };
+        let word = raw.get(..4).unwrap_or_default();
+        if raw.chunks(4).all(|w| w == word) {
+            continue;
+        }
+        holding.push(b);
+        if !ade_block::checksum::normal_valid(&raw) {
+            continue;
+        }
+        let kind = ade_endian::u32_at(&raw, 0).unwrap_or(0);
+        if matches!(kind, T_LIST | T_DATA | T_DIRCACHE) {
+            deleted.insert(b);
+        } else if kind == T_HEADER {
+            match ade_filesystem::entry::Entry::parse(&raw, b) {
+                Ok(e) if e.looks_like_an_entry() && e.kind == EntryKind::File => {
+                    claim_deleted(&read, b, raw, &mut deleted);
+                }
+                Ok(e) if e.looks_like_an_entry() => {
+                    deleted.insert(b);
+                }
+                _ => {}
+            }
+        }
+    }
+    let listed = holding.iter().filter(|b| deleted.contains(b)).count();
+    (holding, listed)
+}
+
+/// Add a deleted file's header, its extension blocks and every data block
+/// they list to `claimed`. Bounded by a visited set and a cap, since what it reads is
+/// whatever was left in free space (AV-001).
+fn claim_deleted(
+    read: &dyn Fn(u32) -> Option<Vec<u8>>,
+    header: u32,
+    raw: Vec<u8>,
+    claimed: &mut HashSet<u32>,
+) {
+    /// More extension blocks than a double-density floppy could need.
+    const CAP: usize = 64;
+    let size = raw.len();
+    let mut seen = HashSet::new();
+    let (mut block, mut raw) = (header, raw);
+    while seen.len() < CAP && seen.insert(block) {
+        claimed.insert(block);
+        let high = ade_endian::u32_at(&raw, 8).unwrap_or(0) as usize;
+        for index in 0..high.min(size / 4) {
+            let at = size
+                .checked_sub(204)
+                .and_then(|base| base.checked_sub(index.saturating_mul(4)));
+            match at.map(|at| ade_endian::u32_at(&raw, at)) {
+                Some(Ok(0)) => {}
+                Some(Ok(data)) => {
+                    claimed.insert(data);
+                }
+                _ => break,
+            }
+        }
+        let next = size
+            .checked_sub(8)
+            .and_then(|at| ade_endian::u32_at(&raw, at).ok())
+            .unwrap_or(0);
+        let Some(next_raw) = (next != 0).then(|| read(next)).flatten() else {
+            break;
+        };
+        (block, raw) = (next, next_raw);
+    }
 }
 
 /// Severity for the faults `Inspection` already knows about.
@@ -1032,6 +1433,13 @@ impl Health {
         let (info, warning, error) = self.counts();
         Value::Obj(vec![
             ("image", self.inspection.to_json()),
+            (
+                "kind",
+                Value::Obj(vec![
+                    ("code", Value::str(self.kind.as_str())),
+                    ("summary", Value::str(self.kind.summary())),
+                ]),
+            ),
             (
                 "examined",
                 Value::opt(self.examined.as_ref(), |e| {
@@ -1061,43 +1469,7 @@ impl Health {
                     ])
                 }),
             ),
-            (
-                "bitmap",
-                Value::opt(self.bitmap.as_ref(), |b| {
-                    Value::Obj(vec![
-                        ("marked_used", Value::Num(b.marked_used as u64)),
-                        (
-                            "at_risk_blocks",
-                            Value::Arr(
-                                b.at_risk_blocks
-                                    .iter()
-                                    .map(|x| Value::Num(u64::from(*x)))
-                                    .collect(),
-                            ),
-                        ),
-                        ("actually_used", Value::Num(b.actually_used as u64)),
-                        ("orphaned", Value::Num(b.orphaned as u64)),
-                        (
-                            "referenced_but_free",
-                            Value::Num(b.referenced_but_free as u64),
-                        ),
-                        ("flagged_valid", Value::Bool(b.flagged_valid)),
-                        ("covered", Value::Num(u64::from(b.covered))),
-                        (
-                            // Integer arithmetic: a percentage derived from
-                            // block counts has no business going through a
-                            // float and back.
-                            "fill_percent",
-                            Value::Num(
-                                (b.marked_used as u64)
-                                    .saturating_mul(100)
-                                    .checked_div(u64::from(b.covered))
-                                    .unwrap_or(0),
-                            ),
-                        ),
-                    ])
-                }),
-            ),
+            ("bitmap", Value::opt(self.bitmap.as_ref(), bitmap_json)),
             (
                 "summary",
                 Value::Obj(vec![
@@ -1279,6 +1651,7 @@ fn select_window<'a>(
 /// rather than zeroed-and-plausible.
 fn barren(inspection: Inspection, findings: Vec<Finding>) -> Health {
     Health {
+        kind: kind_without_volume(&inspection),
         inspection,
         bitmap: None,
         dircache: None,

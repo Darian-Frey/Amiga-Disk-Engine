@@ -2190,3 +2190,139 @@ fn an_entry_moves_and_a_disk_is_wiped_and_formatted_through_the_abi() {
     }
     let _ = std::fs::remove_file(&path);
 }
+
+#[test]
+fn a_disk_whose_free_blocks_hold_data_is_written_only_when_allowed() {
+    // An empty volume with what a trackloader would read in free blocks
+    // (IMP-019).
+    let mut disk = blank_disk();
+    for b in 882..890usize {
+        disk[b * 512..(b + 1) * 512].fill(0x4E);
+        disk[(b + 1) * 512 - 1] = 1;
+    }
+    let (path, c_path) = fixture("free-data", &disk);
+    let bytes = |b: &[u8]| ade::AdeBytes {
+        data: b.as_ptr(),
+        len: b.len(),
+    };
+    // SAFETY: a valid path; every handle and string is freed once.
+    unsafe {
+        let image = ade::ade_image_open(c_path.as_ptr(), std::ptr::null(), std::ptr::null_mut());
+        let root = ade::ade_image_root_block(image);
+        assert_eq!(ade::ade_image_free_blocks_holding_data(image), 8);
+
+        let mut why: *mut std::ffi::c_char = std::ptr::null_mut();
+        assert_eq!(
+            ade::ade_edit_add_file(
+                image,
+                root,
+                bytes(b"note"),
+                bytes(b"text"),
+                std::ptr::null_mut(),
+                &raw mut why
+            ),
+            AdeResult::Refused
+        );
+        let text = CStr::from_ptr(why).to_string_lossy().into_owned();
+        ade::ade_string_free(why);
+        assert!(
+            text.contains("8 blocks its bitmap marks free hold data"),
+            "{text}"
+        );
+        assert_eq!(
+            ade::ade_edit_wipe(
+                image,
+                false,
+                true,
+                std::ptr::null_mut(),
+                std::ptr::null_mut()
+            ),
+            AdeResult::Refused
+        );
+
+        // Allowed before the first edit made a session: handed to it.
+        assert_eq!(
+            ade::ade_edit_allow_overwriting_free_data(image),
+            AdeResult::Ok
+        );
+        assert_eq!(
+            ade::ade_edit_mkdir(
+                image,
+                root,
+                bytes(b"Box"),
+                std::ptr::null_mut(),
+                std::ptr::null_mut()
+            ),
+            AdeResult::Ok
+        );
+        assert_eq!(ade::ade_image_free_blocks_holding_data(image), 0);
+        assert_eq!(ade::ade_edit_undo(image), AdeResult::Ok);
+        assert_eq!(ade::ade_image_free_blocks_holding_data(image), 8);
+
+        assert_eq!(ade::ade_image_free_blocks_holding_data(std::ptr::null()), 0);
+        assert_eq!(
+            ade::ade_edit_allow_overwriting_free_data(std::ptr::null_mut()),
+            AdeResult::NullArgument
+        );
+        ade::ade_image_free(image);
+    }
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn what_a_disk_is_comes_through_the_abi_and_follows_an_edit() {
+    // A disk with no volume and a bootblock that cannot boot: another disk's
+    // loader reads it.
+    let mut data = blank_disk();
+    data[880 * 512..881 * 512].fill(0x4E);
+    data[..1024].fill(0);
+    let (data_path, c_data) = fixture("data-disk", &data);
+    let (blank_path, c_blank) = fixture("blank-kind", &blank_disk());
+    // SAFETY: valid paths; every handle is freed once.
+    unsafe {
+        let image = ade::ade_image_open(c_data.as_ptr(), std::ptr::null(), std::ptr::null_mut());
+        assert_eq!(ade::ade_image_kind(image), 6);
+        let summary = CStr::from_ptr(ade::ade_image_kind_summary(image)).to_string_lossy();
+        assert_eq!(
+            summary,
+            "a data disk for another disk's loader; no AmigaDOS files"
+        );
+        let explained = CStr::from_ptr(ade::ade_image_kind_explanation(image)).to_string_lossy();
+        assert!(explained.contains("first disk of its set"), "{explained}");
+        ade::ade_image_free(image);
+
+        // Blank, until a file is put on it.
+        let image = ade::ade_image_open(c_blank.as_ptr(), std::ptr::null(), std::ptr::null_mut());
+        assert_eq!(ade::ade_image_kind(image), 2);
+        let root = ade::ade_image_root_block(image);
+        let name = b"note";
+        let text = b"text";
+        assert_eq!(
+            ade::ade_edit_add_file(
+                image,
+                root,
+                ade::AdeBytes {
+                    data: name.as_ptr(),
+                    len: name.len()
+                },
+                ade::AdeBytes {
+                    data: text.as_ptr(),
+                    len: text.len()
+                },
+                std::ptr::null_mut(),
+                std::ptr::null_mut()
+            ),
+            AdeResult::Ok
+        );
+        assert_eq!(ade::ade_image_kind(image), 0);
+        let summary = CStr::from_ptr(ade::ade_image_kind_summary(image)).to_string_lossy();
+        assert_eq!(summary, "AmigaDOS files");
+        ade::ade_image_free(image);
+
+        assert_eq!(ade::ade_image_kind(std::ptr::null()), 8);
+        assert!(ade::ade_image_kind_summary(std::ptr::null()).is_null());
+        assert!(ade::ade_image_kind_explanation(std::ptr::null()).is_null());
+    }
+    let _ = std::fs::remove_file(&data_path);
+    let _ = std::fs::remove_file(&blank_path);
+}

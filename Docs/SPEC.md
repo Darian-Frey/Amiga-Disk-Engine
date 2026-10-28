@@ -558,6 +558,25 @@ Cache blocks are marked used in the bitmap. A reader that does not follow the ch
 
 Note also that **`DOS\4` occurs nowhere in the corpus** and `DOS\6`/`DOS\7` do not either (§Open questions). Only `DOS\5` has real material, so OFS-with-dircache rests on generated fixtures and the oracle — `unadf -c` lists from the cache rather than the hash chains, which is what makes it an independent check on a cache ADE wrote.
 
+## What a disk is
+
+*Read from the evidence the disk carries (F-035). Measured 2026-10-28 over 4,652 corpus images.*
+
+A quarter of real disks hold no AmigaDOS files, and "no rootblock at block 880" is true of all of them and explains none. What separates them is evidence ADE already reads:
+
+| Kind | Evidence | Corpus |
+|---|---|---|
+| its own loader | no volume; a bootblock Kickstart runs — `DOS`, a valid checksum, code | 702 |
+| a data disk | no volume; a bootblock that cannot boot — no `DOS`, a bad checksum, or no code | 339 |
+| a game behind an empty volume | an empty root, over data in free blocks (IMP-019) or blocks marked used that nothing reaches | 107 |
+| custom tracks | a raw-track image (extended ADF, flux) without a volume | 5 |
+| blank | an empty root, and nothing in its free space | 13 |
+| emptied | an empty root, and only what deleting left | 0 |
+| unformatted | no volume, and every byte zero | 0 |
+| files / device / unreadable | entries; partitions; no geometry or an unread container | 3,486 / 0 / 0 |
+
+**"Boots" is what Kickstart checks, and no more**: the `DOS` prefix and the bootblock checksum, with code present. Whether the code then loads anything is not knowable without running it (AV-002). **"A data disk" is a claim about the disk, not about which disk reads it**: 322 of the 339 are disk 2 or later of a set by their TOSEC name, and the 16 that are disk 1 belong to sets numbered from 0 — *Heimdall*, *Body Blows Galactic*, *Super SkidMarks* — but the name is the catalogue's, so the words say "usually the first disk of its set". **A raw-track image is checked first**: *Wings of Death* disk B has no track of ordinary sectors and so no geometry, and is a protected disk, not an unreadable file. **Unformatted is checked before a data disk** because an image of zeros has a bootblock that cannot boot and would otherwise be called another disk's data, which nothing supports.
+
 ## Writing into a volume
 
 *What ADE does when it adds an entry (F-031), and why each choice is the one it is. Measured 2026-10-11.*
@@ -590,6 +609,14 @@ A new directory or file changes more blocks than the one it occupies. For one en
 
 **What a free-space wipe can destroy that no tool can see:** a game that reads blocks directly may keep data in blocks its bitmap marks free. The command, the ABI and the window all say so before it runs.
 
+**A game behind an empty root (IMP-019, measured 2026-10-28).** Many games read their own tracks and still carry a valid, empty rootblock, so that Workbench shows a named disk. Some mark every block used, and those blocks are orphans the repair keeps (§Repairing a volume). Others leave the game in blocks the bitmap calls free, because the loader never asked AmigaDOS for them, and to every reader of the filesystem the disk is empty and unused: *Paperboy* is "2 blocks marked used, 0% full", and a 20 KB `ade put` wrote over 42 blocks of the game with no finding raised. `ade check` now reports **`free-blocks-hold-data`**, a warning, on a volume with **no entries** whose free blocks hold anything but zeros or one 32-bit word repeated — the fill a formatter writes: `DOS\0` from AmigaDOS's, `0xE5` from a PC's, `0xFF`, `0xAA`. Free blocks holding data beside files are ordinary — deleted files — so the question is asked only of an empty volume.
+
+**What deleting leaves is told apart, and still counted.** A deleted file's or directory's header, its extension blocks, OFS data blocks and dircache blocks keep their type and a valid checksum, and a deleted file's header still lists its data blocks, which on FFS say nothing of themselves. When every free block holding data is one of those, the volume was emptied by deleting, and the report says so as **`free-blocks-hold-deleted-files`**, information, rather than calling it a game: ADE's own delete tests emptied a dircache volume and raised the warning on freed cache blocks. When any block is not, it is the warning, and the finding says how many deleted headers list. **Both count every block**, and both hold the disk for edits, because a game mastered by writing files and clearing the directory leaves its loader reading exactly what deleting left: *Starush* disk 2 holds 1,756 blocks of data, **1,755** of them listed by deleted headers, and *The Light Corridor* 1,724 of 1,734. Excluding them — the first version did — would have left one stray block between those games and an unasked write.
+
+**Over the corpus:** of 120 floppy-sized volumes with no entries, **87** hold such data — every one a game and every one the warning, 86 of them in hundreds of blocks or more, and *Skyfox* in 23. The other 33 are blank, or mark every block used. No volume with entries raises either finding.
+
+**Edits on such a disk wait to be told.** Adding a file or a directory, and wiping free space, are refused with the reason until the caller says writing over the data is meant — `--overwrite-free-data`, `ade_edit_allow_overwriting_free_data`, or a yes in the window, which asks once per open disk. Format, delete, rename, move, repair and a slack wipe write no free block and are not held. The guard is for the disk **as it was opened**: an edit cannot put a loader's data on a disk, so a volume emptied in the session by deleting is not held — though opened again later it is, and a yes costs less than a game — and neither finding is one an edit is refused for raising.
+
 **Hard links stay unwritten.** `unadf` leaves link entries out of its listings and no corpus disk has one (§The oracle cannot check links), so creating or removing a link could be checked only against this specification and ADE's own reader — the trap LNFS is deferred for. Deferred on verifiability, 2026-10-27.
 
 ### Repairing a volume
@@ -609,7 +636,7 @@ A new directory or file changes more blocks than the one it occupies. For one en
 
 **A misfiled entry** (§Writing into a volume, last paragraph) is taken out of whichever chain holds it and put into the chain its name hashes to, in block order. Nothing else moves: no datestamp, no cache record, since the cache lists entries, not slots. It is left where it is when another entry in the directory has the same name — refiling would change which one AmigaDOS opens — or when a block the move reseals already fails its checksum.
 
-**Corpus, 2026-10-26:** of 4,653 images, 3,600 open for editing; 270 needed a repair and took it, with no new warning or error — 259 flags set, 12 maps given back live blocks (Future Wars disk 1: 1,628 of them), 3 bitmap checksums resealed, 1 entry refiled. 9 had something declined. 261 of the 270 then took a file filling their free space, and every file ADE and ADFlib had read in full read the same.
+**Corpus, 2026-10-26:** of 4,653 images, 3,600 open for editing; 270 needed a repair and took it, with no new warning or error — 259 flags set, 12 maps given back live blocks (Future Wars disk 1: 1,628 of them), 3 bitmap checksums resealed, 1 entry refiled. 9 had something declined. 261 of the 270 then took a file filling their free space, and every file ADE and ADFlib had read in full read the same. *Since IMP-019 (2026-10-28):* 36 of the 270 are games behind an empty root, held from writes and holding no file to lose; 227 of the rest take the fill, ADFlib confirming 226.
 
 ## Executables and 68000 code
 

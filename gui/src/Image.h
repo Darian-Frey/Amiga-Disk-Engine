@@ -361,6 +361,16 @@ public:
         const char *s = ade_image_volume_absent(m_raw);
         return s ? QString::fromLatin1(s) : QString{};
     }
+    /// What the disk is: above all, why one with nothing to list has nothing.
+    AdeDiskKind kind() const { return ade_image_kind(m_raw); }
+    QString kindSummary() const {
+        const char *s = ade_image_kind_summary(m_raw);
+        return s ? QString::fromUtf8(s) : QString{};
+    }
+    QString kindExplanation() const {
+        const char *s = ade_image_kind_explanation(m_raw);
+        return s ? QString::fromUtf8(s) : QString{};
+    }
     quint64 size() const { return ade_image_size(m_raw); }
     bool hasVolume() const { return ade_image_has_volume(m_raw); }
     QString volumeName() const { return latin1(ade_image_volume_name(m_raw)); }
@@ -576,6 +586,12 @@ public:
         r.message = r.ok() ? said : refused;
         return r;
     }
+    /// On a volume with no files, how many blocks the bitmap marks free hold
+    /// data — usually a game its own loader reads (IMP-019). While it is not
+    /// zero, ADE refuses to write a file or folder or wipe free blocks until
+    /// allowOverwritingFreeData() is called.
+    size_t freeBlocksHoldingData() const { return ade_image_free_blocks_holding_data(m_raw); }
+    void allowOverwritingFreeData() { ade_edit_allow_overwriting_free_data(m_raw); }
     bool isModified() const { return ade_image_is_modified(m_raw); }
     bool canUndo() const { return ade_edit_can_undo(m_raw); }
     bool canRedo() const { return ade_edit_can_redo(m_raw); }

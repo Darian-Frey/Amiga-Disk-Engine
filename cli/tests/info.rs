@@ -324,3 +324,58 @@ fn an_unrecognised_container_is_still_read_as_blocks() {
     );
     assert!(out.contains("not DOS"), "{out}");
 }
+
+#[test]
+fn a_disk_with_nothing_to_list_says_what_it_is() {
+    // "No rootblock at block 880" is true of a quarter of real disks and
+    // explains none of them: `check` and `ls` say what the disk is.
+    let mut bytes = Volume::dd(1).named("Kind").build();
+    bytes[880 * 512..881 * 512].fill(0x4E);
+    bytes[..1024].fill(0);
+    let path = write_temp(&bytes, "data-disk.adf");
+
+    let out = Command::new(ade())
+        .arg("check")
+        .arg(&path)
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        text.contains("  kind        a data disk for another disk's loader"),
+        "{text}"
+    );
+    let out = Command::new(ade())
+        .args(["check", "--format=json"])
+        .arg(&path)
+        .output()
+        .unwrap();
+    let json = String::from_utf8_lossy(&out.stdout);
+    assert!(json.contains(r#""kind":{"code":"data-disk","#), "{json}");
+
+    let out = Command::new(ade()).arg("ls").arg(&path).output().unwrap();
+    assert_eq!(out.status.code(), Some(4));
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("no rootblock at block 880 — a data disk for another disk's loader"),
+        "{err}"
+    );
+
+    // An empty volume lists nothing, and says what it is.
+    let blank = write_temp(&Volume::dd(1).named("Blank").build(), "blank-kind.adf");
+    let out = Command::new(ade()).arg("ls").arg(&blank).output().unwrap();
+    let listed = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        listed.contains("0 entries — blank: an AmigaDOS volume with nothing on it"),
+        "{listed}"
+    );
+    // `check` says it too.
+    let out = Command::new(ade())
+        .arg("check")
+        .arg(&blank)
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.contains("  kind        blank"), "{text}");
+    let _ = fs::remove_file(&path);
+    let _ = fs::remove_file(&blank);
+}

@@ -152,6 +152,26 @@ const char *ade_image_container(const AdeImage *image);
 /* Why there is no volume, or NULL if there is one. Borrowed. */
 const char *ade_image_volume_absent(const AdeImage *image);
 
+/* What the disk is: above all, why a disk with nothing to list has nothing.
+ * Read from the health report at open, and again after each edit. */
+typedef enum {
+    ADE_KIND_FILES                  = 0, /* an AmigaDOS volume with entries        */
+    ADE_KIND_DEVICE                 = 1, /* a hard disk; volumes in partitions     */
+    ADE_KIND_BLANK                  = 2, /* an empty volume, nothing in free space */
+    ADE_KIND_EMPTIED                = 3, /* empty; free space holds deleted files  */
+    ADE_KIND_GAME_BEHIND_EMPTY_ROOT = 4, /* empty volume over a trackloaded game   */
+    ADE_KIND_OWN_LOADER             = 5, /* no volume; boots its own loader        */
+    ADE_KIND_DATA_DISK              = 6, /* no volume; read by another disk        */
+    ADE_KIND_CUSTOM_TRACKS          = 7, /* raw tracks: a custom (protected) format */
+    ADE_KIND_UNREADABLE             = 8, /* not readable as a disk; also for NULL  */
+    ADE_KIND_UNFORMATTED            = 9  /* no volume, and every byte zero         */
+} AdeDiskKind;
+AdeDiskKind ade_image_kind(const AdeImage *image);
+/* In a few words, and explained in a few sentences. Borrowed; valid until the
+ * image is freed or edited. NULL for NULL. */
+const char *ade_image_kind_summary(const AdeImage *image);
+const char *ade_image_kind_explanation(const AdeImage *image);
+
 uint64_t ade_image_size(const AdeImage *image);
 bool     ade_image_has_volume(const AdeImage *image);
 /* Latin-1, borrowed from the image. Empty when there is no volume. */
@@ -653,6 +673,15 @@ AdeResult ade_edit_wipe(AdeImage *image, bool slack, bool free, char **out_repor
  * something is left: that is in the report. */
 AdeResult ade_edit_repair(AdeImage *image, bool free_orphans, char **out_report,
                           char **out_message);
+
+/* On a volume with no files, how many blocks the bitmap marks free hold data:
+ * usually a game its own loader reads (IMP-019). 0 on any other volume, and
+ * for NULL. While it is not 0, ade_edit_mkdir, ade_edit_add_file and a wipe
+ * of free blocks are ADE_REFUSED until ade_edit_allow_overwriting_free_data
+ * says writing over them is meant -- for as long as the handle is open. A
+ * front end asks the person first. */
+size_t    ade_image_free_blocks_holding_data(const AdeImage *image);
+AdeResult ade_edit_allow_overwriting_free_data(AdeImage *image);
 
 /* Group edits a person sees as one action -- a drop of twenty files -- so
  * one undo takes them all back. Groups nest and only the outermost counts; a

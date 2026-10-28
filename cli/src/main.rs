@@ -153,6 +153,9 @@ struct Args {
     all: bool,
     /// `repair` frees blocks the bitmap marks used that nothing reaches.
     free_orphans: bool,
+    /// `put`, `mkdir` and `wipe --free` may write over free blocks that hold
+    /// data on a volume with no files (IMP-019).
+    overwrite_free_data: bool,
     /// `wipe` zeroes the slack after each file's last byte.
     slack: bool,
     /// `wipe` zeroes every free block.
@@ -194,6 +197,7 @@ fn parse_args(raw: Vec<String>) -> Result<Args, String> {
     let mut hd = false;
     let mut all = false;
     let mut free_orphans = false;
+    let mut overwrite_free_data = false;
     let mut slack = false;
     let mut free = false;
     let mut dd525 = false;
@@ -211,6 +215,7 @@ fn parse_args(raw: Vec<String>) -> Result<Args, String> {
             "--hd" => hd = true,
             "--all" => all = true,
             "--free-orphans" => free_orphans = true,
+            "--overwrite-free-data" => overwrite_free_data = true,
             "--slack" => slack = true,
             "--free" => free = true,
             "--dd525" | "--525" => dd525 = true,
@@ -266,6 +271,7 @@ fn parse_args(raw: Vec<String>) -> Result<Args, String> {
         hd,
         all,
         free_orphans,
+        overwrite_free_data,
         slack,
         free,
         dd525,
@@ -449,6 +455,10 @@ fn usage() {
         "                    after, and a game reading blocks directly may lose data".to_owned(),
         "    --free-orphans  repair: free blocks marked used that nothing reaches, as".to_owned(),
         "                    AmigaDOS's validator does; a trackloader's data is lost".to_owned(),
+        "    --overwrite-free-data  put, mkdir, wipe --free: write on a disk with no files"
+            .to_owned(),
+        "                    whose free blocks hold data — usually a game's own".to_owned(),
+        "                    loader reads them, and the game is lost".to_owned(),
         "    --text          find: read the pattern as text even if it looks like hex".to_owned(),
         "    --ignore-case   find: match ASCII letters in either case".to_owned(),
         "    --convert=CODE  batch: convert every image to CODE (adf, hdf, extended-adf)"
@@ -475,7 +485,11 @@ fn split_last(path: &str) -> (&str, &str) {
 /// Report a refused edit and choose its exit code: an unreadable file is 3,
 /// anything ADE declined to do is a usage error, as `create` reports it.
 fn edit_failed(context: &str, e: &ade_core::edit::EditError) -> ExitCode {
-    eprintln!("ade: {context}: {e}");
+    if matches!(e, ade_core::edit::EditError::FreeBlocksHoldData(_)) {
+        eprintln!("ade: {context}: {e} (--overwrite-free-data)");
+    } else {
+        eprintln!("ade: {context}: {e}");
+    }
     ExitCode::from(match e {
         ade_core::edit::EditError::Io(_) => EXIT_UNREADABLE,
         _ => EXIT_USAGE,
@@ -532,17 +546,24 @@ fn edit_command(args: &Args) -> ExitCode {
     let p = |n: usize| args.positional.get(n).map_or("", String::as_str);
     let output = args.output.as_deref();
     match (args.command.as_str(), args.positional.len()) {
-        ("mkdir", 2) => make_dir(Path::new(p(0)), p(1), output),
+        ("mkdir", 2) => make_dir(Path::new(p(0)), p(1), args.overwrite_free_data, output),
         ("rm", 2) => remove(Path::new(p(0)), p(1), args.all, output),
         ("rename", 3) => rename(Path::new(p(0)), p(1), p(2), output),
         ("repair", 1) => repair(Path::new(p(0)), args.free_orphans, output),
         ("mv", 3) => move_entry(Path::new(p(0)), p(1), p(2), output),
         ("format", 1) => format_in_place(Path::new(p(0)), args.volume_name.as_deref(), output),
-        ("wipe", 1) => wipe(Path::new(p(0)), args.slack, args.free, output),
+        ("wipe", 1) => wipe(
+            Path::new(p(0)),
+            args.slack,
+            args.free,
+            args.overwrite_free_data,
+            output,
+        ),
         ("put", 2 | 3) => put(
             Path::new(p(0)),
             Path::new(p(1)),
             args.positional.get(2).map(String::as_str),
+            args.overwrite_free_data,
             output,
         ),
         _ => {
@@ -657,12 +678,21 @@ fn format_in_place(image: &Path, name: Option<&str>, output: Option<&Path>) -> E
 }
 
 /// `ade wipe`: zero file slack, and with `--free` every free block.
-fn wipe(image: &Path, slack: bool, free: bool, output: Option<&Path>) -> ExitCode {
+fn wipe(
+    image: &Path,
+    slack: bool,
+    free: bool,
+    overwrite_free_data: bool,
+    output: Option<&Path>,
+) -> ExitCode {
     if !slack && !free {
         eprintln!("ade: wipe needs --slack, --free or both, to say what to zero");
         return ExitCode::from(EXIT_USAGE);
     }
     edit_and_save(image, output, |session| {
+        if overwrite_free_data {
+            session.allow_overwriting_free_data();
+        }
         Ok(session.wipe(slack, free)?.lines().join("\n"))
     })
 }
@@ -681,13 +711,21 @@ fn rename(image: &Path, path: &str, name: &str, output: Option<&Path>) -> ExitCo
 }
 
 /// `ade mkdir`: make one directory, whose parent must already exist.
-fn make_dir(image: &Path, path: &str, output: Option<&Path>) -> ExitCode {
+fn make_dir(
+    image: &Path,
+    path: &str,
+    overwrite_free_data: bool,
+    output: Option<&Path>,
+) -> ExitCode {
     let (parent, name) = split_last(path);
     let Ok(amiga) = ade_core::edit::amiga_name(name) else {
         eprintln!("ade: {name:?}: an Amiga name is Latin-1, and this has a character outside it");
         return ExitCode::from(EXIT_USAGE);
     };
     edit_and_save(image, output, |session| {
+        if overwrite_free_data {
+            session.allow_overwriting_free_data();
+        }
         let dir = session.directory(parent)?;
         let block = session.make_dir(dir, &amiga)?;
         Ok(format!(
@@ -702,7 +740,13 @@ fn make_dir(image: &Path, path: &str, output: Option<&Path>) -> ExitCode {
 /// `dest` is where it goes: an existing directory to put it in under its own
 /// name, or a path whose last component is the name to give it. Absent, it
 /// goes in the root under its own name.
-fn put(image: &Path, file: &Path, dest: Option<&str>, output: Option<&Path>) -> ExitCode {
+fn put(
+    image: &Path,
+    file: &Path,
+    dest: Option<&str>,
+    overwrite_free_data: bool,
+    output: Option<&Path>,
+) -> ExitCode {
     let data = match std::fs::read(file) {
         Ok(d) => d,
         Err(e) => {
@@ -715,6 +759,9 @@ fn put(image: &Path, file: &Path, dest: Option<&str>, output: Option<&Path>) -> 
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
     edit_and_save(image, output, |session| {
+        if overwrite_free_data {
+            session.allow_overwriting_free_data();
+        }
         let dest = dest.unwrap_or("");
         // An existing directory takes the file under its own name; otherwise
         // the last component is the new name.
@@ -1295,6 +1342,60 @@ fn list_json(
     }
 }
 
+/// The text listing's entry lines. Returns `false` when stdout went away
+/// partway, so nothing more is written.
+fn list_text(
+    out: &mut impl Write,
+    volume: &Volume<'_>,
+    entries: &[ade_core::layers::filesystem::entry::Entry],
+) -> bool {
+    for e in entries {
+        let size = if e.kind.is_file() {
+            format!("{:>9}", e.byte_size)
+        } else {
+            format!("{:>9}", e.kind.to_string())
+        };
+        let mut line = format!(
+            "{size}  {}  {}  {}",
+            e.protection.to_amigados_string(),
+            e.altered,
+            e.name_lossy()
+        );
+        if e.kind.is_link() {
+            use std::fmt::Write as _;
+            match volume.resolve(e) {
+                Ok(t) => {
+                    let _ = write!(line, "  -> {}", t.name_lossy());
+                }
+                Err(err) => {
+                    let _ = write!(line, "  -> BROKEN ({err})");
+                }
+            }
+        }
+        if !e.comment.is_empty() {
+            use std::fmt::Write as _;
+            let _ = write!(line, "   ; {}", e.comment_lossy());
+        }
+        if e.kind == ade_core::layers::filesystem::entry::EntryKind::Root {
+            // Kept, because it is on the disk; said, because a disk
+            // listing itself looks like an accident (IMP-015).
+            line.push_str("   <- this volume itself, listed in a hash table");
+        }
+        if !emit(out, &line) {
+            return false;
+        }
+    }
+    true
+}
+
+/// What the disk at `path` is, from its health report: asked only when a
+/// listing has nothing to show, since the report walks the whole disk.
+fn kind_of(path: &Path) -> Option<ade_core::DiskKind> {
+    std::fs::read(path)
+        .ok()
+        .map(|bytes| ade_core::health::examine(bytes).kind)
+}
+
 fn list(
     path: &Path,
     dir: Option<&str>,
@@ -1323,7 +1424,12 @@ fn list(
     let volume = match mounted {
         Ok(v) => v,
         Err(e) => {
-            eprintln!("ade: {}: {e}", path.display());
+            // "No rootblock" is true of a quarter of real disks and explains
+            // none of them; what the disk is does.
+            match kind_of(path) {
+                Some(kind) => eprintln!("ade: {}: {e} — {}", path.display(), kind.summary()),
+                None => eprintln!("ade: {}: {e}", path.display()),
+            }
             return ExitCode::from(EXIT_NO_VOLUME);
         }
     };
@@ -1358,43 +1464,19 @@ fn list(
     match format {
         Format::Json => list_json(&mut out, &volume, &entries, hash),
         Format::Text => {
-            for e in &entries {
-                let size = if e.kind.is_file() {
-                    format!("{:>9}", e.byte_size)
-                } else {
-                    format!("{:>9}", e.kind.to_string())
-                };
-                let mut line = format!(
-                    "{size}  {}  {}  {}",
-                    e.protection.to_amigados_string(),
-                    e.altered,
-                    e.name_lossy()
-                );
-                if e.kind.is_link() {
-                    use std::fmt::Write as _;
-                    match volume.resolve(e) {
-                        Ok(t) => {
-                            let _ = write!(line, "  -> {}", t.name_lossy());
-                        }
-                        Err(err) => {
-                            let _ = write!(line, "  -> BROKEN ({err})");
-                        }
+            if list_text(&mut out, &volume, &entries) {
+                match (entries.is_empty() && dir.is_none() && window.is_none())
+                    .then(|| kind_of(path))
+                    .flatten()
+                {
+                    Some(kind) if !kind.has_files() => {
+                        emit(&mut out, &format!("0 entries — {}", kind.summary()));
+                    }
+                    _ => {
+                        emit(&mut out, &format!("{} entries", entries.len()));
                     }
                 }
-                if !e.comment.is_empty() {
-                    use std::fmt::Write as _;
-                    let _ = write!(line, "   ; {}", e.comment_lossy());
-                }
-                if e.kind == ade_core::layers::filesystem::entry::EntryKind::Root {
-                    // Kept, because it is on the disk; said, because a disk
-                    // listing itself looks like an accident (IMP-015).
-                    line.push_str("   <- this volume itself, listed in a hash table");
-                }
-                if !emit(&mut out, &line) {
-                    break;
-                }
             }
-            emit(&mut out, &format!("{} entries", entries.len()));
         }
     }
     let _ = out.flush();
@@ -1622,6 +1704,11 @@ fn report_health(out: &mut impl Write, path: &Path, h: &Health) {
         format!("{}", path.display()),
         format!("  container   {}", h.inspection.detection.kind),
     ];
+    // What the disk is, before anything about its volume: on a quarter of
+    // real images there is no volume, and this line is the reason.
+    if !h.kind.has_files() {
+        lines.push(format!("  kind        {}", h.kind.summary()));
+    }
     if let Some(name) = h.inspection.identified.first() {
         // The dataset's name, near the top where a person looks first: on a
         // renamed file it is the only place the real title survives.

@@ -81,6 +81,10 @@ pub enum EditError {
     /// The original file changed on disk after it was opened. Saving over it
     /// would destroy changes this session never saw (D-020).
     ChangedOnDisk,
+    /// The volume holds no entries, but this many blocks its bitmap marks
+    /// free hold data — usually a game its own loader reads — and the caller
+    /// has not said to write over them (IMP-019).
+    FreeBlocksHoldData(usize),
     /// Reading or writing a file failed.
     Io(std::io::Error),
 }
@@ -107,6 +111,14 @@ impl core::fmt::Display for EditError {
                  those changes, so use Save As",
             ),
             Self::Exists => f.write_str("already exists, refusing to overwrite"),
+            Self::FreeBlocksHoldData(n) => write!(
+                f,
+                "the volume holds no files, but {n} {} its bitmap marks free {} data — on a \
+                 disk like this usually a game its own loader reads — and writing here would \
+                 overwrite it; ADE does that only when told to",
+                if *n == 1 { "block" } else { "blocks" },
+                if *n == 1 { "holds" } else { "hold" },
+            ),
             Self::NoDestination => f.write_str("nothing has been saved yet; use Save As"),
             Self::Io(e) => write!(f, "{e}"),
         }
@@ -134,6 +146,11 @@ pub struct Session {
     /// Why no edit but a repair may be made, while the bitmap marks live
     /// blocks free.
     unsound: Option<String>,
+    /// On a volume with no entries, the blocks the bitmap marks free that
+    /// hold data (IMP-019): an edit that takes or wipes a free block is
+    /// refused while this is non-zero and `free_data` protects them.
+    free_holding_data: usize,
+    free_data: FreeData,
     undo: Vec<Vec<u8>>,
     redo: Vec<Vec<u8>>,
     /// Whether there are edits no save has captured.
@@ -198,6 +215,12 @@ impl Session {
             origin: None,
             destination: None,
             unsound: unsound(&report),
+            free_holding_data: free_holding_data(&report),
+            free_data: if free_holding_data(&report) > 0 {
+                FreeData::Protected
+            } else {
+                FreeData::Unprotected
+            },
             baseline: problems(&report),
             undo: Vec::new(),
             redo: Vec::new(),
@@ -533,6 +556,9 @@ impl Session {
         if let Some(why) = &self.unsound {
             return Err(EditError::Unsound(format!("{why}; repair the disk first")));
         }
+        if free {
+            self.free_data_allowed()?;
+        }
         let mut next = self.bytes.clone();
         let mut done = Wipe::default();
         if free {
@@ -568,6 +594,7 @@ impl Session {
     /// # Errors
     /// See [`EditError`]. A refused edit leaves the session as it was.
     pub fn make_dir(&mut self, parent: u32, name: &[u8]) -> Result<u32, EditError> {
+        self.free_data_allowed()?;
         let geometry = self.geometry;
         let when = self.now();
         self.edit(|bytes| fs_edit::make_dir(bytes, geometry, parent, name, when))
@@ -578,9 +605,42 @@ impl Session {
     /// # Errors
     /// See [`EditError`]. A refused edit leaves the session as it was.
     pub fn add_file(&mut self, parent: u32, name: &[u8], data: &[u8]) -> Result<u32, EditError> {
+        self.free_data_allowed()?;
         let geometry = self.geometry;
         let when = self.now();
         self.edit(|bytes| fs_edit::add_file(bytes, geometry, parent, name, data, when))
+    }
+
+    /// On a volume with no entries, how many blocks the bitmap marks free
+    /// hold data (IMP-019) — zero on any other, and on a disk that was not
+    /// like this when it was opened, since an edit cannot put a loader's data
+    /// there. While it is not zero, adding a file or a directory and wiping
+    /// free blocks are refused with [`EditError::FreeBlocksHoldData`] until
+    /// [`Self::allow_overwriting_free_data`] is called.
+    #[must_use]
+    pub fn free_blocks_holding_data(&self) -> usize {
+        if self.free_data == FreeData::Unprotected {
+            0
+        } else {
+            self.free_holding_data
+        }
+    }
+
+    /// Say that writing over free blocks that hold data is meant, for the
+    /// rest of this session: the disk is being reused, and whatever a loader
+    /// read from those blocks is to be given up.
+    pub fn allow_overwriting_free_data(&mut self) {
+        if self.free_data == FreeData::Protected {
+            self.free_data = FreeData::Allowed;
+        }
+    }
+
+    fn free_data_allowed(&self) -> Result<(), EditError> {
+        match self.free_blocks_holding_data() {
+            0 => Ok(()),
+            _ if self.free_data == FreeData::Allowed => Ok(()),
+            n => Err(EditError::FreeBlocksHoldData(n)),
+        }
     }
 
     /// Stamp every later edit with `when` instead of the clock, so a test's
@@ -622,6 +682,10 @@ impl Session {
             .iter()
             .filter(|f| f.severity >= Severity::Warning)
             .filter(|f| !allowed.contains(&f.code))
+            // What is on the disk, not damage an edit did: deleting the last
+            // file, or a format, empties a volume over blocks still holding
+            // what was in them.
+            .filter(|f| f.code != "free-blocks-hold-data")
             .filter(|f| {
                 after.get(f.code).copied().unwrap_or(0)
                     > self.baseline.get(f.code).copied().unwrap_or(0)
@@ -643,6 +707,7 @@ impl Session {
         self.redo.clear();
         self.baseline = after;
         self.unsound = unsound(report);
+        self.free_holding_data = free_holding_data(report);
         self.dirty = true;
         Ok(())
     }
@@ -737,6 +802,7 @@ impl Session {
         let report = health::examine(self.bytes.clone());
         self.baseline = problems(&report);
         self.unsound = unsound(&report);
+        self.free_holding_data = free_holding_data(&report);
         self.dirty = true;
     }
 
@@ -1013,6 +1079,23 @@ fn unwalked(report: &health::Health, walk: &ade_filesystem::volume::Walk) -> Opt
 }
 
 /// Why a disk in this condition may not be edited, if it may not.
+/// Whether a session guards free blocks that hold data (IMP-019).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FreeData {
+    /// The disk had none when it was opened. An edit cannot put a loader's
+    /// data on a disk: deleting the last file leaves its blocks free and the
+    /// volume empty, and they are the person's own.
+    Unprotected,
+    /// It had some, and edits that would write over them are refused.
+    Protected,
+    /// It had some, and the caller has said writing over them is meant.
+    Allowed,
+}
+
+fn free_holding_data(report: &health::Health) -> usize {
+    report.bitmap.as_ref().map_or(0, |b| b.free_holding_data)
+}
+
 fn unsound(report: &health::Health) -> Option<String> {
     let bitmap = report.bitmap.as_ref()?;
     (bitmap.referenced_but_free > 0).then(|| {
