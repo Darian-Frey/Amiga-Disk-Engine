@@ -55,6 +55,8 @@ RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
 python3 tools/check-layering.py   # D-003: no cross-layer dependencies
 ```
 
+Tests build optimised (`[profile.test] opt-level = 2` in the root `Cargo.toml`), keeping the dev profile's debug assertions and overflow checks. The corpus tests read all 4,652 images, some fifteen times over: unoptimised, the suite took about eighteen minutes; optimised, about four, compiling included (measured 2026-10-29 on 16 cores). `cargo test` runs one test binary at a time; running all of them at once took 99 seconds in the same measurement, which is what `cargo nextest run` does, if it is installed.
+
 ## The GUI
 
 Qt6 6.4 or later, and CMake 3.19 or later. CMake invokes `cargo` for the

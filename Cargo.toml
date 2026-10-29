@@ -77,3 +77,11 @@ doc_markdown = "allow"
 
 [profile.release]
 overflow-checks = true   # keep wrapping arithmetic from silently corrupting offsets
+
+# The corpus tests read every one of the 4,652 images, some fifteen times over;
+# unoptimised they were nine tenths of an eighteen-minute run. Optimised, the
+# whole suite takes under four minutes (measured 2026-10-29). The test profile
+# still inherits the dev profile's debug assertions and overflow checks, so
+# nothing a test can catch is given up; a backtrace may name fewer frames.
+[profile.test]
+opt-level = 2
