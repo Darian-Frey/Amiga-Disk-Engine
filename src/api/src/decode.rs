@@ -14,7 +14,7 @@ pub use ade_object::decoded::Field;
 use ade_object::icon::{self, Highlight, Icon};
 use ade_object::ilbm;
 use ade_object::prefs::{self, Pointer};
-use ade_object::{font, svx};
+use ade_object::{font, keymap, svx, tracker};
 
 /// What ADE decodes, for a file it does not.
 const DECODES: &str = "It decodes Workbench icons, IFF ILBM pictures, IFF 8SVX sounds, \
@@ -97,6 +97,20 @@ pub fn file(name: &[u8], bytes: &[u8]) -> Result<Decoded, NotDecoded> {
         return font::parse(bytes)
             .map(|f| font_decoded(&f))
             .map_err(|e| NotDecoded(format!("a font, but {e}")));
+    }
+    if tracker::is_module(bytes) {
+        return tracker::parse(bytes)
+            .map(|m| tracker_decoded(&m))
+            .map_err(|e| NotDecoded(format!("a ProTracker module, but {e}")));
+    }
+    if keymap::is_keymap(bytes) {
+        return keymap::parse(bytes)
+            .map(|k| Decoded {
+                title: format!("Keymap \"{}\": what each key types", k.name),
+                fields: k.fields(),
+                picture: None,
+            })
+            .map_err(|e| NotDecoded(format!("a keymap, but {e}")));
     }
     if prefs::is_preferences(name, bytes.len())
         && let Some(p) = prefs::decode(bytes)
@@ -264,6 +278,73 @@ fn font_decoded(f: &font::Font) -> Decoded {
     Decoded {
         title: format!("Font, {} pixels", f.height),
         fields: f.fields(),
+        picture,
+    }
+}
+
+/// A module: its fields, and each sample's waveform in a grid, eight to a
+/// row, the part that loops in orange.
+fn tracker_decoded(m: &tracker::Module) -> Decoded {
+    const CELL_W: usize = 60;
+    const CELL_H: usize = 24;
+    const GAP: usize = 4;
+    const ACROSS: usize = 8;
+    let used: Vec<_> = m.used().collect();
+    let picture = (!used.is_empty()).then(|| {
+        let rows = used.len().div_ceil(ACROSS);
+        let across = used.len().min(ACROSS);
+        // A cell and a gap each, less the last gap: at most 31 samples.
+        let span = |n: usize, cell: usize| {
+            n.saturating_mul(cell.saturating_add(GAP))
+                .saturating_sub(GAP)
+        };
+        let (width, height) = (span(across, CELL_W), span(rows, CELL_H));
+        let mut argb = vec![0xFFFF_FFFF; width.saturating_mul(height)];
+        for (n, (_, s)) in used.iter().enumerate() {
+            let x0 = (n % ACROSS).saturating_mul(CELL_W.saturating_add(GAP));
+            let y0 = (n / ACROSS).saturating_mul(CELL_H.saturating_add(GAP));
+            let mut put = |x: usize, y: usize, ink: u32| {
+                let at = y0
+                    .saturating_add(y)
+                    .saturating_mul(width)
+                    .saturating_add(x0)
+                    .saturating_add(x);
+                if let Some(px) = argb.get_mut(at) {
+                    *px = ink;
+                }
+            };
+            for x in 0..CELL_W {
+                put(x, CELL_H / 2, 0xFFCC_CCCC);
+            }
+            let repeats_from = s.loops().then_some(s.repeat.0);
+            // Only the kept start of a long sample is drawn; its loop, if it
+            // begins past that, is not shown.
+            if let Some(columns) =
+                ade_object::decoded::waveform(&s.data, repeats_from, CELL_W, CELL_H)
+            {
+                for (x, (top, bottom, repeats)) in columns.into_iter().enumerate() {
+                    let ink = if repeats { 0xFFCC_6622 } else { 0xFF22_55AA };
+                    for y in top..=bottom {
+                        put(x, y, ink);
+                    }
+                }
+            }
+        }
+        Picture {
+            caption: "Each sample's sound, in order; the part that loops in orange".to_owned(),
+            width,
+            height,
+            argb,
+            pixel_shape: (1, 1),
+        }
+    });
+    Decoded {
+        title: if m.title.is_empty() {
+            "ProTracker module".to_owned()
+        } else {
+            format!("ProTracker module \"{}\"", m.title)
+        },
+        fields: m.fields(),
         picture,
     }
 }

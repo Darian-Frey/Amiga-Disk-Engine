@@ -1220,6 +1220,34 @@ A `FORM 8SVX`. `VHDR` (`datatypes/soundclass.h`): samples that play once in the 
 
 **Corpus, 2026-10-27:** 2,599 sounds on 300 disks, every one decoded; 2,588 drawn — the 6 compressed and 5 with an empty body are not. 88 are marked left, 64 right and 3 stereo; 71 hold more than one octave.
 
+## Keymaps
+
+*For F-033. Read from AROS's `devices/keymap.h` and `rom/keymap` (`MapRawKey()`, `MapANSI()`, `GetKeyInfo()`), locally and not committed. Measured 2026-10-29 over every keymap in the corpus.*
+
+A keymap file is a loadable executable whose one hunk begins with a `KeyMapNode`: an exec `Node` — `ln_Name` at byte 10 — then a `KeyMap` of eight pointers from byte 14: types, mappings, capsable bits and repeatable bits for the low keys `$00`–`$3F` (64 each; 8 bytes of bits), then for the high keys `$40`–`$77` (56; 7 bytes). Every pointer is an offset into the hunk with a `HUNK_RELOC32` entry, which is how a keymap is recognised: the name and all eight tables relocated at those offsets.
+
+**A key's type** is `KCF_SHIFT` 1, `KCF_ALT` 2, `KCF_CONTROL` 4, `KCF_DEAD` `$20`, `KCF_STRING` `$40`, `KCF_NOP` `$80`. **A plain key** holds up to four characters in its long, **lowest byte first**, for the qualifier combinations its type's low three bits name, in `MapANSI()`'s order: none; Shift; Alt; Shift+Alt — or with Control in place of whichever is missing. A zero byte types nothing. **A string or dead key's long points at descriptor pairs**, one per combination, up to eight for a key with all three bits: none, Shift, Alt, Shift+Alt, Control, Control+Shift, Control+Alt, all three. A string's pair is a length and an offset from the descriptors. A dead-key pair is a type and a value: 0 types the value; `DPF_DEAD` (8) makes the key a dead key, its index in the low nibble; `DPF_MOD` (1) makes it one a dead key changes, the value an offset to a table of the key alone and then after each dead key in turn. The table holds one entry per dead key the keymap has, so it is trimmed to that count; what follows is the next table.
+
+**Keys are named by where they sit on a US keyboard**, from AROS's `rawkeycodes.txt` drawing of the Amiga's: the key a German keymap gives `ü` is still the key right of P. **Corpus, 2026-10-29:** 1,391 keymaps on 296 disks, all read; 31 outside `DEVS:Keymaps`; the 195 Commodore keymaps on Workbench disks type what their keyboards do, and every dead key changes some key.
+
+## ProTracker modules
+
+*For F-033. Measured 2026-10-29 over every module in the corpus, against libopenmpt through `ffprobe`.*
+
+| Offset | Size | Field |
+|---|---|---|
+| 0 | 20 | title |
+| 20 | 31 × 30 | samples: name 22, length in words 2, finetune nibble 1, volume 1, loop start in words 2, loop length in words 2 |
+| 950 | 1 | song length, in positions |
+| 951 | 1 | restart byte |
+| 952 | 128 | order list |
+| 1080 | 4 | channel tag: `M.K.` `M!K!` `FLT4` `4CHN` four, `6CHN` six, `8CHN` eight |
+| 1084 | | patterns, then each sample's signed 8-bit data in order |
+
+**Patterns** are 64 rows of four bytes per channel; the file holds as many as the highest pattern in **all 128** order entries names, played or not. Byte 2's low nibble is the effect and byte 3 its parameter. A loop of two bytes or less is no loop. A name stops at its first NUL.
+
+**How long it plays** is the patterns walked without sound: a row lasts `speed` ticks of 2.5 / tempo seconds, from speed 6 and tempo 125. `Fxx` below `$20` sets the speed and from `$20` the tempo, and `F00` is passed over, as libopenmpt passes it over; `Bxx` jumps to position xx; `Dxy` breaks to row x×10+y of the next position — **two decimal digits, not a byte**; `E60` marks a loop start per channel and `E6x` plays back to it x times; `EEx` plays its row x more times. The song ends past its last position, or when it meets a row again outside a pattern loop. **Corpus:** 359 modules on 191 disks, 315 `M.K.` and 44 `FLT4`; every title, every sample-name list and every playing time agrees with libopenmpt, the largest difference 0.01 seconds.
+
 ## Flux formats
 
 - **Extended-ADF** — see above.

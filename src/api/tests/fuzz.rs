@@ -931,3 +931,192 @@ fn fuzz_free_blocks_left_by_deleting() {
         });
     }
 }
+
+/// A keymap with a plain key, a string key, a dead key and a key it changes,
+/// as a one-hunk executable, with where its hunk's bytes start and how many
+/// there are.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "a template written by hand, not with the helpers that read it (C-001's exception)"
+)]
+fn keymap_template() -> (Vec<u8>, usize, usize) {
+    let mut h = vec![0u8; 46];
+    let set = |h: &mut Vec<u8>, at: usize, v: u32| {
+        h[at..at + 4].copy_from_slice(&v.to_be_bytes());
+    };
+    let mut relocs: Vec<u32> = (0..9)
+        .map(|i| if i == 8 { 10 } else { 14 + i * 4 })
+        .collect();
+    let mut at = [0usize; 8];
+    for (field, (len, fill)) in [
+        (64, 0x80),
+        (256, 0),
+        (8, 0xFF),
+        (8, 0xFF),
+        (56, 0x80),
+        (224, 0),
+        (7, 0),
+        (7, 0),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        at[field] = h.len();
+        h.resize(h.len() + len, fill);
+        set(&mut h, 14 + field * 4, at[field] as u32);
+    }
+    let name = h.len();
+    h.extend(b"fuzz\0");
+    set(&mut h, 10, name as u32);
+    h[at[0] + 0x10] = 7;
+    set(&mut h, at[1] + 0x40, 0x7151_E5C5);
+    let up = h.len();
+    h.extend([2, 4, 2, 6, 0x9B, b'A', 0x9B, b'T']);
+    h[at[4] + 0x0C] = 0x41;
+    set(&mut h, at[5] + 0x30, up as u32);
+    relocs.push((at[5] + 0x30) as u32);
+    let dead = h.len();
+    h.extend([0, b'f', 0, b'F', 8, 1, 8, 1, 0, 6, 0, 6, 0, 0, 0, 0]);
+    h[at[0] + 0x23] = 0x27;
+    set(&mut h, at[1] + 0x23 * 4, dead as u32);
+    relocs.push((at[1] + 0x23 * 4) as u32);
+    let accent = h.len();
+    h.extend([1, 4, 0, b'E', b'e', 0xE8]);
+    h[at[0] + 0x12] = 0x21;
+    set(&mut h, at[1] + 0x12 * 4, accent as u32);
+    relocs.push((at[1] + 0x12 * 4) as u32);
+    while h.len() % 4 != 0 {
+        h.push(0);
+    }
+    let longs = (h.len() / 4) as u32;
+    let mut exe = Vec::new();
+    for v in [0x3F3u32, 0, 1, 0, 0, longs, 0x3E9, longs] {
+        exe.extend(v.to_be_bytes());
+    }
+    let start = exe.len();
+    let len = h.len();
+    exe.extend(h);
+    exe.extend(0x3ECu32.to_be_bytes());
+    exe.extend((relocs.len() as u32).to_be_bytes());
+    exe.extend(0u32.to_be_bytes());
+    for r in relocs {
+        exe.extend(r.to_be_bytes());
+    }
+    exe.extend(0u32.to_be_bytes());
+    exe.extend(0x3F2u32.to_be_bytes());
+    (exe, start, len)
+}
+
+#[test]
+fn fuzz_the_keymap_decoder() {
+    // F-033. The relocations are left alone so the file stays a keymap and
+    // the mutation reaches what is inside: table pointers, key types, and
+    // the descriptors a string or dead key points at, with their lengths and
+    // offsets — all of them the file's word, all of them bounded by the hunk.
+    let (template, start, hunk_len) = keymap_template();
+    assert!(
+        ade_core::decode::file(b"fuzz", &template).is_ok(),
+        "the keymap template decodes"
+    );
+    let mut rng = Rng::new(0x5EED_6E7A);
+    for i in 0..iterations(20_000) {
+        let seed = u64::from(i);
+        let mut buf = template.clone();
+        for _ in 0..=rng.below(8) {
+            let body = &mut buf[start..start + hunk_len];
+            mutate(body, &mut rng);
+        }
+        if rng.below(8) == 0 {
+            buf.truncate(rng.below(buf.len() + 1));
+        }
+        timed(seed, "keymap decoder", || {
+            if let Ok(d) = ade_core::decode::file(b"fuzz", &buf) {
+                assert!(d.fields.len() < 512, "seed {seed}");
+                let _ = d.lines();
+            }
+        });
+    }
+}
+
+/// A four-channel module with two patterns of speed, break, jump, loop and
+/// delay commands, and one looping sample.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "a template written by hand, not with the helpers that read it (C-001's exception)"
+)]
+fn module_template() -> Vec<u8> {
+    let mut m = vec![0u8; 1084];
+    m[..4].copy_from_slice(b"fuzz");
+    m[20..24].copy_from_slice(b"beep");
+    m[42..44].copy_from_slice(&64u16.to_be_bytes());
+    m[45] = 64;
+    m[46..48].copy_from_slice(&16u16.to_be_bytes());
+    m[48..50].copy_from_slice(&32u16.to_be_bytes());
+    m[950] = 3;
+    m[952..955].copy_from_slice(&[0, 1, 0]);
+    m[1080..1084].copy_from_slice(b"M.K.");
+    let mut patterns = vec![0u8; 2 * 1024];
+    for (p, row, ch, effect, param) in [
+        (0usize, 0usize, 0usize, 0xFu8, 3u8),
+        (0, 2, 1, 0xE, 0x60),
+        (0, 5, 1, 0xE, 0x62),
+        (0, 9, 2, 0xE, 0xE2),
+        (0, 20, 3, 0xD, 0x32),
+        (1, 40, 0, 0xF, 0x90),
+        (1, 63, 0, 0xB, 0x02),
+    ] {
+        let at = p * 1024 + row * 16 + ch * 4;
+        patterns[at + 2] = effect;
+        patterns[at + 3] = param;
+    }
+    m.extend(patterns);
+    m.extend((0..128u8).map(|i| i.wrapping_mul(29)));
+    m
+}
+
+#[test]
+fn fuzz_the_module_decoder() {
+    // F-033. Mutated, so the song length, order list, sample lengths and
+    // loops, and every effect the walk obeys — jumps that go nowhere,
+    // breaks past the pattern, loops that never end, speeds of zero —
+    // come from the file. The walk must end, and every length it reports
+    // must be one the file could hold.
+    let template = module_template();
+    assert!(
+        ade_core::decode::file(b"fuzz", &template)
+            .unwrap()
+            .picture
+            .is_some(),
+        "the module template decodes"
+    );
+    let mut rng = Rng::new(0x5EED_70D5);
+    for i in 0..iterations(20_000) {
+        let seed = u64::from(i);
+        let mut buf = template.clone();
+        for _ in 0..=rng.below(8) {
+            mutate(&mut buf, &mut rng);
+        }
+        // The tag kept, most of the time, so the mutation reaches past it.
+        if rng.below(4) != 0 {
+            buf[1080..1084].copy_from_slice(b"M.K.");
+        }
+        if rng.below(8) == 0 {
+            buf.truncate(rng.below(buf.len() + 1));
+        }
+        timed(seed, "module decoder", || {
+            if let Ok(m) = ade_core::layers::object::tracker::parse(&buf) {
+                assert!(m.seconds.is_finite() && m.seconds >= 0.0, "seed {seed}");
+                assert!(
+                    m.samples.iter().all(|s| s.data.len() <= 4096),
+                    "seed {seed}"
+                );
+            }
+            if let Ok(d) = ade_core::decode::file(b"fuzz", &buf) {
+                if let Some(p) = &d.picture {
+                    assert_eq!(p.argb.len(), p.width * p.height, "seed {seed}");
+                }
+                let _ = d.lines();
+            }
+        });
+    }
+}

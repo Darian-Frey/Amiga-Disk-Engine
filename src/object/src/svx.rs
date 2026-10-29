@@ -156,38 +156,8 @@ impl Sound {
     /// silence, and whether the column is in the repeating part.
     #[must_use]
     pub fn waveform(&self, width: usize, height: usize) -> Option<Vec<(usize, usize, bool)>> {
-        if self.samples.is_empty() || width == 0 || height < 2 {
-            return None;
-        }
-        let n = self.samples.len();
-        let mid = height / 2;
-        let once = self.one_shot as usize;
-        Some(
-            (0..width)
-                .map(|col| {
-                    let from = col.saturating_mul(n).checked_div(width).unwrap_or(0);
-                    let to = (col
-                        .saturating_add(1)
-                        .saturating_mul(n)
-                        .checked_div(width)
-                        .unwrap_or(0))
-                    .max(from.saturating_add(1))
-                    .min(n);
-                    let span = self.samples.get(from..to).unwrap_or(&[]);
-                    let hi = span.iter().copied().max().unwrap_or(0);
-                    let lo = span.iter().copied().min().unwrap_or(0);
-                    // 128 levels each way onto half the height.
-                    let scale = |v: i8| -> usize {
-                        let off =
-                            i32::from(v).saturating_mul(i32::try_from(mid).unwrap_or(0)) / 128;
-                        usize::try_from(i32::try_from(mid).unwrap_or(0).saturating_sub(off))
-                            .unwrap_or(0)
-                            .min(height.saturating_sub(1))
-                    };
-                    (scale(hi), scale(lo), from >= once && self.repeat > 0)
-                })
-                .collect(),
-        )
+        let repeats_from = (self.repeat > 0).then_some(self.one_shot as usize);
+        crate::decoded::waveform(&self.samples, repeats_from, width, height)
     }
 
     /// What the sound says, in fields for the Decoded view.
