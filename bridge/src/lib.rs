@@ -2799,6 +2799,104 @@ pub unsafe extern "C" fn ade_disasm_bootblock(image: *const AdeImage) -> *mut Ad
     })
 }
 
+/// A view beside the listing (D-021).
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdeAsmView {
+    /// The functions the walks found.
+    Functions = 0,
+    /// Every place referred to, and what refers to it.
+    References = 1,
+    /// Who calls whom, as an indented tree.
+    CallGraph = 2,
+    /// The call graph for Graphviz.
+    CallGraphDot = 3,
+    /// Source that assembles back to the program; executables only.
+    Source = 4,
+}
+
+impl AdeAsmView {
+    const fn engine(self) -> ade_core::disasm::View {
+        match self {
+            Self::Functions => ade_core::disasm::View::Functions,
+            Self::References => ade_core::disasm::View::References,
+            Self::CallGraph => ade_core::disasm::View::CallGraph,
+            Self::CallGraphDot => ade_core::disasm::View::CallGraphDot,
+            Self::Source => ade_core::disasm::View::Source,
+        }
+    }
+}
+
+impl AdeDisasm {
+    /// A view's text as lines: a remark where it starts with `;`, data
+    /// otherwise, none of them standing for bytes.
+    fn view(result: Result<Vec<String>, ade_core::disasm::NotCode>) -> *mut Self {
+        let listing = result.map(|lines| ade_core::disasm::Listing {
+            lines: lines
+                .into_iter()
+                .map(|text| ade_core::disasm::Line {
+                    kind: if text.starts_with(';') {
+                        ade_core::disasm::LineKind::Note
+                    } else {
+                        ade_core::disasm::LineKind::Data
+                    },
+                    offset: None,
+                    length: 0,
+                    text,
+                    comment: None,
+                })
+                .collect(),
+            truncated: false,
+        });
+        Self::from(listing)
+    }
+}
+
+/// A view of the file at `block`, as a listing handle whose lines are the
+/// view's text. A handle with no lines and a reason for a file that is not an
+/// executable. Null if the image is null or the file cannot be read.
+///
+/// # Safety
+/// `image` must be a live handle or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ade_disasm_view(
+    image: *const AdeImage,
+    partition: u32,
+    block: u32,
+    view: AdeAsmView,
+) -> *mut AdeDisasm {
+    with_image(image, std::ptr::null_mut(), |image| {
+        let bytes = with_volume(image, partition, |volume| {
+            let entry = volume.entry_at(block).ok()?;
+            Some(volume.read_file(&entry).ok()?.into_bytes())
+        });
+        let Some(bytes) = bytes else {
+            return std::ptr::null_mut();
+        };
+        AdeDisasm::view(ade_core::disasm::file_view(&bytes, view.engine()))
+    })
+}
+
+/// A view of the image's boot code, as [`ade_disasm_view`] gives a file's.
+/// [`AdeAsmView::Source`] is refused: boot code is not a program file.
+///
+/// # Safety
+/// `image` must be a live handle or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ade_disasm_bootblock_view(
+    image: *const AdeImage,
+    view: AdeAsmView,
+) -> *mut AdeDisasm {
+    with_image(image, std::ptr::null_mut(), |image| {
+        let Some(handle) = image.image.as_ref() else {
+            return AdeDisasm::from(Err(ade_core::disasm::NotCode(
+                "ADE could not read this image's blocks".to_owned(),
+            )));
+        };
+        AdeDisasm::view(ade_core::disasm::bootblock_view(handle, view.engine()))
+    })
+}
+
 /// Lines in the listing; zero when there is a reason instead.
 ///
 /// # Safety

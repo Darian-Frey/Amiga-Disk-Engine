@@ -641,3 +641,31 @@ Unchanged: Save As always makes a new file and still refuses the opened one and 
 
 **Reversal conditions.** Part 2 (the backup) could become a setting if `.orig` files are measured to be clutter nobody uses — but not removed, because it is now the only thing standing between a confirmed wrong edit and a lost disk. Part 3 does not weaken. If ADE ever saves over files it did not open itself (a batch edit, a CLI in-place flag), that is a new entry, not this one.
 
+
+---
+
+### D-021 The reverse-engineering suite on F-032: follow the code, name only what it proves, export only what rebuilds
+**Decided:** 2026-10-29
+**Recorded:** 2026-10-29
+**Status:** Accepted
+**Authors:** Darian-Frey (decision); Claude (analysis)
+**Related:** D-019, F-032, F-036, D-002, D-006, AV-002
+
+**Context.** D-019 part 2 left library-call naming, cross-references, call graphs, function lists and export out of the Assembly view "until a later decision", one item at a time, and named library naming as the likely first, because it "is wrong whenever it guesses". Asked for on 2026-10-29 in one go: export, cross-references and a function list, library-call naming, and a call graph. This entry loosens part 2 for those five and leaves the rest of it — editing, a project format, signature matching — where it was.
+
+**Options.**
+- **A. A linear sweep with names on top.** Decode every byte of every code hunk, as the listing already does, and take references, functions and calls from that. Rejected: data in a code hunk decodes as instructions, and their "calls" and "references" would be reported as the program's. The listing can afford that because it shows bytes; a cross-reference that says *this is called from there* cannot.
+- **B. Signature or heuristic naming** — recognise library bases by how they are usually loaded, or functions by their prologues. Rejected: each is a guess about code the tool cannot see the whole of, and D-019 named exactly that failure.
+- **C. Follow the code, and say only what following it proves.** **Chosen.**
+
+**Decision.** Option C, in five parts.
+
+1. **Code is what a walk reaches.** A walk starts where the loader starts the program — byte 0 of hunk 0 — or where AmigaDOS enters boot code, byte 12, and follows every branch, jump and call whose target the instruction itself states. Each call target starts a function, walked the same way. Functions, references and the call graph come from what the walks reached; bytes no walk reaches are not read as code. What a walk cannot follow — a call or jump through a register or memory, a jump table — is counted and said, not guessed at.
+2. **A library is named only where the code proves which one it is.** The walk carries what is known of each register. A base is known from two facts and nothing else: the long at address 4 is exec's base, and exec's `OpenLibrary` or `OldOpenLibrary` returns in `d0` the base of the library whose name `a1` points at, read from the program's own bytes. Boot code starts with exec in `a6`, as AmigaDOS enters it. A library call keeps `d2`–`d7` and `a2`–`a6`, as the system's calling convention promises; a call into the program's own code may change any register, so everything known is forgotten; where paths meet, only what all of them agree on survives. **A base kept in memory is not followed** — that a variable holds `DOSBase` is a claim about every write to it, which no walk of the code shown can make — so most dos and intuition calls in compiled programs stay unnamed. That is the cost, accepted.
+3. **The names come from two sources that must agree.** AROS's library descriptions give each function's slot twice — in each library's `.conf` function list, and in the `AROS_LH` header of the function's own source — and the table holds only functions on which both agree, checked also against offsets known from AmigaOS. AROS-only additions (version 50 and later) and the slots AROS marks private are left out, except five exec slots whose names are AmigaOS's own. The sources stay outside the repository; the table is generated from them.
+4. **Export is source that assembles back to the program's own bytes**, or it is not export. The test is mechanical: every corpus program is exported, assembled with GNU `as` in its MRI mode, each section linked at address 0, and each hunk's bytes required back exactly. An instruction an assembler would encode differently — one it shortens, a byte immediate whose ignored high byte is not zero, a 68020 addressing mode — is written as words with the instruction beside it as a comment. A relocated long that no line can rebuild — into a hunk the file does not have, or at an odd offset — is written as its number, and the source says how many there are. The library names appear in the source as `_LVO` equates, which the round trip checks too.
+5. **Unchanged from D-019:** nothing is executed (AV-002); every walk is bounded (`MAX_STEPS`) and fuzzed with the decoder (D-006); objdump stays the decoder's oracle, GNU `as` becomes the export's, and neither is linked.
+
+**Consequences.** F-036. `ade_object::flow` and `ade_object::export`, and `ade_object::lvo` generated from AROS; the listing gains function headings and named library calls; `ade disasm` gains `--functions`, `--xrefs`, `--call-graph[=dot]` and `--export`; the ABI gains `ade_disasm_view` and `ade_disasm_bootblock_view`; the Assembly tab gains a view selector and Save. Boot code has no export: it is not a program file.
+
+**Reversal conditions.** Part 2 loosens only with a proof as strong as its two facts — following a base through memory would need every write to the variable accounted for, which means the whole program's writes, including through pointers. Part 4 does not loosen: an export that does not rebuild is a listing with a different extension. If GNU `as` stops being available, the round trip needs another assembler nobody here wrote — vasm in its Devpac mode is the obvious one, and has not yet been tried — not a comparison with ADE's own encoder.

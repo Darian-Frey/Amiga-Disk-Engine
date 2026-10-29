@@ -480,6 +480,15 @@ public:
     }
     /// The disk's boot code.
     Disassembly bootCode() const { return takeDisassembly(ade_disasm_bootblock(m_raw)); }
+    /// A view beside a program's listing: its functions, references, calls
+    /// or source (D-021). The lines are the view's text.
+    Disassembly codeView(quint32 partition, quint32 block, AdeAsmView view) const {
+        return takeDisassembly(ade_disasm_view(m_raw, partition, block, view));
+    }
+    /// The same views of the boot code; it has no source.
+    Disassembly bootView(AdeAsmView view) const {
+        return takeDisassembly(ade_disasm_bootblock_view(m_raw, view));
+    }
 
     /// What a file says, in words, if ADE recognises it (F-033).
     Decoded decode(quint32 partition, quint32 block) const {

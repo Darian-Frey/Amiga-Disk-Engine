@@ -338,8 +338,36 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
     m_asmExplain->setToolTip(QStringLiteral(
         "Describe what each instruction does, and name the Amiga hardware it touches."));
     connect(m_asmExplain, &QCheckBox::toggled, this, [this] { renderAssembly(); });
+    // The views beside the listing (D-021), found by following the code from
+    // where it starts rather than by reading every byte as code.
+    m_asmShow = new QComboBox(this);
+    m_asmShow->setObjectName(QStringLiteral("assemblyShow"));
+    m_asmShow->addItem(QStringLiteral("Listing"), -1);
+    m_asmShow->addItem(QStringLiteral("Functions"), int(ADE_ASM_FUNCTIONS));
+    m_asmShow->addItem(QStringLiteral("Cross-references"), int(ADE_ASM_REFERENCES));
+    m_asmShow->addItem(QStringLiteral("Call graph"), int(ADE_ASM_CALL_GRAPH));
+    m_asmShow->addItem(QStringLiteral("Source"), int(ADE_ASM_SOURCE));
+    m_asmShow->setToolTip(QStringLiteral(
+        "Listing: every byte of the code, decoded.\n"
+        "Functions, Cross-references, Call graph: what following the code from where it\n"
+        "starts finds. A library call is named only where the code proves which library\n"
+        "it calls.\n"
+        "Source: the program as assembler source that builds back into the same bytes."));
+    connect(m_asmShow, &QComboBox::currentIndexChanged, this, [this] {
+        m_asmStale = true;
+        refreshAssembly();
+    });
+    m_asmSave = new QPushButton(QStringLiteral("Save..."), this);
+    m_asmSave->setObjectName(QStringLiteral("assemblySave"));
+    m_asmSave->setToolTip(QStringLiteral(
+        "Save what is shown as a text file: the source as .s, the call graph for Graphviz "
+        "as .dot."));
+    m_asmSave->setEnabled(false);
+    connect(m_asmSave, &QPushButton::clicked, this, [this] { saveAssembly(); });
     asmBar->addWidget(m_asmStatus, 1);
+    asmBar->addWidget(m_asmShow);
     asmBar->addWidget(m_asmExplain);
+    asmBar->addWidget(m_asmSave);
     asmBar->addWidget(m_asmRaw);
     auto *asmLayout = new QVBoxLayout(m_asmTab);
     asmLayout->setContentsMargins(0, 0, 0, 0);
@@ -2690,41 +2718,61 @@ void MainWindow::refreshDecoded() {
 // The Assembly view (F-032)
 // ---------------------------------------------------------------------------
 
+ade::Disassembly MainWindow::assemblyFor(int view, QString &what, QString &why) const {
+    QTreeWidgetItem *item = m_selected;
+    const Open *open = imageFor(item);
+    if (!open) {
+        why = QStringLiteral("Select a program to see its 68000 code, or a disk's own row to "
+                             "see its boot code.");
+        return {};
+    }
+    if (item->data(0, RoleOffset).isValid()) {
+        why = QStringLiteral("A search hit is a place on the disk, not a program. Select a file "
+                             "or the disk's own row.");
+        return {};
+    }
+    if (!item->parent()) {
+        // The disk's own row: its boot code.
+        what = QStringLiteral("Boot code of %1").arg(open->name);
+        return view < 0 ? open->image.bootCode()
+                        : open->image.bootView(static_cast<AdeAsmView>(view));
+    }
+    if (item->data(0, RoleIsDir).toBool() || !item->data(0, RoleBlock).isValid()) {
+        why = QStringLiteral("A folder holds no code. Select a program inside it.");
+        return {};
+    }
+    what = item->text(ColName);
+    const quint32 partition = item->data(0, RolePartition).toUInt();
+    const quint32 block = item->data(0, RoleBlock).toUInt();
+    if (view < 0) return open->image.disassemble(partition, block, m_asmForceRaw);
+    return open->image.codeView(partition, block, static_cast<AdeAsmView>(view));
+}
+
 void MainWindow::refreshAssembly() {
     if (!m_asmStale || !m_asm) return;
     m_asmStale = false;
     m_asmRaw->hide();
+    const int view = m_asmShow ? m_asmShow->currentData().toInt() : -1;
+    // A view follows the code from where it starts, which a guess at where
+    // code is cannot give it; the explanations belong to the listing.
+    if (m_asmExplain) m_asmExplain->setEnabled(view < 0);
     const auto say = [this](const QString &why) {
         m_asmShown = {};
         m_asm->clear();
         m_asmStatus->setText(why);
+        if (m_asmSave) m_asmSave->setEnabled(false);
     };
-
-    QTreeWidgetItem *item = m_selected;
-    const Open *open = imageFor(item);
-    if (!open) {
-        say(QStringLiteral("Select a program to see its 68000 code, or a disk's own row to "
-                           "see its boot code."));
-        return;
-    }
-    if (item->data(0, RoleOffset).isValid()) {
-        say(QStringLiteral("A search hit is a place on the disk, not a program. Select a file "
-                           "or the disk's own row."));
-        return;
-    }
-    ade::Disassembly listing;
     QString what;
-    if (!item->parent()) {
-        // The disk's own row: its boot code.
-        listing = open->image.bootCode();
-        what = QStringLiteral("Boot code of %1").arg(open->name);
-    } else if (item->data(0, RoleIsDir).toBool() || !item->data(0, RoleBlock).isValid()) {
-        say(QStringLiteral("A folder holds no code. Select a program inside it."));
+    QString why;
+    if (view >= 0 && m_asmForceRaw) {
+        say(QStringLiteral("Decoded as a guess, so there is no start to follow: only the "
+                           "listing is shown."));
         return;
-    } else {
-        listing = open->image.disassemble(item->data(0, RolePartition).toUInt(),
-                                          item->data(0, RoleBlock).toUInt(), m_asmForceRaw);
-        what = item->text(ColName);
+    }
+    ade::Disassembly listing = assemblyFor(view, what, why);
+    if (!why.isEmpty()) {
+        say(why);
+        return;
     }
     if (!listing.read) {
         say(QStringLiteral("%1 could not be read.").arg(what));
@@ -2735,15 +2783,49 @@ void MainWindow::refreshAssembly() {
                                                       ? listing.refusal
                                                       : QStringLiteral("not shown: ") +
                                                             listing.refusal));
-        // Offered for a file, never for a disk: the boot code's place is
-        // fixed by the format, and a disk that has none has none.
-        if (item->parent()) m_asmRaw->show();
+        // Offered for a file's listing, never for a disk: the boot code's
+        // place is fixed by the format, and a disk that has none has none.
+        if (m_selected && m_selected->parent() && view < 0) m_asmRaw->show();
         return;
     }
 
     m_asmShown = std::move(listing);
     m_asmWhat = what;
+    if (m_asmSave) m_asmSave->setEnabled(true);
     renderAssembly();
+}
+
+void MainWindow::saveAssembly() {
+    if (m_asmShown.lines.isEmpty()) return;
+    const int view = m_asmShow ? m_asmShow->currentData().toInt() : -1;
+    QString what;
+    QString why;
+    QStringList lines;
+    QString suffix = QStringLiteral(".txt");
+    if (view == int(ADE_ASM_CALL_GRAPH)) {
+        // Saved for Graphviz, which is what a call graph is drawn with.
+        const ade::Disassembly dot = assemblyFor(int(ADE_ASM_CALL_GRAPH_DOT), what, why);
+        for (const ade::AsmLine &line : dot.lines) lines << line.text;
+        suffix = QStringLiteral(".dot");
+    } else {
+        lines = m_asm->toPlainText().split(QLatin1Char('\n'));
+        if (view == int(ADE_ASM_SOURCE)) suffix = QStringLiteral(".s");
+    }
+    if (lines.isEmpty()) return;
+    QString base = m_asmWhat;
+    base.replace(QLatin1Char('/'), QLatin1Char('_'));
+    const QString target = QFileDialog::getSaveFileName(
+        this, QStringLiteral("Save %1").arg(m_asmShow->currentText().toLower()),
+        QDir::homePath() + QLatin1Char('/') + base + suffix);
+    if (target.isEmpty()) return;
+    QFile out(target);
+    if (!out.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+        emit errorOccurred(out.errorString());
+        return;
+    }
+    out.write(lines.join(QLatin1Char('\n')).toUtf8());
+    out.write("\n");
+    if (!out.flush()) emit errorOccurred(out.errorString());
 }
 
 void MainWindow::renderAssembly() {
@@ -2770,6 +2852,12 @@ void MainWindow::renderAssembly() {
     const int top = m_asm->verticalScrollBar()->value();
     m_asm->setPlainText(lines.join(QLatin1Char('\n')));
     m_asm->verticalScrollBar()->setValue(top);
+    const int view = m_asmShow ? m_asmShow->currentData().toInt() : -1;
+    if (view >= 0) {
+        m_asmStatus->setText(QStringLiteral("%1 — %2").arg(m_asmWhat,
+                                                            m_asmShow->currentText().toLower()));
+        return;
+    }
     m_asmStatus->setText(QStringLiteral("%1 — %2 instruction%3%4")
                              .arg(m_asmWhat)
                              .arg(instructions)

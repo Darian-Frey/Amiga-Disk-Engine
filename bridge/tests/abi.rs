@@ -1564,8 +1564,9 @@ fn the_edit_calls_tolerate_null() {
     }
 }
 
-#[test]
-fn a_program_on_the_disk_lists_and_a_text_file_says_why_not() {
+/// A blank disk holding a two-instruction program and a text file: the
+/// disk, the program's header block, the text file's.
+fn code_disk() -> (Vec<u8>, u32, u32) {
     use ade_core::layers::block::Geometry;
     use ade_core::layers::filesystem::{dostype::Dostype, edit, format};
     let when = format::Stamp {
@@ -1608,6 +1609,12 @@ fn a_program_on_the_disk_lists_and_a_text_file_says_why_not() {
         when,
     )
     .unwrap();
+    (disk, exe, plain)
+}
+
+#[test]
+fn a_program_on_the_disk_lists_and_a_text_file_says_why_not() {
+    let (disk, exe, plain) = code_disk();
     let (path, c_path) = fixture("disasm", &disk);
 
     // SAFETY: a valid path; every handle is freed once.
@@ -1656,11 +1663,81 @@ fn a_program_on_the_disk_lists_and_a_text_file_says_why_not() {
         ade::ade_disasm_free(boot);
 
         // Null is tolerated.
+        assert!(ade::ade_disasm_view(std::ptr::null(), 0, 0, ade::AdeAsmView::Functions).is_null());
+        assert!(
+            ade::ade_disasm_bootblock_view(std::ptr::null(), ade::AdeAsmView::Functions).is_null()
+        );
         assert!(ade::ade_disasm_open(std::ptr::null(), 0, 0, false).is_null());
         assert!(ade::ade_disasm_bootblock(std::ptr::null()).is_null());
         assert_eq!(ade::ade_disasm_count(std::ptr::null()), 0);
         assert_eq!(ade::ade_disasm_refusal(std::ptr::null()).len, 0);
         ade::ade_disasm_free(std::ptr::null_mut());
+        ade::ade_image_free(image);
+    }
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn a_program_on_the_disk_has_its_views_beside_the_listing() {
+    let (disk, exe, plain) = code_disk();
+    let (path, c_path) = fixture("disasm-views", &disk);
+    // SAFETY: a valid path; every handle is freed once.
+    unsafe {
+        let image = ade::ade_image_open(c_path.as_ptr(), std::ptr::null(), std::ptr::null_mut());
+        assert!(!image.is_null());
+        // The views beside the listing (D-021): text lines, none standing
+        // for bytes.
+        let text = |handle: *mut ade::AdeDisasm| {
+            let mut out = String::new();
+            let mut line = std::mem::zeroed::<ade::AdeAsmLine>();
+            for i in 0..ade::ade_disasm_count(handle) {
+                ade::ade_disasm_line(handle, i, &raw mut line);
+                assert!(!line.has_offset);
+                let bytes = std::slice::from_raw_parts(line.text.data, line.text.len);
+                out.push_str(std::str::from_utf8(bytes).unwrap());
+                out.push('\n');
+            }
+            ade::ade_disasm_free(handle);
+            out
+        };
+        let functions = text(ade::ade_disasm_view(
+            image,
+            ade::ADE_WHOLE_IMAGE,
+            exe,
+            ade::AdeAsmView::Functions,
+        ));
+        assert!(functions.contains("h0_0000 (entry)"), "{functions}");
+        let source = text(ade::ade_disasm_view(
+            image,
+            ade::ADE_WHOLE_IMAGE,
+            exe,
+            ade::AdeAsmView::Source,
+        ));
+        assert!(
+            source.contains("SECTION\thunk0,CODE") && source.contains("moveq   #0,d0"),
+            "{source}"
+        );
+        let dot = text(ade::ade_disasm_view(
+            image,
+            ade::ADE_WHOLE_IMAGE,
+            exe,
+            ade::AdeAsmView::CallGraphDot,
+        ));
+        assert!(dot.starts_with("digraph"), "{dot}");
+        let not_code = ade::ade_disasm_view(
+            image,
+            ade::ADE_WHOLE_IMAGE,
+            plain,
+            ade::AdeAsmView::Functions,
+        );
+        assert_eq!(ade::ade_disasm_count(not_code), 0);
+        assert!(ade::ade_disasm_refusal(not_code).len > 0);
+        ade::ade_disasm_free(not_code);
+        // Boot code has no hunks to rebuild; and a blank disk's has none.
+        let boot_source = ade::ade_disasm_bootblock_view(image, ade::AdeAsmView::Source);
+        assert!(ade::ade_disasm_refusal(boot_source).len > 0);
+        ade::ade_disasm_free(boot_source);
+
         ade::ade_image_free(image);
     }
     let _ = std::fs::remove_file(&path);

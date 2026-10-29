@@ -14,12 +14,17 @@
 //!   wrong place yields plausible nonsense, and only the person asking knows
 //!   whether this is code.
 //!
+//! On the first two, what [`crate::flow`]'s walks find is shown too (D-021):
+//! a heading at each function, and each library call whose base the code
+//! proves named by what it calls.
+//!
 //! Bounded (D-006): a listing stops at [`MAX_LINES`] and says so.
 
 use std::collections::HashMap;
 
+use crate::flow::Place;
 use crate::hunk::{self, Executable, Hunk, Kind, Memory};
-use crate::m68k::{Decoded, decode};
+use crate::m68k::{Decoded, Names, Operand, decode};
 
 /// Lines a listing may hold before it stops: about a megabyte of code.
 pub const MAX_LINES: usize = 400_000;
@@ -312,7 +317,83 @@ pub fn executable(bytes: &[u8]) -> Option<Listing> {
             break;
         }
     }
+    if let Some(a) = crate::flow::executable(bytes) {
+        annotate(&mut out, &a, |(k, at)| {
+            let h = exe.hunks.get(k)?;
+            Some((h.file_offset as u64).saturating_add(u64::from(at)))
+        });
+    }
     Some(out)
+}
+
+/// What the walks of [`crate::flow`] found, put on the listing: a heading at
+/// each function, and each proved library call named — in the text, as
+/// `jsr _LVOOpenLibrary(a6)`, because which function a call reaches is a
+/// fact about the code, not an explanation to be switched off. `offset`
+/// turns a place into the offset the listing's lines carry.
+fn annotate(out: &mut Listing, a: &crate::flow::Analysis, offset: impl Fn(Place) -> Option<u64>) {
+    let calls: HashMap<u64, &crate::flow::LibraryCall> = a
+        .library_calls
+        .iter()
+        .filter_map(|c| Some((offset(c.at)?, c)))
+        .collect();
+    let functions: HashMap<u64, &crate::flow::Function> = a
+        .functions
+        .iter()
+        .filter_map(|f| Some((offset(f.start)?, f)))
+        .collect();
+    let old = std::mem::take(&mut out.lines);
+    let mut lines = Vec::with_capacity(old.len().saturating_add(functions.len()));
+    for (n, mut line) in old.iter().cloned().enumerate() {
+        // A function's heading goes above its label, or above the
+        // instruction itself where it has none.
+        let starts = match line.kind {
+            LineKind::Label => old.get(n.saturating_add(1)).and_then(|l| l.offset),
+            LineKind::Code
+                if n == 0
+                    || old
+                        .get(n.wrapping_sub(1))
+                        .is_none_or(|p| p.kind != LineKind::Label) =>
+            {
+                line.offset
+            }
+            _ => None,
+        };
+        if let Some(f) = starts.and_then(|o| functions.get(&o)) {
+            let callers = f.callers.len();
+            let what = match (f.entry, callers) {
+                (true, _) => "the program starts here".to_owned(),
+                (false, 1) => "called from 1 place".to_owned(),
+                (false, n) => format!("called from {n} places"),
+            };
+            let name = f
+                .name
+                .as_deref()
+                .map(|n| format!(" {n}"))
+                .unwrap_or_default();
+            lines.push(Line {
+                kind: LineKind::Note,
+                offset: None,
+                length: 0,
+                text: format!("; ---- function{name}: {what}"),
+                comment: None,
+            });
+        }
+        if line.kind == LineKind::Code
+            && let Some(c) = line.offset.and_then(|o| calls.get(&o))
+        {
+            let shown = Operand::Disp(c.offset, 6).motorola(&Names::NONE);
+            if let Some(f) = c.function
+                && let Some(at) = line.text.rfind(&shown)
+            {
+                line.text
+                    .replace_range(at..at.saturating_add(shown.len()), &format!("_LVO{f}(a6)"));
+            }
+            line.comment = Some(format!("call {}", c.describe()));
+        }
+        lines.push(line);
+    }
+    out.lines = lines;
 }
 
 fn hunk_listing(out: &mut Listing, bytes: &[u8], h: &Hunk) {
@@ -385,6 +466,10 @@ pub fn bootblock(boot: &[u8]) -> Listing {
         &HashMap::new(),
         &HashMap::new(),
     );
+    // A bootblock's places are its own offsets.
+    annotate(&mut out, &crate::flow::bootblock(boot), |(_, at)| {
+        Some(u64::from(at))
+    });
     out
 }
 

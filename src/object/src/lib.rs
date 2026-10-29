@@ -22,7 +22,9 @@ pub mod explain;
     reason = "a test module over every opcode word"
 )]
 mod explain_audit;
+pub mod export;
 pub mod find;
+pub mod flow;
 pub mod font;
 pub mod ftxt;
 pub mod hardware;
@@ -32,6 +34,7 @@ pub mod iffprefs;
 pub mod ilbm;
 pub mod keymap;
 pub mod listing;
+pub mod lvo;
 pub mod m68k;
 pub mod prefs;
 pub mod printer;

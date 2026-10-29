@@ -255,6 +255,10 @@ private:
     void refreshAssembly();
     // Lay out the listing already decoded, with or without its explanations.
     void renderAssembly();
+    /// The selection's listing, or the view `view` names (-1: the
+    /// listing); `what` is set to what it is of, `why` to why there is none.
+    ade::Disassembly assemblyFor(int view, QString &what, QString &why) const;
+    void saveAssembly();
     // Fill the Decoded view for the selection, if it is showing and stale.
     void refreshDecoded();
     // Fill whichever of the hex and text panes is showing and not yet filled
@@ -327,6 +331,9 @@ private:
     QLabel *m_asmStatus = nullptr;
     QPushButton *m_asmRaw = nullptr;
     QCheckBox *m_asmExplain = nullptr;
+    /// Which view: the listing, or one beside it (D-021).
+    QComboBox *m_asmShow = nullptr;
+    QPushButton *m_asmSave = nullptr;
     /// The listing on screen, kept so the explanations can be shown or
     /// hidden without decoding again.
     ade::Disassembly m_asmShown;

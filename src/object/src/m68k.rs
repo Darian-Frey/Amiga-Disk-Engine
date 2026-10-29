@@ -926,7 +926,8 @@ pub(crate) fn a_name(reg: u8) -> String {
 
 /// A number the way an Amiga assembler listing writes it: small ones in
 /// decimal, anything else in hex with a `$`.
-pub(crate) fn number(value: i64) -> String {
+#[must_use]
+pub fn number(value: i64) -> String {
     if (-9..=9).contains(&value) {
         value.to_string()
     } else if value < 0 {

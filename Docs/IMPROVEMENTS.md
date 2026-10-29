@@ -11,7 +11,18 @@ Effort vocabulary: trivial | small | medium | large.
 
 ## Suggested
 
-_None._
+### IMP-020 The export is written in Devpac's syntax, and has been assembled only by GNU `as`
+**Status:** suggested
+**Effort:** small
+**Found:** 2026-10-29, building F-036's export.
+
+**Where:** [src/object/src/export.rs](../src/object/src/export.rs) and its corpus test, [src/api/tests/export.rs](../src/api/tests/export.rs).
+
+**What it does.** `ade disasm --export` writes a `SECTION` per hunk typed `CODE`, `DATA` or `BSS` with `_C` or `_F` for chip or fast memory, `dc`/`ds`, `equ`, labels with colons and `$` hex — Devpac's dialect, which an Amiga programmer would reach for. The round trip that proves it rebuilds the program uses GNU `as` in MRI mode, because that is the assembler installed, and drops each `SECTION`'s type first, since MRI mode refuses `SECTION name,CODE`. So the bytes are checked on every corpus program, but nothing has checked that Devpac or vasm accept the source as written, nor that they make the same choices as GNU `as` — whether vasm shortens `move.l #1,d0` to `moveq` by default, aligns a `dc.l`, or reads `0(a0)` as `(a0)`. A rule GNU `as` did not need could be one vasm does.
+
+**What would be better.** The same round trip with `vasmm68k_mot -Fhunk -devpac`, linking nothing — vasm writes an Amiga executable directly — and comparing its hunks with the original's. That also checks the section types and memory flags, which the GNU round trip cannot see.
+
+**Trade-offs.** vasm is a new test-only tool to install, as objdump and GNU `as` are (D-002's bargain; neither is linked). Its optimisations are switched by options (`-no-opt`, `-opt-*`), so the test would fix the options it runs with, and the export's header would name them — a user with other options could get other bytes. Devpac itself runs only on an Amiga or under an emulator, and is not a candidate for an automated test.
 
 ## Applied
 

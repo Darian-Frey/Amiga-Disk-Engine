@@ -563,6 +563,24 @@ AdeResult  ade_disasm_line(const AdeDisasm *listing, size_t index, AdeAsmLine *o
 AdeBytes   ade_disasm_refusal(const AdeDisasm *listing);
 void       ade_disasm_free(AdeDisasm *listing);
 
+/* The views beside the listing (D-021), found by following the code from
+ * where it starts. Each comes back as a listing handle whose lines are the
+ * view's text, none standing for bytes; read and free it as above. A library
+ * call is named only where the code proves which library's base it calls
+ * through. ADE_ASM_SOURCE assembles back to the program's own bytes, and is
+ * for executables only: the boot code refuses it. */
+typedef enum {
+    ADE_ASM_FUNCTIONS      = 0, /* each function: size, callers, calls      */
+    ADE_ASM_REFERENCES     = 1, /* each place referred to, and from where   */
+    ADE_ASM_CALL_GRAPH     = 2, /* who calls whom, as an indented tree      */
+    ADE_ASM_CALL_GRAPH_DOT = 3, /* the same, for Graphviz                   */
+    ADE_ASM_SOURCE         = 4  /* source that assembles back to the bytes  */
+} AdeAsmView;
+
+AdeDisasm *ade_disasm_view(const AdeImage *image, uint32_t partition, uint32_t block,
+                           AdeAsmView view);
+AdeDisasm *ade_disasm_bootblock_view(const AdeImage *image, AdeAsmView view);
+
 /* --- Decoded files (F-033) ----------------------------------------------
  *
  * What a file says, in words: labelled fields in groups, and a picture when

@@ -509,7 +509,7 @@ fn fuzz_the_executable_parser_and_listing() {
     // hunk sizes, relocation counts, symbol name lengths. Each must be bounded
     // by what the file holds, and a listing must stay within its line cap
     // whatever the counts claim.
-    use ade_core::layers::object::{hunk, listing};
+    use ade_core::layers::object::{export, flow, hunk, listing};
     let mut rng = Rng::new(0x5EED_0F32);
     let put = |v: &mut Vec<u8>, x: u32| {
         v.extend_from_slice(&[(x >> 24) as u8, (x >> 16) as u8, (x >> 8) as u8, x as u8]);
@@ -563,6 +563,14 @@ fn fuzz_the_executable_parser_and_listing() {
             }
             let _ = listing::raw(&buf);
             let _ = listing::bootblock(&buf);
+            // The walks and the export read the same bytes (D-021).
+            if let Some(a) = flow::executable(&buf) {
+                for c in &a.library_calls {
+                    let _ = c.describe();
+                }
+            }
+            let _ = flow::bootblock(&buf);
+            let _ = export::executable(&buf);
         });
     }
 }

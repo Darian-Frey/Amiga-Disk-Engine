@@ -104,6 +104,7 @@ private slots:
     void aRefusedCopySaysWhyAndKeepsTheRest();
     void aPartitionOfAHardDiskIsNotWrittenInto();
     void aProgramShowsItsCodeInTheAssemblyView();
+    void theViewsBesideTheListingFollowTheCode();
     void oneDropIsOneUndo();
     void saveOnAnOpenedDiskAsksThenKeepsTheOriginal();
     void aDiskMadeHereSavesWithoutAskingOrBackup();
@@ -2294,6 +2295,57 @@ void TestMainWindow::aProgramShowsItsCodeInTheAssemblyView() {
     QVERIFY(plain.contains(QStringLiteral("moveq   #0,d0")));
     explain->setChecked(true);
     QVERIFY(view->toPlainText().contains(QStringLiteral("; d0 = 0")));
+}
+
+// The views beside the listing (D-021).
+void TestMainWindow::theViewsBesideTheListingFollowTheCode() {
+    QTemporaryDir dir;
+    const QString disk = blankDisk(dir, QStringLiteral("blank.adf"));
+    const QString host = dir.filePath(QStringLiteral("Hello"));
+    writeFile(host, program());
+    MainWindow window;
+    window.openImage(disk);
+    QCOMPARE(window.addFiles(browser(window)->topLevelItem(0), {host}), 1);
+    QTreeWidgetItem *row = childNamed(browser(window)->topLevelItem(0), QStringLiteral("Hello"));
+    QVERIFY(row);
+    QPlainTextEdit *view = showAssembly(window, row);
+    QVERIFY(view);
+    auto *show = window.findChild<QComboBox *>(QStringLiteral("assemblyShow"));
+    auto *explain = window.findChild<QCheckBox *>(QStringLiteral("assemblyExplain"));
+    auto *save = window.findChild<QPushButton *>(QStringLiteral("assemblySave"));
+    QVERIFY(show && explain && save);
+    QVERIFY(save->isEnabled());
+    const auto pick = [show](const QString &name) {
+        show->setCurrentIndex(show->findText(name));
+    };
+
+    pick(QStringLiteral("Functions"));
+    QVERIFY2(view->toPlainText().contains(QStringLiteral("h0_0000 (entry)")),
+             qPrintable(view->toPlainText()));
+    // The explanations belong to the listing.
+    QVERIFY(!explain->isEnabled());
+    QVERIFY2(assemblyStatus(window).contains(QStringLiteral("functions")),
+             qPrintable(assemblyStatus(window)));
+
+    pick(QStringLiteral("Source"));
+    const QString source = view->toPlainText();
+    QVERIFY2(source.contains(QStringLiteral("SECTION\thunk0,CODE")) &&
+                 source.contains(QStringLiteral("moveq   #0,d0")),
+             qPrintable(source));
+
+    pick(QStringLiteral("Call graph"));
+    QVERIFY(view->toPlainText().contains(QStringLiteral("h0_0000 (entry)")));
+
+    // The disk's boot code has no source: it is not a program file.
+    showAssembly(window, browser(window)->topLevelItem(0));
+    pick(QStringLiteral("Source"));
+    QVERIFY(view->toPlainText().isEmpty());
+    QVERIFY(!save->isEnabled());
+
+    pick(QStringLiteral("Listing"));
+    showAssembly(window, row);
+    QVERIFY(explain->isEnabled());
+    QVERIFY(view->toPlainText().contains(QStringLiteral("moveq   #0,d0")));
 }
 
 void TestMainWindow::aFileThatIsNotAProgramSaysWhyAndCanBeDecodedAnyway() {

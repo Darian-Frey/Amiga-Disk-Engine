@@ -662,6 +662,43 @@ And one where ADE stays strict while objdump does not: **an index extension with
 
 GNU objdump `-D -z -b binary -m m68k:68000`. `-z` matters: without it objdump silently skips runs of zero bytes, which reads as instructions missing. Words it decodes that a 68000 does not have, and so excluded from comparison: line F (coprocessor), `4AFC`/`4AFD` followed by a word (SVR4's `swbeg`), `SUBQ.B` to an address register (the manual allows word and long only; objdump accepts it for SUBQ and not ADDQ), and the full-format index words above. Its formatting quirks — an 8-bit index displacement in bare hex sign-extended to 64 bits, immediates signed at the instruction's size, register ranges running from `d7` into `a0` — are reproduced by `Instruction::gnu` for the comparison and nowhere else.
 
+### Following the code (D-021)
+
+*For F-036.* A walk starts at byte 0 of hunk 0, where the loader starts a program, or at byte 12 of a bootblock with `a6` = ExecBase, where AmigaDOS enters boot code. It follows `bra`, `Bcc`, `DBcc`, `jmp` and `jsr`/`bsr` wherever the instruction states the target — a branch displacement, a PC-relative operand, or an absolute long the hunk's relocations say points into a hunk. A call target starts a function. A walk stops at `rts`, `rte`, `rtr`, `illegal`, a jump, a word that is not a 68000 instruction, or the end of the hunk's bytes, and counts every call or jump through a register or memory.
+
+**Registers.** Each holds *unknown*, *the base of library L*, or *the address of a place in the program*. Set by: `move.l`/`movea.l` from `($4).w` or an unrelocated `($4).l` (exec); a long move from another register (a copy); `lea` of a PC-relative operand or a relocated absolute, and `move.l #` of a relocated immediate (an address); `exg` (a swap). Cleared by any other write: a destination register, `(an)+` and `-(an)`, every register a `movem` loads, a `DBcc`'s counter, `link`/`unlk`, `trap`. A library call — `jsr d16(a6)` with a6 a known base — clears `d0`, `d1`, `a0` and `a1` only, the system's scratch registers; after exec's `OpenLibrary` (−552) or `OldOpenLibrary` (−408) with `a1` the address of a NUL-ended name the table knows, `d0` is that library's base. A call into the program clears everything. Where paths meet, a register keeps its value only if every path agrees.
+
+### Library vector offsets
+
+A call is `jsr -offset(a6)`, six bytes a slot back from the base: slot *n* is offset −6*n*, slots 1–4 being Open, Close, Expunge and a reserved one. AROS's library descriptions give each function's slot twice, and the table holds 895 functions in 18 libraries on which both agree:
+
+- **The `.conf` function list.** One function per line, in slot order. Lists that begin with the library's own `open`/`OpenLib` count from slot 1; the rest start at slot 5. `.skip N` skips *N* slots; `.version V` applies to the functions after it; `.private` marks the function before it. **A blank line is a reserved slot** — genmodule reads it so, and three libraries (iffparse, locale, commodities) put one in their lists; a reader that skips blank lines puts every later function one slot early. The text after `##begin functionlist` on its own line is not a slot.
+- **The C source.** Each function's `AROS_LH` header ends `…, LibBase, slot, Lib)`. Preprocessor lines must be skipped: a file that defines its own `AROS_LH1` macro would otherwise match first.
+
+Left out: functions at version 50 and later, which are AROS's or MorphOS's, and the slots AROS marks private — except exec's `ExitIntr` (−36), `Schedule` (−42), `Switch` (−54), `Dispatch` (−60) and `StackSwap` (−732), which are AmigaOS's own names for those slots. Locale's private slots (−186 to −234) are AROS's internals and stay out.
+
+**Over the corpus, 2026-10-29:** 118,397 calls through a base the code proves, in 39,363 programs; 118,396 at a slot the table names, and the other is intuition's −30, which AmigaOS keeps private. Nearly all are exec's — 2,431 are dos's and 316 intuition's — because a base kept in a variable is not followed. Of 11,640 names `a1` pointed at for `OpenLibrary`, 11,634 are a library's; the other six, an empty buffer and a scrambled one, are filled in when the program runs, and name no library, so no base is taken from them. A call *above* a base, `jsr $3c(a6)`, reaches the library's data and is not a library call: 28 such, all from walks that had followed a branch into data, were named until that was ruled out.
+
+### Source that rebuilds the program (D-021)
+
+*For F-036.* The oracle is GNU `as` in MRI mode — `m68k-linux-gnu-as -M -m68000 --register-prefix-optional` — with each output section linked at address 0 (`--no-check-sections`, an `ld` script placing `hunkN` at 0) and taken out with `objcopy -O binary -j hunkN --set-section-flags hunkN=alloc,load,contents`: an MRI section carries no flags, and objcopy writes only what would be loaded. `SECTION name,CODE` is refused in MRI mode, so the type is dropped for the check; it decides where a loader puts a hunk, not its bytes.
+
+What an assembler writes differently from what a program holds, each found by the round trip and each written as `dc.w` with the instruction as a comment:
+
+| in the program | the assembler writes |
+|---|---|
+| `move.l #n,dn`, −128 ≤ n ≤ 127 | `moveq` |
+| `add`, `sub`, `cmp`, `and`, `or` of an immediate | the `-i` form, or `addq`/`subq` for 1–8 (`adda` and `suba` are kept) |
+| `0(an)` | `(an)`, a word shorter |
+| a byte immediate, bit number or CCR byte whose word's high byte is not 0 | 0 there — the 68000 ignores it, no source can set it |
+| a scaled index (`d0.w*4`) | an error: a 68020 mode |
+| a relocated `jsr name` in the same section | `jsr name(pc)`: written `(name).l` |
+| `dc.w`/`dc.l` at an odd offset | aligned to even |
+
+A label at an offset no line starts — inside a relocated long, past the hunk's bytes, before its start — is an `equ` from the hunk's first label, negative when the offset is past 2³¹. A branch to an odd address faults on a 68000 and is data. A relocation into a hunk the file does not have, or at an odd offset, cannot be a `dc.l` and is written as its number.
+
+**Over the corpus, 2026-10-29:** all 39,363 programs exported and assembled back to their own bytes, every hunk; 106,928,175 instructions written as instructions and 8,949,029 as words.
+
 ## Links
 
 Hard links are FFS-only and chain through `next_link`. Soft links were broken and support was removed in AmigaDOS 3.0. [FAQ §4.6]

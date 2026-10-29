@@ -193,6 +193,11 @@ int main(int argc, char **argv) {
             check(ade_disasm_line(guess, ade_disasm_count(guess), &line) == ADE_NOT_FOUND,
                   "past the end is NOT_FOUND");
             ade_disasm_free(guess);
+            /* The views beside the listing (D-021) refuse what is not code. */
+            AdeDisasm *view = ade_disasm_view(image, ADE_WHOLE_IMAGE, file_block, ADE_ASM_FUNCTIONS);
+            check(view && ade_disasm_count(view) == 0 && ade_disasm_refusal(view).len > 0,
+                  "a view of a file that is not a program says why");
+            ade_disasm_free(view);
 
             /* Decoded files (F-033): the fixture has no Preferences, so the
                answer is a reason, with no fields and no picture. */
@@ -237,6 +242,10 @@ int main(int argc, char **argv) {
         AdeDisasm *boot = ade_disasm_bootblock(image);
         check(boot != NULL && ade_disasm_count(boot) > 0, "the bootblock lists");
         ade_disasm_free(boot);
+        AdeDisasm *boot_source = ade_disasm_bootblock_view(image, ADE_ASM_SOURCE);
+        check(boot_source && ade_disasm_refusal(boot_source).len > 0,
+              "boot code has no source to rebuild it from");
+        ade_disasm_free(boot_source);
         ade_listing_free(listing);
     }
 

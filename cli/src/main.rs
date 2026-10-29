@@ -185,6 +185,36 @@ struct Args {
     /// called `.adf`: the format has no distinct one, and inventing a
     /// convention would be presumptuous.
     raw: bool,
+    /// `disasm` shows one of the views beside the listing (D-021).
+    view: Option<ade_core::disasm::View>,
+}
+
+/// The `disasm` view a flag asks for (D-021).
+fn view_flag(arg: &str) -> Option<ade_core::disasm::View> {
+    use ade_core::disasm::View;
+    match arg {
+        "--export" => Some(View::Source),
+        "--functions" => Some(View::Functions),
+        "--xrefs" => Some(View::References),
+        "--call-graph" => Some(View::CallGraph),
+        "--call-graph=dot" => Some(View::CallGraphDot),
+        _ => None,
+    }
+}
+
+/// Take `arg` as a `disasm` view if it is one; `Ok(false)` if it is not.
+///
+/// # Errors
+/// A second, different view: `disasm` shows one at a time.
+fn take_view(arg: &str, view: &mut Option<ade_core::disasm::View>) -> Result<bool, String> {
+    let Some(wanted) = view_flag(arg) else {
+        return Ok(false);
+    };
+    if view.is_some_and(|v| v != wanted) {
+        return Err("disasm shows one view at a time".to_owned());
+    }
+    *view = Some(wanted);
+    Ok(true)
 }
 
 fn parse_args(raw: Vec<String>) -> Result<Args, String> {
@@ -208,7 +238,11 @@ fn parse_args(raw: Vec<String>) -> Result<Args, String> {
     let mut raw_output = false;
     let mut output: Option<PathBuf> = None;
     let mut datfiles: Option<PathBuf> = None;
+    let mut view: Option<ade_core::disasm::View> = None;
     for arg in raw {
+        if take_view(&arg, &mut view)? {
+            continue;
+        }
         match arg.as_str() {
             "--raw" => raw_output = true,
             "--hash" => hash = true,
@@ -282,6 +316,7 @@ fn parse_args(raw: Vec<String>) -> Result<Args, String> {
         raw: raw_output,
         output,
         datfiles,
+        view,
     })
 }
 
@@ -438,6 +473,10 @@ fn usage() {
         "    --partition=P   which partition of a hard disk, by name (DH0) or index (0)".to_owned(),
         "    --raw           convert writes raw MFM tracks (an extended ADF)".to_owned(),
         "                    disasm decodes a file that is not a program, as a guess".to_owned(),
+        "    --functions     disasm: the functions found by following the code (D-021)".to_owned(),
+        "    --xrefs         disasm: every place the code refers to, and from where".to_owned(),
+        "    --call-graph    disasm: who calls whom; --call-graph=dot for Graphviz".to_owned(),
+        "    --export        disasm: source that assembles back to the program".to_owned(),
         "    --hash          include SHA-1 content hashes (not free; see VOCABULARY.md)".to_owned(),
         "    --name=NAME     create: the volume name (default \"Empty\"); format: a new one"
             .to_owned(),
@@ -799,6 +838,12 @@ fn disasm(args: &Args) -> ExitCode {
         eprintln!("ade: disasm has no JSON output; it reports in text only");
         return ExitCode::from(EXIT_USAGE);
     }
+    // A view follows the code from where it starts, which a guess at where
+    // code is cannot give it.
+    if raw && args.view.is_some() {
+        eprintln!("ade: --raw lists bytes as a guess; the other views need a program or boot code");
+        return ExitCode::from(EXIT_USAGE);
+    }
     let image = match Image::open(path) {
         Ok(i) => i,
         Err(e) => {
@@ -807,7 +852,10 @@ fn disasm(args: &Args) -> ExitCode {
         }
     };
     let listing = match inner {
-        None => disasm::bootblock(&image),
+        None => match args.view {
+            Some(view) => disasm::bootblock_view(&image, view),
+            None => disasm::bootblock(&image).map(|l| listing_lines(&l)),
+        },
         Some(inner) => {
             let window = match select_partition(&image, partition) {
                 Ok(w) => w,
@@ -834,12 +882,15 @@ fn disasm(args: &Args) -> ExitCode {
                     return ExitCode::from(EXIT_FAULTS);
                 }
             };
-            disasm::file(&bytes, if raw { Mode::Raw } else { Mode::Auto })
+            match args.view {
+                Some(view) => disasm::file_view(&bytes, view),
+                None => disasm::file(&bytes, if raw { Mode::Raw } else { Mode::Auto })
+                    .map(|l| listing_lines(&l)),
+            }
         }
     };
     match listing {
-        Ok(l) => {
-            let lines: Vec<String> = l.lines.iter().map(disasm::Line::with_comment).collect();
+        Ok(lines) => {
             emit_lines(&mut std::io::stdout().lock(), &lines);
             ExitCode::from(EXIT_CLEAN)
         }
@@ -851,6 +902,14 @@ fn disasm(args: &Args) -> ExitCode {
             ExitCode::from(EXIT_FAULTS)
         }
     }
+}
+
+/// A listing's lines, each with its explanation.
+fn listing_lines(l: &ade_core::disasm::Listing) -> Vec<String> {
+    l.lines
+        .iter()
+        .map(ade_core::disasm::Line::with_comment)
+        .collect()
 }
 
 /// `ade decode`: what a file says, in words (F-033).
