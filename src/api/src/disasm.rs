@@ -98,7 +98,7 @@ pub fn place_name((k, at): Place) -> String {
 /// The executable's code walked, for the views.
 ///
 /// # Errors
-/// [`NotCode`] as [`file`] gives it in [`Mode::Auto`].
+/// [`NotCode`] as [`file()`] gives it in [`Mode::Auto`].
 pub fn analysis(bytes: &[u8]) -> Result<Analysis, NotCode> {
     file(bytes, Mode::Auto)?;
     ade_object::flow::executable(bytes)
