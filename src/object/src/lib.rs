@@ -6,6 +6,9 @@
 //! Content signatures (F-020) live here: recognising what bytes *are*, as
 //! distinct from what a directory entry calls them.
 
+pub mod anim;
+pub mod catalog;
+pub mod datatype;
 pub mod decoded;
 pub mod explain;
 #[cfg(test)]
@@ -21,14 +24,18 @@ pub mod explain;
 mod explain_audit;
 pub mod find;
 pub mod font;
+pub mod ftxt;
 pub mod hardware;
 pub mod hunk;
 pub mod icon;
+pub mod iffprefs;
 pub mod ilbm;
 pub mod keymap;
 pub mod listing;
 pub mod m68k;
 pub mod prefs;
+pub mod printer;
 pub mod signature;
+pub mod smus;
 pub mod svx;
 pub mod tracker;

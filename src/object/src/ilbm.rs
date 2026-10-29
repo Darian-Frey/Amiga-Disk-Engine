@@ -19,6 +19,12 @@
 //! hardware differ, ADE takes the hardware: a hold-and-modify line starts
 //! from colour 0, the background, where AROS starts from black.
 //!
+//! An ACBM — "Amiga contiguous bitmap", AmigaBASIC's and some games'
+//! form — is the same picture with its planes stored whole, one after
+//! another, uncompressed, in an `ABIT` chunk where an ILBM has `BODY`. AROS
+//! does not read it; ffmpeg does, and the corpus test compares every pixel
+//! with ffmpeg's. ADE lays an `ABIT` out as rows and draws it as an ILBM.
+//!
 //! SPEC §IFF ILBM has the table.
 
 use ade_endian::{i16_at, u8_at, u16_at, u32_at};
@@ -37,7 +43,7 @@ const HAM: u32 = 1 << 11;
 const HIRES: u32 = 1 << 15;
 
 /// `bmh_Masking`: a mask plane follows each row's bitplanes.
-const MASK_PLANE: u8 = 1;
+pub(crate) const MASK_PLANE: u8 = 1;
 
 /// A decoded picture.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -76,6 +82,10 @@ pub struct Ilbm {
     /// Bytes of `BODY` left after the last row, which a sound encoder never
     /// leaves.
     pub body_left: usize,
+    /// Whether it is an ACBM: its planes whole, in `ABIT`.
+    pub contiguous: bool,
+    /// Bytes an ACBM's `ABIT` is short of its planes, drawn as zero.
+    pub missing: usize,
 }
 
 /// Why bytes are not a picture ADE can draw.
@@ -88,10 +98,10 @@ impl core::fmt::Display for NotAPicture {
     }
 }
 
-/// Whether `bytes` start like an IFF ILBM.
+/// Whether `bytes` start like an IFF ILBM, or an ACBM.
 #[must_use]
 pub fn is_ilbm(bytes: &[u8]) -> bool {
-    bytes.get(0..4) == Some(b"FORM") && bytes.get(8..12) == Some(b"ILBM")
+    bytes.get(0..4) == Some(b"FORM") && matches!(bytes.get(8..12), Some(b"ILBM" | b"ACBM"))
 }
 
 fn fail(why: impl Into<String>) -> NotAPicture {
@@ -99,12 +109,16 @@ fn fail(why: impl Into<String>) -> NotAPicture {
 }
 
 /// A chunk: its ID and its bytes.
-type Chunk<'a> = ([u8; 4], &'a [u8]);
+pub(crate) type Chunk<'a> = ([u8; 4], &'a [u8]);
 
 /// The chunks of a `FORM`.
-fn chunks(bytes: &[u8]) -> Result<Vec<Chunk<'_>>, NotAPicture> {
+pub(crate) fn chunks(bytes: &[u8]) -> Result<Vec<Chunk<'_>>, NotAPicture> {
     let declared = u32_at(bytes, 4).map_err(|_| fail("the FORM header is cut short"))? as usize;
-    // A FORM may claim more than the file holds; read what is there.
+    // A FORM may claim more than the file holds; read what is there. It may
+    // also claim less: the chunks are found within the length it states,
+    // but each is read to its own length, as far as the file goes, as ffmpeg
+    // reads it — *Thromulus*'s screens and *Italy '90 Soccer*'s pictures
+    // state a FORM 28 to 116 bytes short of the chunks inside it (BUG-019).
     let end = declared.saturating_add(8).min(bytes.len());
     let mut at = 12usize;
     let mut out = Vec::new();
@@ -114,7 +128,7 @@ fn chunks(bytes: &[u8]) -> Result<Vec<Chunk<'_>>, NotAPicture> {
         let len = u32_at(bytes, at.saturating_add(4)).unwrap_or(0) as usize;
         let start = at.saturating_add(8);
         let stop = start.saturating_add(len);
-        let Some(data) = bytes.get(start..stop.min(end)) else {
+        let Some(data) = bytes.get(start..stop.min(bytes.len())) else {
             break;
         };
         out.push((id, data));
@@ -163,6 +177,7 @@ pub fn parse(bytes: &[u8]) -> Result<Ilbm, NotAPicture> {
     if !is_ilbm(bytes) {
         return Err(fail("an ILBM starts with FORM, a length, and ILBM"));
     }
+    let contiguous = bytes.get(8..12) == Some(b"ACBM");
     let chunks = chunks(bytes)?;
     let find = |id: &[u8; 4]| chunks.iter().find(|(c, _)| c == id).map(|(_, d)| *d);
     let bmhd = find(b"BMHD").ok_or_else(|| fail("it has no BMHD, so its size is unknown"))?;
@@ -196,8 +211,11 @@ pub fn parse(bytes: &[u8]) -> Result<Ilbm, NotAPicture> {
         argb: Vec::new(),
         other_chunks: other(&chunks),
         body_left: 0,
+        contiguous,
+        missing: 0,
     };
-    if cmap.is_some() && (find(b"BODY").is_none() || width == 0 || height == 0 || depth == 0) {
+    let pixels = if contiguous { b"ABIT" } else { b"BODY" };
+    if cmap.is_some() && (find(pixels).is_none() || width == 0 || height == 0 || depth == 0) {
         return Ok(picture);
     }
     if width == 0 || height == 0 || width > MAX_SIDE || height > MAX_SIDE {
@@ -205,7 +223,7 @@ pub fn parse(bytes: &[u8]) -> Result<Ilbm, NotAPicture> {
             "{width} × {height} pixels is not a picture ADE draws"
         )));
     }
-    if compression > 1 {
+    if compression > 1 && !contiguous {
         return Err(fail(format!(
             "compression {compression}; ADE reads none (0) and ByteRun1 (1)"
         )));
@@ -220,15 +238,26 @@ pub fn parse(bytes: &[u8]) -> Result<Ilbm, NotAPicture> {
     if depth != 24 && colours.is_empty() {
         return Err(fail("it has no CMAP, so its colours are unknown"));
     }
-    let ham = mode.is_some_and(|m| m & HAM != 0) && (depth == 6 || depth == 8);
-    let ehb = mode.is_some_and(|m| m & EXTRA_HALFBRITE != 0) && !ham;
+    let (ham, ehb) = picture.modes();
 
-    let body = find(b"BODY").ok_or_else(|| fail("it has no BODY, so no pixels"))?;
+    let rows;
+    let body = if contiguous {
+        // An ACBM's planes are never compressed, whatever its header says:
+        // two corpus files claim ByteRun1 over an ABIT exactly the size of
+        // its planes uncompressed, and ffmpeg reads them so too.
+        let abit = find(b"ABIT").ok_or_else(|| fail("it has no ABIT, so no pixels"))?;
+        let (laid_out, missing) = interleave(abit, (width, height, depth), masking == MASK_PLANE)?;
+        rows = laid_out;
+        picture.missing = missing;
+        rows.as_slice()
+    } else {
+        find(b"BODY").ok_or_else(|| fail("it has no BODY, so no pixels"))?
+    };
     let (argb, used) = draw(
         body,
         (width, height, depth),
         masking == MASK_PLANE,
-        compression == 1,
+        compression == 1 && !contiguous,
         (ham, ehb),
         colours,
     )?;
@@ -239,15 +268,70 @@ pub fn parse(bytes: &[u8]) -> Result<Ilbm, NotAPicture> {
     Ok(picture)
 }
 
+/// An ACBM's `ABIT` — each plane whole, then the next — as the rows an ILBM
+/// `BODY` holds, every plane of a row in turn, with how many bytes were
+/// missing and drawn as zero.
+///
+/// A short `ABIT` is drawn when what is missing lies within the last plane
+/// and is at most half the picture: *Thromulus* stores its screens 116 bytes
+/// short, and ffmpeg draws them so too. Anything shorter is refused before
+/// it is allocated (D-006).
+fn interleave(
+    abit: &[u8],
+    (width, height, depth): (usize, usize, u8),
+    mask_plane: bool,
+) -> Result<(Vec<u8>, usize), NotAPicture> {
+    let row_bytes = width.div_ceil(16).saturating_mul(2);
+    let planes = usize::from(depth).saturating_add(usize::from(mask_plane));
+    let plane_bytes = row_bytes.saturating_mul(height);
+    let total = plane_bytes.saturating_mul(planes);
+    let missing = total.saturating_sub(abit.len());
+    if missing > plane_bytes || missing > total / 2 {
+        return Err(fail(format!(
+            "its ABIT of {} bytes cannot hold {width} × {height} in {planes} planes",
+            abit.len()
+        )));
+    }
+    let mut rows = Vec::with_capacity(total);
+    for y in 0..height {
+        for p in 0..planes {
+            let at = p
+                .saturating_mul(plane_bytes)
+                .saturating_add(y.saturating_mul(row_bytes));
+            let have = abit.get(at.min(abit.len())..at.saturating_add(row_bytes).min(abit.len()));
+            let have = have.unwrap_or(&[]);
+            rows.extend_from_slice(have);
+            rows.resize(
+                rows.len()
+                    .saturating_add(row_bytes.saturating_sub(have.len())),
+                0,
+            );
+        }
+    }
+    Ok((rows, missing))
+}
+
 /// The pixels a `BODY` holds, and how many of its bytes they used.
 fn draw(
+    body: &[u8],
+    dims: (usize, usize, u8),
+    mask_plane: bool,
+    byterun: bool,
+    modes: (bool, bool),
+    colours: &[u32],
+) -> Result<(Vec<u32>, usize), NotAPicture> {
+    let (rows, used) = unpack(body, dims, mask_plane, byterun)?;
+    Ok((render(&rows, dims, mask_plane, modes, colours), used))
+}
+
+/// A `BODY` unpacked into its rows — each row every plane in turn, the mask
+/// plane last where there is one — and how many of its bytes they used.
+pub(crate) fn unpack(
     body: &[u8],
     (width, height, depth): (usize, usize, u8),
     mask_plane: bool,
     byterun: bool,
-    (ham, ehb): (bool, bool),
-    colours: &[u32],
-) -> Result<(Vec<u32>, usize), NotAPicture> {
+) -> Result<(Vec<u8>, usize), NotAPicture> {
     let row_bytes = width.div_ceil(16).saturating_mul(2);
     let planes = usize::from(depth).saturating_add(usize::from(mask_plane));
     let row_len = row_bytes.saturating_mul(planes);
@@ -266,12 +350,11 @@ fn draw(
             body.len()
         )));
     }
-    let mut row = vec![0u8; row_len];
+    let mut rows = vec![0u8; row_len.saturating_mul(height)];
     let mut at = 0usize;
-    let mut argb = Vec::with_capacity(width.saturating_mul(height));
-    for y in 0..height {
+    for (y, row) in rows.chunks_exact_mut(row_len.max(1)).enumerate() {
         if byterun {
-            let used = byterun1(body.get(at..).unwrap_or(&[]), &mut row);
+            let used = byterun1(body.get(at..).unwrap_or(&[]), row);
             at = at.saturating_add(used);
             if at > body.len() || (used == 0 && row_len > 0) {
                 return Err(fail(format!("its BODY runs out at row {y} of {height}")));
@@ -283,6 +366,23 @@ fn draw(
             row.copy_from_slice(src);
             at = at.saturating_add(row_len);
         }
+    }
+    Ok((rows, at))
+}
+
+/// Rows of planes as `0xFFRRGGBB` pixels.
+pub(crate) fn render(
+    rows: &[u8],
+    (width, height, depth): (usize, usize, u8),
+    mask_plane: bool,
+    (ham, ehb): (bool, bool),
+    colours: &[u32],
+) -> Vec<u32> {
+    let row_bytes = width.div_ceil(16).saturating_mul(2);
+    let planes = usize::from(depth).saturating_add(usize::from(mask_plane));
+    let row_len = row_bytes.saturating_mul(planes);
+    let mut argb = Vec::with_capacity(width.saturating_mul(height));
+    for row in rows.chunks_exact(row_len.max(1)).take(height) {
         let mut held = colours.first().copied().unwrap_or(0);
         for x in 0..width {
             let mut value = 0u32;
@@ -299,13 +399,13 @@ fn draw(
             argb.push(0xFF00_0000 | rgb);
         }
     }
-    Ok((argb, at))
+    argb
 }
 
 /// A `CMAP` as `0xRRGGBB` colours. A 4-bit palette written into the high
 /// nibbles — every low nibble zero — is widened, `$F0` to `$FF`, as AROS
 /// widens it.
-fn colour_map(cmap: &[u8]) -> Vec<u32> {
+pub(crate) fn colour_map(cmap: &[u8]) -> Vec<u32> {
     let mut colours: Vec<u32> = cmap
         .chunks_exact(3)
         .map(|rgb| match rgb {
@@ -326,7 +426,7 @@ fn other(chunks: &[Chunk<'_>]) -> Vec<String> {
     chunks
         .iter()
         .map(|(id, _)| id)
-        .filter(|id| !matches!(*id, b"BMHD" | b"CMAP" | b"CAMG" | b"BODY"))
+        .filter(|id| !matches!(*id, b"BMHD" | b"CMAP" | b"CAMG" | b"BODY" | b"ABIT"))
         .map(|id| id.iter().map(|&b| char::from(b)).collect())
         .collect()
 }
@@ -412,6 +512,15 @@ impl Ilbm {
         format!("{} (${m:08x})", words.join(", "))
     }
 
+    /// Whether it is hold-and-modify, and whether extra-half-brite: what
+    /// its `CAMG` mode says, as far as its depth allows.
+    #[must_use]
+    pub fn modes(&self) -> (bool, bool) {
+        let ham = self.mode.is_some_and(|m| m & HAM != 0) && (self.depth == 6 || self.depth == 8);
+        let ehb = self.mode.is_some_and(|m| m & EXTRA_HALFBRITE != 0) && !ham;
+        (ham, ehb)
+    }
+
     /// How a pixel is shaped, width to height, as the picture says: from
     /// its aspect, or failing that its display mode.
     #[must_use]
@@ -472,10 +581,11 @@ impl Ilbm {
             Field::new(
                 P,
                 "Compression",
-                if self.compression == 1 {
-                    "ByteRun1"
-                } else {
-                    "none"
+                match (self.contiguous, self.compression) {
+                    (true, 0) => "none: an ACBM, its planes stored whole",
+                    (true, _) => "none: an ACBM, its planes stored whole, whatever its header says",
+                    (false, 1) => "ByteRun1",
+                    (false, _) => "none",
                 },
             ),
             Field::new(
@@ -509,6 +619,16 @@ impl Ilbm {
         }
         if !self.other_chunks.is_empty() {
             out.push(Field::new(P, "Other chunks", self.other_chunks.join(" ")));
+        }
+        if self.missing > 0 {
+            out.push(Field::new(
+                P,
+                "Missing",
+                format!(
+                    "its ABIT is {} bytes short of its planes; the end of the last is drawn as 0",
+                    self.missing
+                ),
+            ));
         }
         out.extend(self.colour_fields());
         out
@@ -582,6 +702,60 @@ mod tests {
     const GREY: [u8; 12] = [
         0, 0, 0, 0x55, 0x55, 0x55, 0xAA, 0xAA, 0xAA, 0xFF, 0xFF, 0xFF,
     ];
+
+    /// The same picture as an ACBM: `abit` in place of the body, its planes
+    /// stored whole.
+    fn acbm(w: u16, h: u16, d: u8, compression: u8, abit: &[u8]) -> Vec<u8> {
+        let mut out = ilbm(w, h, d, compression, &GREY, None, abit);
+        out[8..12].copy_from_slice(b"ACBM");
+        let at = out.windows(4).rposition(|c| c == b"BODY").unwrap();
+        out[at..at + 4].copy_from_slice(b"ABIT");
+        out
+    }
+
+    #[test]
+    fn an_acbm_draws_its_whole_planes_as_an_ilbm_draws_its_rows() {
+        // 16 × 2, 2 planes. Whole planes: plane 0 is rows $8000 then $2000,
+        // plane 1 is $4000 then $1000. As rows: row 0's two planes, then row
+        // 1's — a different order of the same bytes.
+        let abit = [0x80, 0, 0x20, 0, 0x40, 0, 0x10, 0];
+        let rows = [0x80, 0, 0x40, 0, 0x20, 0, 0x10, 0];
+        let a = parse(&acbm(16, 2, 2, 0, &abit)).unwrap();
+        let i = parse(&ilbm(16, 2, 2, 0, &GREY, None, &rows)).unwrap();
+        assert!(a.contiguous && !i.contiguous);
+        assert_eq!(a.argb, i.argb);
+        assert_eq!(a.argb[0], 0xFF55_5555, "row 0, pixel 0: pen 1");
+        assert_eq!(a.argb[1], 0xFFAA_AAAA, "row 0, pixel 1: pen 2");
+        assert_eq!(a.argb[16 + 2], 0xFF55_5555, "row 1, pixel 2: pen 1");
+        assert_eq!(a.argb[16 + 3], 0xFFAA_AAAA, "row 1, pixel 3: pen 2");
+        assert_eq!(a.missing, 0);
+        // Its header's compression is not believed: ACBM never compresses.
+        assert_eq!(parse(&acbm(16, 2, 2, 1, &abit)).unwrap().argb, a.argb);
+    }
+
+    #[test]
+    fn a_short_abit_is_drawn_when_only_the_last_plane_is_short() {
+        let abit = [0x80, 0, 0x20, 0, 0x40, 0];
+        let p = parse(&acbm(16, 2, 2, 0, &abit)).unwrap();
+        assert_eq!(p.missing, 2);
+        assert_eq!(p.argb[0], 0xFF55_5555);
+        assert!(p.fields().iter().any(|f| f.label == "Missing"));
+        // Short by more than the last plane: refused.
+        assert!(parse(&acbm(16, 2, 2, 0, &abit[..2])).is_err());
+    }
+
+    #[test]
+    fn a_chunk_is_read_to_its_own_length_when_the_form_understates() {
+        // BUG-019: the FORM says two bytes less than its last chunk holds.
+        let mut bytes = ilbm(16, 1, 2, 0, &GREY, None, &[0x80, 0, 0x40, 0]);
+        let declared = u32::from_be_bytes(bytes[4..8].try_into().unwrap()) - 2;
+        bytes[4..8].copy_from_slice(&declared.to_be_bytes());
+        let p = parse(&bytes).unwrap();
+        assert_eq!(
+            p.argb[1], 0xFFAA_AAAA,
+            "pen 2, from the bytes past the FORM"
+        );
+    }
 
     #[test]
     fn planes_combine_into_pens_low_plane_first() {

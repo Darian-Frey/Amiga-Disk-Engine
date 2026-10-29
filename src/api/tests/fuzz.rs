@@ -1120,3 +1120,241 @@ fn fuzz_the_module_decoder() {
         });
     }
 }
+
+/// An IFF `FORM` of `kind` holding `chunks`, each padded to even.
+#[allow(
+    clippy::disallowed_methods,
+    clippy::trivially_copy_pass_by_ref,
+    reason = "a template written by hand, not with the helpers that read it (C-001's exception)"
+)]
+fn iff(kind: &[u8; 4], chunks: &[(&[u8; 4], Vec<u8>)]) -> Vec<u8> {
+    let mut inner = kind.to_vec();
+    for (id, data) in chunks {
+        inner.extend(*id);
+        inner.extend((data.len() as u32).to_be_bytes());
+        inner.extend(data);
+        if data.len() % 2 == 1 {
+            inner.push(0);
+        }
+    }
+    let mut out = b"FORM".to_vec();
+    out.extend((inner.len() as u32).to_be_bytes());
+    out.extend(inner);
+    out
+}
+
+/// One small file of each format added 2026-10-29: an ACBM, preferences, a
+/// printer driver, a catalog, an ordinary animation and an Anim Brush, a
+/// score, formatted text and a datatype descriptor.
+#[allow(
+    clippy::disallowed_methods,
+    clippy::too_many_lines,
+    reason = "templates written by hand, not with the helpers that read them (C-001's \
+              exception); one of each format, each in a few lines, read best together"
+)]
+fn more_templates() -> Vec<(&'static [u8], Vec<u8>)> {
+    let bmhd = |w: u16, h: u16, d: u8| {
+        let mut b = vec![0u8; 20];
+        b[0..2].copy_from_slice(&w.to_be_bytes());
+        b[2..4].copy_from_slice(&h.to_be_bytes());
+        b[8] = d;
+        b
+    };
+    let grey = vec![
+        0, 0, 0, 0x55, 0x55, 0x55, 0xAA, 0xAA, 0xAA, 0xFF, 0xFF, 0xFF,
+    ];
+    let acbm = iff(
+        b"ACBM",
+        &[
+            (b"BMHD", bmhd(16, 2, 2)),
+            (b"CMAP", grey.clone()),
+            (b"ABIT", vec![0x80, 0, 0x20, 0, 0x40, 0, 0x10, 0]),
+        ],
+    );
+
+    let mut country = vec![0u8; 504];
+    country[16..18].copy_from_slice(b"GB");
+    country[20..24].copy_from_slice(&44u32.to_be_bytes());
+    country[25..36].copy_from_slice(b"%A %e %B %Y");
+    let mut locale = vec![0u8; 860];
+    locale[16..23].copy_from_slice(b"danmark");
+    locale[356..].copy_from_slice(&country);
+    let mut screen = vec![0u8; 28];
+    screen[16..20].copy_from_slice(&0x0002_9004u32.to_be_bytes());
+    let prefs = iff(
+        b"PREF",
+        &[
+            (b"PRHD", vec![0; 6]),
+            (b"CTRY", country),
+            (b"LCLE", locale),
+            (b"SCRM", screen),
+            (b"SERL", vec![0; 34]),
+        ],
+    );
+
+    // A printer driver: MOVEQ/RTS, version, the extended data, a name.
+    let mut h = vec![0x70, 0, 0x4E, 0x75, 0, 35, 0, 40];
+    h.resize(8 + 62, 0);
+    h[8 + 20] = 1;
+    h[8 + 34..8 + 36].copy_from_slice(&120u16.to_be_bytes());
+    let name_at = h.len() as u32;
+    h.extend(b"Fuzz\r\nnote\0\0");
+    h[8..12].copy_from_slice(&name_at.to_be_bytes());
+    while h.len() % 4 != 0 {
+        h.push(0);
+    }
+    let longs = (h.len() / 4) as u32;
+    let mut printer = Vec::new();
+    for v in [0x3F3u32, 0, 1, 0, 0, longs, 0x3E9, longs] {
+        printer.extend(v.to_be_bytes());
+    }
+    printer.extend(h);
+    for v in [0x3ECu32, 5, 0, 8, 12, 16, 20, 24, 0, 0x3F2] {
+        printer.extend(v.to_be_bytes());
+    }
+
+    let mut strs = Vec::new();
+    for (id, s) in [(0u32, &b"eins"[..]), (1, b"zwei!"), (7, b"\xFCber\n")] {
+        strs.extend(id.to_be_bytes());
+        strs.extend((s.len() as u32).to_be_bytes());
+        strs.extend(s);
+        while strs.len() % 4 != 0 {
+            strs.push(0);
+        }
+    }
+    let catalog = iff(
+        b"CTLG",
+        &[
+            (b"FVER", b"$VER: f.catalog 1.0\0".to_vec()),
+            (b"LANG", b"deutsch\0".to_vec()),
+            (b"CSET", vec![0; 32]),
+            (b"STRS", strs),
+        ],
+    );
+
+    let first = iff(
+        b"ILBM",
+        &[
+            (b"BMHD", bmhd(16, 4, 1)),
+            (b"CMAP", vec![0, 0, 0, 255, 255, 255]),
+            (b"BODY", vec![0x80, 0, 0, 0, 0x40, 0, 0, 0]),
+        ],
+    );
+    let frame = |interleave: u8, ops: &[u8]| {
+        let mut anhd = vec![0u8; 40];
+        anhd[0] = 5;
+        anhd[17] = 1;
+        anhd[18] = interleave;
+        let mut dlta = vec![0u8; 64];
+        dlta[0..4].copy_from_slice(&64u32.to_be_bytes());
+        dlta.extend(ops);
+        dlta.push(0);
+        iff(b"ILBM", &[(b"ANHD", anhd), (b"DLTA", dlta)])
+    };
+    let ordinary = [
+        first.clone(),
+        frame(0, &[2, 1, 0x81, 0x80]),
+        frame(0, &[1, 0, 3, 0xC0]),
+    ]
+    .concat();
+    let brush = [
+        first,
+        frame(1, &[1, 0x82, 0x80, 0x40]),
+        frame(1, &[1, 0x82, 0x80, 0x40]),
+    ]
+    .concat();
+    let wrap = |frames: Vec<u8>| {
+        let mut out = b"FORM".to_vec();
+        out.extend(((frames.len() + 4) as u32).to_be_bytes());
+        out.extend(b"ANIM");
+        out.extend(frames);
+        out
+    };
+
+    let score = iff(
+        b"SMUS",
+        &[
+            (b"SHDR", vec![0x3C, 0, 100, 2]),
+            (b"NAME", b"Tune".to_vec()),
+            (b"INS1", b"\x01\x01\x02\x05Piano".to_vec()),
+            (
+                b"TRAK",
+                vec![
+                    130, 0x1A, 131, 2, 60, 0x82, 64, 0x82, 67, 2, 128, 0x0A, 129, 1,
+                ],
+            ),
+            (b"TRAK", vec![62, 1 | 0x08, 62, 0x13, 62, 0x23]),
+        ],
+    );
+    let text = iff(
+        b"FTXT",
+        &[
+            (b"FONS", b"\x01\0\0\0topaz.font\0".to_vec()),
+            (b"CHRS", b"Hello \x9b1mbold\x9b0m\n\x1b(Bplain".to_vec()),
+        ],
+    );
+
+    let mut dthd = Vec::new();
+    for v in [0x32u32, 0x3D, 0x48, 0x20] {
+        dthd.extend(v.to_be_bytes());
+    }
+    dthd.extend(b"docuamig");
+    dthd.extend([0, 9, 0, 0, 0, 1, 0, 0]);
+    for c in b"@database" {
+        dthd.extend([0, *c]);
+    }
+    dthd.extend(b"AmigaGuide\0amigaguide\0#?\0");
+    let descriptor = iff(
+        b"DTYP",
+        &[(b"NAME", b"AmigaGuide".to_vec()), (b"DTHD", dthd)],
+    );
+
+    vec![
+        (&b"pic"[..], acbm),
+        (b"prefs", prefs),
+        (b"Fuzz", printer),
+        (b"f.catalog", catalog),
+        (b"a.anim", wrap(ordinary)),
+        (b"b.anim", wrap(brush)),
+        (b"tune", score),
+        (b"text", text),
+        (b"AmigaGuide", descriptor),
+    ]
+}
+
+#[test]
+fn fuzz_the_decoders_added_for_systems_files_and_media() {
+    // F-033, 2026-10-29. Every template decodes, and then each is mutated
+    // and cut short: chunk lengths, offsets into a chunk, counts of planes,
+    // strings, frames, events and mask words all come from the file, and
+    // none may read outside it, run without end, or allocate past what it
+    // holds.
+    let templates = more_templates();
+    for (name, bytes) in &templates {
+        assert!(
+            ade_core::decode::file(name, bytes).is_ok(),
+            "the {} template decodes",
+            String::from_utf8_lossy(name)
+        );
+    }
+    let mut rng = Rng::new(0x5EED_0A11);
+    for i in 0..iterations(20_000) {
+        let seed = u64::from(i);
+        let (name, template) = &templates[i as usize % templates.len()];
+        let mut buf = template.clone();
+        for _ in 0..=rng.below(8) {
+            mutate(&mut buf, &mut rng);
+        }
+        if rng.below(6) == 0 {
+            buf.truncate(rng.below(buf.len() + 1));
+        }
+        timed(seed, "systems files and media", || {
+            if let Ok(d) = ade_core::decode::file(name, &buf) {
+                if let Some(p) = &d.picture {
+                    assert_eq!(p.argb.len(), p.width * p.height, "seed {seed}");
+                }
+                let _ = d.lines();
+            }
+        });
+    }
+}

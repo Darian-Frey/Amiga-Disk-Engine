@@ -1180,6 +1180,8 @@ A `FORM ILBM` of chunks, each an ID, a 32-bit length and the bytes, padded to an
 
 **Corpus, 2026-10-26:** 4,927 intact ILBM files; **4,664 pictures** decode — 4,383 indexed, 187 extra-half-brite, 94 hold-and-modify — and **4,637 use their `BODY` to the byte**, which a misread row length, plane count or ByteRun1 rule could not survive across thousands of files. 161 are refused, all game formats wearing an ILBM header: other compression numbers (Day of the Pharaoh's 4, RoboSport's 86), no `BMHD`, or a `BODY` packed some other way (Die Stadt der Löwen's pictures claim no compression in bodies too short to be uncompressed). `ANIM` files hold ILBMs inside another `FORM` and are not decoded.
 
+**ACBM**, AmigaBASIC's and some games' form of the same picture (2026-10-29), keeps its planes whole, one after another and uncompressed, in an `ABIT` chunk where an ILBM has `BODY`. AROS does not read it; ffmpeg does. ADE lays the planes out as rows and draws them as an ILBM. Two corpus files claim ByteRun1 over an `ABIT` exactly the size of its planes uncompressed, and the claim is ignored, as ffmpeg ignores it. An `ABIT` short of its planes within the last plane is drawn with the rest as zero, and says how much was missing. **Corpus:** all 83 ACBMs identical to ffmpeg's, pixel for pixel, once each chunk is read to its own length past a short `FORM` (BUG-019) — *Thromulus* and *Italy '90 Soccer* state a `FORM` 28 to 116 bytes short of the chunks inside it.
+
 ## Bitmap fonts
 
 *For F-033. Measured 2026-10-27 over every font in the corpus.*
@@ -1247,6 +1249,46 @@ A keymap file is a loadable executable whose one hunk begins with a `KeyMapNode`
 **Patterns** are 64 rows of four bytes per channel; the file holds as many as the highest pattern in **all 128** order entries names, played or not. Byte 2's low nibble is the effect and byte 3 its parameter. A loop of two bytes or less is no loop. A name stops at its first NUL.
 
 **How long it plays** is the patterns walked without sound: a row lasts `speed` ticks of 2.5 / tempo seconds, from speed 6 and tempo 125. `Fxx` below `$20` sets the speed and from `$20` the tempo, and `F00` is passed over, as libopenmpt passes it over; `Bxx` jumps to position xx; `Dxy` breaks to row x×10+y of the next position — **two decimal digits, not a byte**; `E60` marks a loop start per channel and `E6x` plays back to it x times; `EEx` plays its row x more times. The song ends past its last position, or when it meets a row again outside a pattern loop. **Corpus:** 359 modules on 191 disks, 315 `M.K.` and 44 `FLT4`; every title, every sample-name list and every playing time agrees with libopenmpt, the largest difference 0.01 seconds.
+
+## IFF preferences
+
+*For F-033. Read from AROS's `prefs/*.h`, `libraries/locale.h` and `graphics/modeid.h`, locally and not committed. Measured 2026-10-29 over every preference file in the corpus.*
+
+A `FORM PREF`: a `PRHD` header, then a chunk per setting, each a fixed structure. Every one is read only when its chunk is exactly its structure's size — and across the corpus every one is: `CTRY` 504, `LCLE` 860, `SCRM` 28, `SOND` 284, `INPT` 44 (as Workbench writes it; AROS's is longer), `FONT` 156, `OSCN` 36, `SERL` 34, `PTXT` 64, `PUNT` 56, `PGFX` 38, `PSPD` 124; `PNTR`'s fields are read and the image after them is not. A display mode ID names its monitor from `ID & $FFFF1000` and, on the default, NTSC and PAL monitors, its resolution, interlace, extra-half-brite, hold-and-modify and dual playfield from the low bits. A locale's time zone is **minutes west** of Greenwich, so Denmark's −60 is GMT+1.
+
+**A `.country` file is a `CTRY`**, and states facts about its country. **Corpus:** 501 preference files, 403 of them countries, every telephone code its country's real one and every measuring system right — British for Great Britain and the United Kingdom, American for the United States, metric elsewhere. Commodore's `new_zealand.country` is a copy of Australia's, code `AUS` and telephone code 61, and is reported as it is. Not read: `WBCF`, Workbench's own `wbconfig.prefs` (69 files), in no independent source; and *ToolManager*'s chunks.
+
+## Printer drivers
+
+*For F-033. Read from AROS's `devices/prtbase.h`, locally and not committed. Measured 2026-10-29.*
+
+A driver's first hunk is a `PrinterSegment` as it sits in memory, the loader's link to the next segment coming before the hunk: `ps_runAlert` (`MOVEQ #n,D0; RTS`) at 0, version and revision at 4, then `PrinterExtendedData` at 8 — the printer's name pointer, four function pointers, class, colour class, columns, character sets, head rows, the most dots across and down, and the resolution at offsets 34 and 36 within it. **Recognised by relocations**: the name and all four functions relocated where the structure puts them, and no `RomTag` (`$4AFC`) where the version goes, since a library opens with the same `MOVEQ`/`RTS`. The name string is read to its first NUL or control character other than a line break; Commodore Frankfurt's drivers follow the name with `\r\n© Commodore Ffm.` and then code, so the first line is the name and a second is kept as a note. **Corpus:** 2,173 drivers, 479 of them outside `DEVS:Printers` (Workbench 2.1's `Storage/Printers`), every one read; **2,154 name the printer their file is named for**, the rest renamed copies, third-party drivers and one test build. 16 drivers in printer drawers are not recognised: damaged files on a bad Workbench 1.3.2 dump, and *The Last Inca*'s code of its own named `Generic`.
+
+## Locale catalogs
+
+*For F-033. Read from AROS's `OpenCatalogA()`, locally and not committed. Measured 2026-10-29.*
+
+A `FORM CTLG`: `FVER` (a `$VER:` string), `LANG` (at most 30 bytes), `CSET` (32 bytes, the code set first) and `STRS` — entries of an ID, a length and the bytes, each **padded to even and then to four**. A string is a C string: its NUL may be inside its length (54,985 corpus strings) or in the padding after (156,115). **Corpus:** 1,860 catalogs, 211,100 strings in eleven languages, every `STRS` chunk used to the byte — a padding rule read wrong desynchronises every entry after the first odd one. The same catalog in different languages does **not** carry the same IDs: translators left strings out, and programs fall back to their built-in English.
+
+## IFF ANIM animations
+
+*For F-033. Read from the ANIM document as the AmigaOS wiki publishes it, with its appendix on DPaint III's Anim Brushes. Measured 2026-10-29.*
+
+A `FORM ANIM` of `FORM ILBM`s: a whole picture, then frames of `ANHD` (operation, mask, size, position, absolute and relative time in sixtieths of a second, **interleave at 18**, bits at 20) and `DLTA`. Every corpus animation uses **operation 5, byte vertical delta**: sixteen plane offsets, then per plane and byte-wide column a count of operations — below `$80` skips rows, `$80` and up copies that many less `$80` bytes down the column, zero repeats the byte after the count. A plane whose operations run out stops; the others still apply. **Two kinds, which the document distinguishes**: an ordinary animation stores its changes into the frame two back (interleave 0, for double buffering); a **DPaint Anim Brush XORs its changes into the frame before** (interleave 1, and the XOR bit at bit 1, or bit 2 as DPaint writes it), so that it can play backwards, and its last change brings back its first frame. A frame may bring a `CMAP`, which holds from then on, and operation 0 is a whole new `BODY`. **Corpus:** 74 animations. The 29 ordinary ones are identical to ffmpeg's in every frame. The 45 brushes **ffmpeg does not play right** — it stores where they XOR, as the document says every player of its day did, and its frames are garbled — so they are checked as the document describes them instead: all 45 end on their first frame. Read as stores into the frame two back, as ffmpeg reads them, 7 of the 74 animations do.
+
+## IFF SMUS scores
+
+*For F-033. Read from the SMUS document as the AmigaOS wiki publishes it. Measured 2026-10-29.*
+
+A `FORM SMUS`: `SHDR` (tempo in 128ths of a quarter note a minute, volume, track count), `NAME`/`AUTH`/`(c) `/`ANNO`, an `INS1` per instrument register (register, type, MIDI channel and preset, name), and a `TRAK` per track of two-byte events. A note's ID is its MIDI tone; its data byte is chord, tie, tuplet (none, 3, 5, 7), dot and a division of a whole note. Rests are 128; 129 sets the instrument, 130 the time signature (beats + 1, beat 2^n), 131 the key (0 to 14, C major to C♭ major). **Durations are counted exactly**, in units of 1/26,880 of a quarter note — 2⁷ × 2 × 3 × 5 × 7 — so every division, dot and tuplet is a whole number; only the last note of a chord moves time on. **Corpus:** 257 scores, every one read; of the 245 with more than one track, **171 have every track the same length to the unit** — tracks of one piece play together — and the rest stop a track early instead of writing its last rests. Reading dots wrong leaves 57, triplets wrong 128.
+
+## IFF FTXT text and datatype descriptors
+
+*For F-033. FTXT from the FTXT document as the AmigaOS wiki publishes it; datatypes from AROS's `datatypes/datatypes.h` and `ObtainDataTypeA()`. Measured 2026-10-29.*
+
+**FTXT** is read as the document's "stripping" reader reads it: `CHRS` chunks run together, printable characters and line feeds kept, ESC and CSI control sequences skipped, other control characters dropped. 8 corpus files, clipboard units and a TextCraft document.
+
+**A datatype descriptor** is a `FORM DTYP`: `NAME`, `FVER` and `DTHD`, a `DataTypeHeader` whose name, base name, pattern and mask are offsets into the chunk, followed by the group and ID, the mask's length, flags and priority. The mask is a word per byte a file starts with; **a negative word matches any byte**, and the comparison ignores case unless `DTF_CASE` is set. **Corpus:** 101 descriptors in six groups, and the 70 IFF ones each **spell their own form type** — `FORM`, four of any byte, then the ID in capitals — which they do only if the mask's offset, length and words are read right.
 
 ## Flux formats
 

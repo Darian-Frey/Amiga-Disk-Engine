@@ -14,6 +14,20 @@ _None._
 
 ## Fixed
 
+### BUG-019 The IFF reader cuts a chunk at the FORM's stated end, losing data a short FORM header leaves out
+**Severity:** low
+**Status:** fixed
+**Found:** 2026-10-29, comparing ACBM pictures with ffmpeg for F-033. **Fixed** 2026-10-29.
+**Where:** [src/object/src/ilbm.rs](../src/object/src/ilbm.rs) `chunks`: each chunk's bytes were taken only as far as the end the `FORM` header states.
+
+**What is wrong.** A `FORM` header can state a length shorter than the chunks inside it: *Thromulus*'s title and credit screens and two of *Italy '90 Soccer*'s pictures say 28 to 116 bytes less than their `ABIT` chunk's own length, though every byte is in the file. ADE took the chunk to the `FORM`'s end and so read it short; ffmpeg reads each chunk to its own length and draws the whole picture.
+
+**How it showed.** Seven ACBM pictures were refused as short, or, once a short `ABIT` was drawn, differed from ffmpeg in their last two or three rows. No corpus ILBM is affected — the picture test's counts are the same before and after — so it was latent in the ILBM reader delivered 2026-10-26, and only the new ACBM reading met it.
+
+**Correct behaviour.** Chunks are found within the length the `FORM` states, and each is read to its own length, as far as the file goes.
+
+**The fix.** That, in `chunks`. All 83 corpus ACBM pictures are then identical to ffmpeg's, pixel for pixel; the ILBM corpus test's figures are unchanged. Logged and fixed in the same change, since the fix is one bound in a reader the new format shares.
+
 ### BUG-018 The health report says nothing about an entry whose parent field names another directory
 **Severity:** low
 **Status:** fixed

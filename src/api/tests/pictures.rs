@@ -11,6 +11,8 @@
     clippy::unwrap_used,
     clippy::expect_used,
     clippy::arithmetic_side_effects,
+    clippy::panic,
+    clippy::indexing_slicing,
     reason = "test scaffolding"
 )]
 
@@ -94,4 +96,94 @@ fn every_corpus_picture_decodes_and_uses_its_body() {
     assert!(exact * 100 >= pictures * 99, "{exact} of {pictures}");
     assert!(modes.get("hold-and-modify").copied().unwrap_or(0) > 50);
     assert!(modes.get("extra-half-brite").copied().unwrap_or(0) > 100);
+}
+
+/// What ffmpeg draws of an IFF picture, as `0xRRGGBB` per pixel; `None` when
+/// ffmpeg cannot be run or cannot read it.
+fn ffmpeg_pixels(bytes: &[u8], scratch: &std::path::Path) -> Option<Vec<u32>> {
+    let input = scratch.join("in.iff");
+    let output = scratch.join("out.rgb");
+    std::fs::write(&input, bytes).ok()?;
+    let status = std::process::Command::new("ffmpeg")
+        .args(["-v", "quiet", "-y", "-i"])
+        .arg(&input)
+        .args(["-frames:v", "1", "-f", "rawvideo", "-pix_fmt", "rgb24"])
+        .arg(&output)
+        .status()
+        .ok()?;
+    if !status.success() {
+        return None;
+    }
+    let rgb = std::fs::read(&output).ok()?;
+    // A 4-bit colour map, which ffmpeg leaves as $F0 and ADE widens to $FF
+    // as AROS does: the only difference the two are allowed.
+    let four_bit = rgb.iter().all(|&b| b.trailing_zeros() >= 4);
+    Some(
+        rgb.chunks_exact(3)
+            .map(|c| {
+                let widen = |v: u8| u32::from(if four_bit { v | (v >> 4) } else { v });
+                (widen(c[0]) << 16) | (widen(c[1]) << 8) | widen(c[2])
+            })
+            .collect(),
+    )
+}
+
+#[test]
+fn every_corpus_acbm_is_drawn_as_ffmpeg_draws_it() {
+    // An ACBM keeps its planes whole, in ABIT; AROS does not read it, and
+    // ffmpeg does, independently. Measured 2026-10-29: all 83 corpus ACBM
+    // pictures identical to ffmpeg's, pixel for pixel — seven of them only
+    // once each chunk was read to its own length past a short FORM
+    // (BUG-019).
+    let corpus = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../disks");
+    let Ok(read) = std::fs::read_dir(&corpus) else {
+        eprintln!("skipping: no corpus");
+        return;
+    };
+    if std::process::Command::new("ffmpeg")
+        .arg("-version")
+        .output()
+        .is_err()
+    {
+        eprintln!("skipping: no ffmpeg");
+        return;
+    }
+    let scratch = std::env::temp_dir().join(format!("ade-acbm-{}", std::process::id()));
+    std::fs::create_dir_all(&scratch).unwrap();
+    let mut paths: Vec<PathBuf> = read.flatten().map(|e| e.path()).collect();
+    paths.sort();
+    let (mut found, mut identical) = (0usize, 0usize);
+    for path in &paths {
+        let Ok(image) = ade_core::Image::open(path) else {
+            continue;
+        };
+        let Ok(volume) = image.volume() else { continue };
+        let Ok(walk) = volume.walk(volume.root()) else {
+            continue;
+        };
+        for (name, entry) in walk.entries.iter().filter(|(_, e)| e.kind.is_file()) {
+            let Ok(c) = volume.read_file(entry) else {
+                continue;
+            };
+            let bytes = c.into_bytes();
+            if bytes.get(8..12) != Some(b"ACBM") || !ilbm::is_ilbm(&bytes) {
+                continue;
+            }
+            found += 1;
+            let ours = ilbm::parse(&bytes).unwrap_or_else(|e| panic!("{name}: {e}"));
+            let theirs = ffmpeg_pixels(&bytes, &scratch)
+                .unwrap_or_else(|| panic!("{}: {name}: ffmpeg could not draw it", path.display()));
+            let ours: Vec<u32> = ours.argb.iter().map(|p| p & 0x00FF_FFFF).collect();
+            assert!(
+                ours == theirs,
+                "{}: {name} differs from ffmpeg",
+                path.display()
+            );
+            identical += 1;
+        }
+    }
+    let _ = std::fs::remove_dir_all(&scratch);
+    eprintln!("{found} ACBM pictures, {identical} identical to ffmpeg's");
+    assert!(found >= 83, "{found}");
+    assert_eq!(identical, found);
 }

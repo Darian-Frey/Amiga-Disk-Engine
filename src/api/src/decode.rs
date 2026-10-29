@@ -14,11 +14,16 @@ pub use ade_object::decoded::Field;
 use ade_object::icon::{self, Highlight, Icon};
 use ade_object::ilbm;
 use ade_object::prefs::{self, Pointer};
-use ade_object::{font, keymap, svx, tracker};
+use ade_object::{
+    anim, catalog, datatype, font, ftxt, iffprefs, keymap, printer, smus, svx, tracker,
+};
 
 /// What ADE decodes, for a file it does not.
-const DECODES: &str = "It decodes Workbench icons, IFF ILBM pictures, IFF 8SVX sounds, \
-                       bitmap fonts and Intuition's Preferences (devs/system-configuration).";
+const DECODES: &str = "It decodes Workbench icons; IFF ILBM and ACBM pictures, ANIM \
+                       animations, 8SVX sounds, SMUS scores, FTXT text and preferences; \
+                       bitmap fonts, keymaps, printer drivers, locale catalogs and datatype \
+                       descriptors; ProTracker modules; and Intuition's Preferences \
+                       (devs/system-configuration).";
 
 /// A decoded file.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -74,43 +79,16 @@ pub fn file(name: &[u8], bytes: &[u8]) -> Result<Decoded, NotDecoded> {
             .map(|i| icon_decoded(&i))
             .map_err(|e| NotDecoded(format!("a Workbench icon, but {e}")));
     }
-    if ilbm::is_ilbm(bytes) {
-        return ilbm::parse(bytes)
-            .map(|p| ilbm_decoded(&p))
-            .map_err(|e| NotDecoded(format!("an IFF ILBM picture, but {e}")));
+    if let Some(decoded) = iff_form(bytes) {
+        return decoded;
     }
-    if svx::is_svx(bytes) {
-        return svx::parse(bytes)
-            .map(|s| svx_decoded(&s))
-            .map_err(|e| NotDecoded(format!("an IFF 8SVX sound, but {e}")));
-    }
-    if font::is_contents(name, bytes) {
-        return font::contents(bytes)
-            .map(|c| Decoded {
-                title: "Font contents: the sizes of a font, each in a file of its own".to_owned(),
-                fields: c.fields(),
-                picture: None,
-            })
-            .map_err(|e| NotDecoded(format!("a font's contents file, but {e}")));
-    }
-    if font::is_font(bytes) {
-        return font::parse(bytes)
-            .map(|f| font_decoded(&f))
-            .map_err(|e| NotDecoded(format!("a font, but {e}")));
+    if let Some(decoded) = system_file(name, bytes) {
+        return decoded;
     }
     if tracker::is_module(bytes) {
         return tracker::parse(bytes)
             .map(|m| tracker_decoded(&m))
             .map_err(|e| NotDecoded(format!("a ProTracker module, but {e}")));
-    }
-    if keymap::is_keymap(bytes) {
-        return keymap::parse(bytes)
-            .map(|k| Decoded {
-                title: format!("Keymap \"{}\": what each key types", k.name),
-                fields: k.fields(),
-                picture: None,
-            })
-            .map_err(|e| NotDecoded(format!("a keymap, but {e}")));
     }
     if prefs::is_preferences(name, bytes.len())
         && let Some(p) = prefs::decode(bytes)
@@ -134,6 +112,132 @@ pub fn file(name: &[u8], bytes: &[u8]) -> Result<Decoded, NotDecoded> {
     Err(NotDecoded(format!(
         "not a format ADE decodes yet. {DECODES}"
     )))
+}
+
+/// An IFF form ADE reads, by its type: `None` for any other file.
+fn iff_form(bytes: &[u8]) -> Option<Result<Decoded, NotDecoded>> {
+    if anim::is_anim(bytes) {
+        return Some(
+            anim_decoded(bytes).map_err(|e| NotDecoded(format!("an IFF ANIM animation, but {e}"))),
+        );
+    }
+    if ilbm::is_ilbm(bytes) {
+        return Some(
+            ilbm::parse(bytes)
+                .map(|p| ilbm_decoded(&p))
+                .map_err(|e| NotDecoded(format!("an IFF ILBM picture, but {e}"))),
+        );
+    }
+    if let Some(t) = ftxt::parse(bytes) {
+        return Some(Ok(Decoded {
+            title: "IFF FTXT text: text with its formatting".to_owned(),
+            fields: t.fields(),
+            picture: None,
+        }));
+    }
+    if datatype::is_descriptor(bytes) {
+        return Some(
+            datatype::parse(bytes)
+                .map(|d| Decoded {
+                    title: format!(
+                        "Datatype descriptor: how Workbench recognises {} files",
+                        d.name
+                    ),
+                    fields: d.fields(),
+                    picture: None,
+                })
+                .map_err(|e| NotDecoded(format!("a datatype descriptor, but {e}"))),
+        );
+    }
+    if smus::is_score(bytes) {
+        return Some(
+            smus::parse(bytes)
+                .map(|s| Decoded {
+                    title: "IFF SMUS score: music as notes".to_owned(),
+                    fields: s.fields(),
+                    picture: None,
+                })
+                .map_err(|e| NotDecoded(format!("an IFF SMUS score, but {e}"))),
+        );
+    }
+    if svx::is_svx(bytes) {
+        return Some(
+            svx::parse(bytes)
+                .map(|s| svx_decoded(&s))
+                .map_err(|e| NotDecoded(format!("an IFF 8SVX sound, but {e}"))),
+        );
+    }
+    if catalog::is_catalog(bytes) {
+        return Some(
+            catalog::parse(bytes)
+                .map(|c| Decoded {
+                    title: format!("Locale catalog: a program's words in {}", c.language),
+                    fields: c.fields(),
+                    picture: None,
+                })
+                .map_err(|e| NotDecoded(format!("a locale catalog, but {e}"))),
+        );
+    }
+    if iffprefs::is_preferences(bytes) {
+        return Some(
+            iffprefs::parse(bytes)
+                .map(|p| Decoded {
+                    title: p.title(),
+                    fields: p.fields(),
+                    picture: None,
+                })
+                .map_err(|e| NotDecoded(format!("IFF preferences, but {e}"))),
+        );
+    }
+    None
+}
+
+/// A system file — fonts, keymaps and printer drivers, which are loadable
+/// executables recognised by what their first hunk holds: `None` for any
+/// other file.
+fn system_file(name: &[u8], bytes: &[u8]) -> Option<Result<Decoded, NotDecoded>> {
+    if font::is_contents(name, bytes) {
+        return Some(
+            font::contents(bytes)
+                .map(|c| Decoded {
+                    title: "Font contents: the sizes of a font, each in a file of its own"
+                        .to_owned(),
+                    fields: c.fields(),
+                    picture: None,
+                })
+                .map_err(|e| NotDecoded(format!("a font's contents file, but {e}"))),
+        );
+    }
+    if font::is_font(bytes) {
+        return Some(
+            font::parse(bytes)
+                .map(|f| font_decoded(&f))
+                .map_err(|e| NotDecoded(format!("a font, but {e}"))),
+        );
+    }
+    if keymap::is_keymap(bytes) {
+        return Some(
+            keymap::parse(bytes)
+                .map(|k| Decoded {
+                    title: format!("Keymap \"{}\": what each key types", k.name),
+                    fields: k.fields(),
+                    picture: None,
+                })
+                .map_err(|e| NotDecoded(format!("a keymap, but {e}"))),
+        );
+    }
+    if printer::is_driver(bytes) {
+        return Some(
+            printer::parse(bytes)
+                .map(|d| Decoded {
+                    title: format!("Printer driver for \"{}\"", d.name),
+                    fields: d.fields(),
+                    picture: None,
+                })
+                .map_err(|e| NotDecoded(format!("a printer driver, but {e}"))),
+        );
+    }
+    None
 }
 
 /// The Workbench screen's first four colours, as `0xRRGGBB`: what an icon's
@@ -282,6 +386,68 @@ fn font_decoded(f: &font::Font) -> Decoded {
     }
 }
 
+/// An animation: its fields, and a contact sheet of up to eight frames
+/// spread through it, four to a row.
+fn anim_decoded(bytes: &[u8]) -> Result<Decoded, anim::NotAnAnim> {
+    const SHOWN: usize = 8;
+    const ACROSS: usize = 4;
+    const GAP: usize = 4;
+    // Which frames to show is known only once their number is: count them
+    // first, which is cheap, then play once more keeping those.
+    let total = anim::play(bytes, |_, _| false)?.frames;
+    let wanted: Vec<usize> = (0..SHOWN.min(total))
+        .map(|i| {
+            i.saturating_mul(total.saturating_sub(1))
+                .checked_div(SHOWN.min(total).saturating_sub(1))
+                .unwrap_or(0)
+        })
+        .collect();
+    let mut kept: Vec<(usize, Vec<u32>)> = Vec::new();
+    let a = anim::play(bytes, |n, argb| {
+        if wanted.contains(&n) {
+            kept.push((n, argb.to_vec()));
+        }
+        n < wanted.last().copied().unwrap_or(0)
+    })?;
+    let (w, h) = (a.first.width, a.first.height);
+    let across = kept.len().clamp(1, ACROSS);
+    let rows = kept.len().div_ceil(ACROSS).max(1);
+    let span = |n: usize, cell: usize| {
+        n.saturating_mul(cell.saturating_add(GAP))
+            .saturating_sub(GAP)
+    };
+    let (width, height) = (span(across, w), span(rows, h));
+    let mut argb = vec![0xFFFF_FFFF; width.saturating_mul(height)];
+    for (i, (_, frame)) in kept.iter().enumerate() {
+        let x0 = (i % ACROSS).saturating_mul(w.saturating_add(GAP));
+        let y0 = (i / ACROSS).saturating_mul(h.saturating_add(GAP));
+        for (y, line) in frame.chunks_exact(w.max(1)).enumerate() {
+            let at = y0
+                .saturating_add(y)
+                .saturating_mul(width)
+                .saturating_add(x0);
+            if let Some(dst) = argb.get_mut(at..at.saturating_add(w)) {
+                dst.copy_from_slice(line);
+            }
+        }
+    }
+    let numbers: Vec<String> = kept
+        .iter()
+        .map(|(n, _)| n.saturating_add(1).to_string())
+        .collect();
+    Ok(Decoded {
+        title: format!("IFF ANIM animation: {} frames", a.frames),
+        fields: a.fields(),
+        picture: Some(Picture {
+            caption: format!("Frames {} of {}", numbers.join(", "), a.frames),
+            width,
+            height,
+            argb,
+            pixel_shape: a.first.pixel_shape(),
+        }),
+    })
+}
+
 /// A module: its fields, and each sample's waveform in a grid, eight to a
 /// row, the part that loops in orange.
 fn tracker_decoded(m: &tracker::Module) -> Decoded {
@@ -395,11 +561,12 @@ fn ilbm_decoded(p: &ilbm::Ilbm) -> Decoded {
         pixel_shape: p.pixel_shape(),
     });
     Decoded {
-        title: if picture.is_some() {
-            "IFF ILBM picture".to_owned()
-        } else {
-            "IFF ILBM colour map".to_owned()
-        },
+        title: match (picture.is_some(), p.contiguous) {
+            (true, false) => "IFF ILBM picture",
+            (true, true) => "IFF ACBM picture: an ILBM with its planes stored whole",
+            (false, _) => "IFF ILBM colour map",
+        }
+        .to_owned(),
         fields: p.fields(),
         picture,
     }
