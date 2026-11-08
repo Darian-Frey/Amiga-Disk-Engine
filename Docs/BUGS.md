@@ -14,6 +14,24 @@ _None._
 
 ## Fixed
 
+### BUG-020 The export dropped relocations that its own round trip could not see
+**Severity:** medium
+**Status:** fixed
+**Found:** 2026-11-08, assembling F-036's export with vasm for IMP-020. **Fixed** 2026-11-08.
+**Where:** [src/object/src/export.rs](../src/object/src/export.rs): `code`, `instruction` and the end of each hunk in `executable`.
+
+**What is wrong.** The export is meant to rebuild the program, relocations included, but four kinds of relocated long came out as plain numbers:
+- **one running across two decoded instructions** — `$e` in a font's code hunk starts inside a four-byte instruction at `$c` and ends in the next one — written as two halves of words;
+- **one in an instruction's opcode word**, which no operand names;
+- **one in the zeroed memory past a hunk's file data**, which the loader also patches (*Legends*: 3,954 relocations into 1.6 MB of a hunk whose file holds 634 KB), swallowed by a `ds.b`;
+- **a word or byte immediate whose value matched a relocated long's** — `ori.b #h2_0000,d0`, the long running two bytes past the instruction — named as if it were the long, asking the assembler for a byte relocation no hunk file can hold.
+
+**How it showed.** Not at all in the check it shipped with. That round trip linked every section at address 0, where a relocated long holds exactly the number the file stores, so a lost relocation gave the right bytes. vasm writes an Amiga executable, whose relocation table can be compared, and **1,479 of 3,936 programs** (every 10th of the corpus) lost relocations or could not be assembled. A program rebuilt from such an export runs only if loaded at the address the dropped longs happen to assume.
+
+**Correct behaviour.** Every relocation the original has, the rebuilt program has: a relocated long is written as a `dc.l` of its target's label, or — into a hunk the file lacks, or at an odd offset, where no `dc.l` can go — counted in the source's header as one that will not be rebuilt.
+
+**The fix.** An instruction whose bytes a relocated long overlaps without sitting whole in its extension words becomes data, run on to the long's end, where it is a `dc.l`; only a long operand can be named by a relocation, and an instruction holding the same value relocated in one operand and unrelocated in another is data too; the zeroed tail is written as `ds.b` gaps around a `dc.l` for each relocation in it. The first full-corpus run of the fix found two more things: data run on to a relocated long at an odd offset left the next instruction at an odd address, which an assembler aligns (one damaged dump), so the export now writes bytes until it is even again; and two hacked files carry relocations past the end of their hunk, which no source can hold — now counted in the header with the others a rebuild cannot relocate. The vasm round trip stays, beside GNU's, so that the relocation table is checked on every corpus program from now on. Also: a program none of whose hunks can be read — a file cut off inside its first — is no longer exported, since a source with no sections assembles to something, never to nothing.
+
 ### BUG-019 The IFF reader cuts a chunk at the FORM's stated end, losing data a short FORM header leaves out
 **Severity:** low
 **Status:** fixed

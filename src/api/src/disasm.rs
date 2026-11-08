@@ -121,8 +121,9 @@ pub fn bootblock_analysis(image: &Image) -> Result<Analysis, NotCode> {
 pub fn file_view(bytes: &[u8], view: View) -> Result<Vec<String>, NotCode> {
     if view == View::Source {
         file(bytes, Mode::Auto)?;
-        let e = ade_object::export::executable(bytes)
-            .ok_or_else(|| NotCode("its hunk header is unreadable".to_owned()))?;
+        let e = ade_object::export::executable(bytes).ok_or_else(|| {
+            NotCode("none of its hunks can be read, so there is nothing to rebuild".to_owned())
+        })?;
         return Ok(e.source.lines().map(str::to_owned).collect());
     }
     Ok(render(&analysis(bytes)?, view))

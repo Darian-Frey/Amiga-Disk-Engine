@@ -11,9 +11,11 @@
 //! the type is dropped here; it decides only where a loader puts a hunk, not
 //! its bytes. Local only: the corpus is not in the repository (D-010), and
 //! the tools are `m68k-linux-gnu-as`, `-ld` and `-objcopy`. Any missing, the
-//! test skips. `ADE_DISASM_CORPUS=all` takes every executable; by default
-//! every 10th. Measured 2026-10-29 with all: 39,363 programs, every hunk
-//! rebuilt, in about nine minutes.
+//! test skips. A second test does the same with vasm (IMP-020), which also
+//! sees the relocations — linked at zero, a dropped relocation leaves every
+//! byte right (BUG-020). `ADE_DISASM_CORPUS=all` takes every executable; by default
+//! every 10th. Measured 2026-11-08 with all: 39,348 programs, every hunk
+//! rebuilt by both, in about fifteen minutes.
 
 #![allow(
     clippy::unwrap_used,
@@ -25,13 +27,14 @@
     reason = "test scaffolding"
 )]
 
+use std::collections::BTreeSet;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use ade_core::Image;
 use ade_core::layers::object::export;
-use ade_core::layers::object::hunk::{self, Kind};
+use ade_core::layers::object::hunk::{self, Kind, Memory};
 
 fn tool(name: &str) -> Option<String> {
     let candidate = format!("m68k-linux-gnu-{name}");
@@ -93,8 +96,11 @@ fn build(
 ) -> Result<Vec<Vec<u8>>, String> {
     let (gas, ld, objcopy) = tools;
     // Devpac's typed SECTION is not GNU's; the type does not touch bytes.
+    // Nor is Devpac's `OPT O-`, which MRI mode refuses; it optimises none of
+    // what the export writes as instructions anyway.
     let source: String = source
         .lines()
+        .filter(|l| !l.starts_with("\tOPT\t"))
         .map(|l| match l.strip_prefix("\tSECTION\t") {
             Some(rest) => format!("\tSECTION\t{}\n", rest.split(',').next().unwrap()),
             None => format!("{l}\n"),
@@ -230,3 +236,176 @@ fn every_exported_program_assembles_back_to_its_own_bytes() {
     );
     assert!(programs > 0);
 }
+
+/// vasm, from `ADE_VASM` or `vasmm68k_mot` on the path.
+fn vasm() -> Option<String> {
+    let candidate = std::env::var("ADE_VASM").unwrap_or_else(|_| "vasmm68k_mot".to_owned());
+    // vasm has no `--version`; given no input it says so and fails, which
+    // is enough to know it runs.
+    Command::new(&candidate)
+        .arg("-quiet")
+        .output()
+        .ok()
+        .filter(|o| String::from_utf8_lossy(&o.stderr).contains("no input file"))
+        .map(|_| candidate)
+}
+
+/// One hunk as the loader sees it: kind, memory, the bytes it loads, and
+/// its relocations as (offset, target hunk).
+type Loaded = (Kind, Memory, Vec<u8>, BTreeSet<(u32, u32)>);
+
+/// A program as the loader sees it: each hunk's kind, memory, the bytes it
+/// loads — the file's, then zeros to its size — and its relocations. Those
+/// the export says it cannot rebuild are left out: odd, into a missing
+/// hunk, or past the end of their own.
+fn loaded(bytes: &[u8]) -> Option<Vec<Loaded>> {
+    let exe = hunk::parse(bytes)?;
+    let count = u32::try_from(exe.hunks.len()).ok()?;
+    Some(
+        exe.hunks
+            .iter()
+            .map(|h| {
+                let mut memory = bytes
+                    .get(h.file_offset..h.file_offset + h.file_len)
+                    .unwrap_or(&[])
+                    .to_vec();
+                memory.resize(memory.len().max(h.size as usize), 0);
+                let end = (h.size as usize).max(h.file_len);
+                let relocs = h
+                    .relocs
+                    .iter()
+                    .filter(|r| {
+                        r.target < count && r.offset % 2 == 0 && r.offset as usize + 4 <= end
+                    })
+                    .map(|r| (r.offset, r.target))
+                    .collect();
+                // The export cannot say "both flags and a further long";
+                // that hunk is rebuilt as one for any memory.
+                let mem = if h.memory == Memory::Extended {
+                    Memory::Any
+                } else {
+                    h.memory
+                };
+                (h.kind, mem, memory, relocs)
+            })
+            .collect(),
+    )
+}
+
+/// The export, given to vasm, must build an executable the loader cannot
+/// tell from the original (IMP-020) — as Devpac would take it, and with
+/// vasm's defaults. This checks what the GNU round
+/// trip cannot: the section types, the chip and fast flags, and that vasm
+/// relocates every address the original's loader would.
+#[test]
+fn every_exported_program_rebuilds_with_vasm() {
+    let corpus = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../disks");
+    if !corpus.is_dir() {
+        eprintln!("skipping: no corpus");
+        return;
+    }
+    let Some(vasm) = vasm() else {
+        eprintln!("skipping: no vasmm68k_mot (set ADE_VASM)");
+        return;
+    };
+    let step = if std::env::var("ADE_DISASM_CORPUS").as_deref() == Ok("all") {
+        1
+    } else {
+        10
+    };
+    let dir = std::env::temp_dir().join(format!("ade-vasm-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let keep = std::env::var_os("ADE_EXPORT_KEEP").is_some();
+    let mut programs = 0usize;
+    let mut failures = Vec::new();
+    for (place, bytes) in executables(&corpus, step) {
+        let Some(e) = export::executable(&bytes) else {
+            continue;
+        };
+        let want = loaded(&bytes).unwrap();
+        programs += 1;
+        std::fs::write(dir.join("p.s"), &e.source).unwrap();
+        for options in VASM_OPTIONS {
+            let _ = std::fs::remove_file(dir.join("p.exe"));
+            let out = Command::new(&vasm)
+                .args(options)
+                .args(["-o", "p.exe", "p.s"])
+                .current_dir(&dir)
+                .output()
+                .unwrap();
+            let why = if out.status.success() {
+                let built = std::fs::read(dir.join("p.exe")).unwrap_or_default();
+                match loaded(&built) {
+                    None => Some("vasm's output does not parse".to_owned()),
+                    Some(got) if got.len() != want.len() => {
+                        Some(format!("{} hunks, not {}", got.len(), want.len()))
+                    }
+                    Some(got) => got.iter().zip(&want).enumerate().find_map(|(k, (g, w))| {
+                        if (g.0, g.1) != (w.0, w.1) {
+                            Some(format!(
+                                "hunk {k}: {:?} {:?}, not {:?} {:?}",
+                                g.0, g.1, w.0, w.1
+                            ))
+                        } else if g.2 != w.2 {
+                            let at = g.2.iter().zip(&w.2).position(|(a, b)| a != b);
+                            Some(format!(
+                                "hunk {k}: {} bytes, not {}; first difference at {at:x?}",
+                                g.2.len(),
+                                w.2.len()
+                            ))
+                        } else if g.3 != w.3 {
+                            let extra: Vec<_> = g.3.difference(&w.3).take(3).collect();
+                            let lost: Vec<_> = w.3.difference(&g.3).take(3).collect();
+                            Some(format!(
+                                "hunk {k}: relocations differ: added {extra:x?}, lost {lost:x?}"
+                            ))
+                        } else {
+                            None
+                        }
+                    }),
+                }
+            } else {
+                Some(
+                    String::from_utf8_lossy(&out.stderr)
+                        .chars()
+                        .take(1500)
+                        .collect(),
+                )
+            };
+            if let Some(why) = why {
+                failures.push(format!("{place} ({}): {why}", options.join(" ")));
+                if keep {
+                    let n = failures.len();
+                    std::fs::copy(dir.join("p.s"), dir.join(format!("fail{n}.s"))).unwrap();
+                    std::fs::write(dir.join(format!("fail{n}.orig")), &bytes).unwrap();
+                }
+                break;
+            }
+        }
+    }
+    if !keep {
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+    eprintln!("{programs} programs rebuilt by vasm");
+    assert!(
+        failures.is_empty(),
+        "{} of {programs} failed:\n{}",
+        failures.len(),
+        failures
+            .iter()
+            .take(30)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+    assert!(programs > 0);
+}
+
+/// How vasm is run: an executable out, no symbols, no banner — once as
+/// Devpac would take the source, and once with vasm's own defaults, which
+/// optimise unless the source says not to. The export's `OPT O-` is what
+/// makes the second agree with the first.
+const VASM_OPTIONS: [&[&str]; 2] = [
+    &["-Fhunkexe", "-devpac", "-nosym", "-quiet"],
+    &["-Fhunkexe", "-nosym", "-quiet"],
+];

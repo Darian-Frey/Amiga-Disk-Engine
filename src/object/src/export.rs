@@ -3,7 +3,8 @@
 //! What the Assembly view lists, written for an assembler rather than a
 //! reader: a `SECTION` per hunk, typed `CODE`, `DATA` or `BSS` and suffixed
 //! `_C` or `_F` where the hunk asks for chip or fast memory, in Devpac's
-//! syntax; a label at every place anything refers to; every relocated
+//! syntax, with `OPT O-` so that the assembler writes each instruction as
+//! given; a label at every place anything refers to; every relocated
 //! address written as the label it points at; each library call the code
 //! proves written as `jsr _LVOOpenLibrary(a6)`, with its equate; and
 //! everything else as it is.
@@ -12,7 +13,9 @@
 //! checked: the corpus test assembles every exported program with GNU `as`
 //! in its MRI mode, links each section at address zero — where the file's
 //! relocated values count from — and requires each hunk's bytes back
-//! exactly. Devpac and vasm themselves have not been tried. Some instructions
+//! exactly. A second test gives it to vasm, which writes the executable
+//! itself, and requires the same hunks, memory, bytes and relocations
+//! (IMP-020). Devpac itself has not been tried. Some instructions
 //! are therefore written as words, with the instruction beside them as a
 //! comment: one with a label inside it, which no line could carry; one an
 //! assembler would encode otherwise — `move.l #1,d0` comes back as a
@@ -40,9 +43,10 @@ pub struct Export {
     /// Instructions written as words, because a label falls inside one or
     /// an assembler would encode it otherwise.
     pub as_words: usize,
-    /// Relocated longs written as the numbers they hold, which a rebuilt
-    /// program will not relocate: those into hunks the file does not have,
-    /// and those at an odd offset, where no assembler puts a long.
+    /// Relocated longs a rebuilt program will not relocate: those into hunks
+    /// the file does not have and those at an odd offset, where no
+    /// assembler puts a long, written as the numbers they hold; and those
+    /// past the end of their hunk, where nothing can be written.
     pub unrelocated: usize,
 }
 
@@ -289,18 +293,50 @@ fn code(
         if at != 0 && here.contains(&address) {
             out.line(&format!("{}:", label(k, address)));
         }
+        // Data run on to a relocated long at an odd offset leaves an odd
+        // place, where every assembler would align an instruction: a byte,
+        // until the place is even again.
+        if at % 2 == 1 {
+            data_run(out, d, (k, at, at.saturating_add(1)), &here, relocs, true);
+            at = at.saturating_add(1);
+            continue;
+        }
         let decoded = decode(d.get(at..).unwrap_or(&[]), address);
         let len = usize::try_from(decoded.len())
             .unwrap_or(2)
             .min(d.len().saturating_sub(at))
             .max(1);
-        let end = at.saturating_add(len);
+        let mut end = at.saturating_add(len);
+        // A relocated long the instruction does not hold whole in its
+        // extension words — one in its opcode word, or one running on into
+        // what follows — cannot be named by any operand, and written as
+        // words its relocation would be lost: the run becomes data, to the
+        // long's end, where it is one `dc.l`.
+        let split = |end: usize| {
+            (at..end)
+                .filter(|&p| {
+                    u32::try_from(p).is_ok_and(|q| relocs.contains_key(&q))
+                        && (p < at.saturating_add(2) || p.saturating_add(4) > end)
+                })
+                .map(|p| p.saturating_add(4))
+                .max()
+        };
+        let mut straddled = false;
+        while let Some(reach) = split(end) {
+            straddled = true;
+            if reach <= end || end >= d.len() {
+                break;
+            }
+            end = reach.min(d.len());
+        }
         let inside = here
             .range(address.saturating_add(1)..u32::try_from(end).unwrap_or(u32::MAX))
             .next()
             .is_some();
         let text = match &decoded {
-            Decoded::Instruction(i) if !inside && !reencoded(i, d.get(at..end).unwrap_or(&[])) => {
+            Decoded::Instruction(i)
+                if !inside && !straddled && !reencoded(i, d.get(at..end).unwrap_or(&[])) =>
+            {
                 instruction(i, (k, at, end), &here, relocs)
             }
             _ => None,
@@ -348,12 +384,17 @@ fn instruction(
         .filter_map(|p| relocs.get(&u32::try_from(p).ok()?).copied())
         .collect();
     // A long that holds an address the loader relocates is named by it; an
-    // absolute or immediate that is not relocated stays a number.
+    // absolute or immediate that is not relocated stays a number. Only a
+    // long can be: a word or byte immediate whose value happens to match is
+    // not what the loader patches, and naming it asks an assembler for a
+    // relocation narrower than any hunk file has.
+    let long = i.size.is_some_and(|s| s.suffix() == "l");
     let absolutes: Vec<u32> = i
         .operands
         .iter()
         .filter_map(|o| match o {
-            Operand::AbsL(v) | Operand::Imm(v) => Some(*v),
+            Operand::AbsL(v) => Some(*v),
+            Operand::Imm(v) if long => Some(*v),
             _ => None,
         })
         .collect();
@@ -377,6 +418,15 @@ fn instruction(
             .filter(|a| by_value.contains_key(a))
             .count()
     {
+        return None;
+    }
+    // Names go by value, so a value relocated in one operand cannot also
+    // stand unrelocated in another: `addq.w #2,($2).l` would name both.
+    let named_elsewhere = i
+        .operands
+        .iter()
+        .any(|o| matches!(o, Operand::Imm(v) if !long && by_value.contains_key(v)));
+    if named_elsewhere {
         return None;
     }
     let position = |t: u32| here.contains(&t).then(|| label(k, t));
@@ -471,21 +521,14 @@ fn walked(bytes: &[u8], out: &mut Export) -> HashMap<usize, Known> {
     by_hunk
 }
 
-/// Export an executable, or `None` when it is not one.
-#[must_use]
-pub fn executable(bytes: &[u8]) -> Option<Export> {
-    let exe = hunk::parse(bytes)?;
-    let labels = labels(&exe, bytes);
-    let mut out = Export::default();
-    out.line("; Exported by ADE: source that rebuilds the program's own bytes, a SECTION");
-    out.line("; per hunk. Checked with GNU as in MRI mode (-M --register-prefix-optional),");
-    out.line("; given each SECTION without its type; written in Devpac's syntax, which");
-    out.line("; Devpac and vasm have not been checked against.");
+/// The relocations a rebuilt program will not have, counted in the
+/// source's header and in [`Export::unrelocated`].
+fn unrelocated(exe: &Executable, out: &mut Export) {
+    let all = || exe.hunks.iter().flat_map(|h| &h.relocs);
     // A relocation into a hunk the file does not have — an overlay's, or a
     // damaged file's — names nothing, and one at an odd offset cannot be a
     // `dc.l`, which every assembler aligns; each long stays the number it
     // holds.
-    let all = || exe.hunks.iter().flat_map(|h| &h.relocs);
     let missing = all()
         .filter(|r| (r.target as usize) >= exe.hunks.len())
         .count();
@@ -502,11 +545,45 @@ pub fn executable(bytes: &[u8]) -> Option<Export> {
             "; {odd} relocated longs sit at odd offsets, where no assembler puts one."
         ));
     }
-    if missing > 0 || odd > 0 {
-        out.line("; They are written as the numbers they hold, and a rebuilt program will not");
-        out.line("; relocate them.");
+    // And one past the end of its hunk — a damaged or hacked file's — would
+    // patch memory the hunk does not own, where no line of it can go.
+    let beyond = exe
+        .hunks
+        .iter()
+        .flat_map(|h| {
+            let end = (h.size as usize).max(h.file_len);
+            h.relocs
+                .iter()
+                .filter(move |r| (r.offset as usize).saturating_add(4) > end)
+        })
+        .count();
+    if beyond > 0 {
+        out.line(&format!(
+            "; {beyond} relocated longs lie past the end of their hunk, where no line can go."
+        ));
     }
-    out.unrelocated = missing.saturating_add(odd);
+    if missing > 0 || odd > 0 || beyond > 0 {
+        out.line("; A rebuilt program will not relocate them: those it can hold are written as");
+        out.line("; the numbers they hold.");
+    }
+    out.unrelocated = missing.saturating_add(odd).saturating_add(beyond);
+}
+
+/// Export an executable, or `None` when it is not one — or when not one of
+/// its hunks can be read, as in a file cut off inside its first: a source
+/// with no sections would assemble to something, never to nothing.
+#[must_use]
+pub fn executable(bytes: &[u8]) -> Option<Export> {
+    let exe = hunk::parse(bytes).filter(|e| !e.hunks.is_empty())?;
+    let labels = labels(&exe, bytes);
+    let mut out = Export::default();
+    out.line("; Exported by ADE: Devpac source that rebuilds the program, a SECTION per");
+    out.line("; hunk. Checked with vasm (vasmm68k_mot -Fhunkexe, with and without -devpac):");
+    out.line("; the same hunks, memory, bytes and relocations. OPT O- keeps the assembler");
+    out.line("; from choosing shorter forms; without it the bytes can change.");
+    out.line("");
+    out.line("\tOPT\tO-");
+    unrelocated(&exe, &mut out);
     let known = walked(bytes, &mut out);
     for (k, h) in exe.hunks.iter().enumerate() {
         let d = data(bytes, h);
@@ -540,10 +617,31 @@ pub fn executable(bytes: &[u8]) -> Option<Export> {
             Kind::Data => data_run(&mut out, d, (k, 0, d.len()), &here, &relocs, false),
             Kind::Bss => {}
         }
-        // Memory beyond what the file holds is zero.
+        // Memory beyond what the file holds is zero — except a long the
+        // loader relocates there, which becomes the address of its target's
+        // start: written as that, or the rebuilt program would not patch it.
         let size = usize::try_from(h.size).unwrap_or(0);
-        if size > d.len() {
-            out.line(&format!("\tds.b\t{}", size.saturating_sub(d.len())));
+        let mut pos = d.len();
+        let mut tail: Vec<(usize, usize)> = h
+            .relocs
+            .iter()
+            .filter(|r| (r.target as usize) < exe.hunks.len() && r.offset % 2 == 0)
+            .map(|r| (r.offset as usize, r.target as usize))
+            .filter(|&(o, _)| o >= d.len() && o.saturating_add(4) <= size)
+            .collect();
+        tail.sort_unstable();
+        for (o, target) in tail {
+            if o < pos {
+                continue;
+            }
+            if o > pos {
+                out.line(&format!("\tds.b\t{}", o.saturating_sub(pos)));
+            }
+            out.line(&format!("\tdc.l\t{}", label(target, 0)));
+            pos = o.saturating_add(4);
+        }
+        if size > pos {
+            out.line(&format!("\tds.b\t{}", size.saturating_sub(pos)));
         }
         // Labels past the bytes the file holds — into the zeroed memory, or
         // beyond the hunk altogether — count from its start.

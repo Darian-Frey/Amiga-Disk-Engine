@@ -11,8 +11,12 @@ Effort vocabulary: trivial | small | medium | large.
 
 ## Suggested
 
+_None._
+
+## Applied
+
 ### IMP-020 The export is written in Devpac's syntax, and has been assembled only by GNU `as`
-**Status:** suggested
+**Status:** applied
 **Effort:** small
 **Found:** 2026-10-29, building F-036's export.
 
@@ -24,7 +28,15 @@ Effort vocabulary: trivial | small | medium | large.
 
 **Trade-offs.** vasm is a new test-only tool to install, as objdump and GNU `as` are (D-002's bargain; neither is linked). Its optimisations are switched by options (`-no-opt`, `-opt-*`), so the test would fix the options it runs with, and the export's header would name them — a user with other options could get other bytes. Devpac itself runs only on an Amiga or under an emulator, and is not a candidate for an automated test.
 
-## Applied
+**Applied 2026-11-08.** vasm 1.8i, built from its author's source (`http://www.ibaug.de/vasm/vasm.tar.gz`; the old `sun.hasenbraten.de` address is gone) as `vasmm68k_mot`, test-only like the other oracles. `every_exported_program_rebuilds_with_vasm` assembles each export straight to an executable and compares it with the original as the loader sees it — each hunk's kind, memory, the bytes it loads (the file's, then zeros to its size) and its relocations — twice: with `-devpac`, and with vasm's defaults. It skips without vasm (`ADE_VASM` or the path). **What it found:**
+- **The export lost relocations** that the GNU round trip, linking every section at address 0, could not see: **1,479 of 3,936 programs** at first. Logged and fixed as **BUG-020**.
+- **vasm optimises by default, Devpac's mode does not**: given `move.l #1,d0`, `add.l #1,d0` and `0(a0)`, vasm writes `moveq`, `addq` and `(a0)` unless told otherwise — though not `cmpi` for `cmp.l #`, which GNU `as` does. The export now starts with Devpac's **`OPT O-`**, so the source itself says to write every instruction as given; removing it fails 3,581 of 3,934 programs under vasm's defaults. GNU `as` in MRI mode refuses the line, and its test drops it, as it drops the `SECTION` type.
+- **The section types and memory flags are right**: every `CODE`, `DATA`, `BSS`, `_C` and `_F` comes back as the hunk it came from. A hunk asking for both flags and an extra attribute long (`Memory::Extended`) is rebuilt as one for any memory, which the source cannot say otherwise.
+- **Over the whole corpus, 2026-11-08:** all **39,348** exportable programs load from vasm's executable exactly as from the original, under both option sets, and still rebuild byte for byte under GNU `as`. Fifteen fewer than before: files none of whose hunks can be read, which are no longer exported.
+
+Devpac itself is still untried; it runs only on an Amiga or under emulation.
+
+
 
 ### IMP-019 An empty volume whose free blocks hold a trackloaded game reads as an empty disk, and accepts writes over the game
 **Status:** applied

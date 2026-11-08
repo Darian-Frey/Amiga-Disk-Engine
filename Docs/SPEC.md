@@ -683,7 +683,11 @@ Left out: functions at version 50 and later, which are AROS's or MorphOS's, and 
 
 *For F-036.* The oracle is GNU `as` in MRI mode — `m68k-linux-gnu-as -M -m68000 --register-prefix-optional` — with each output section linked at address 0 (`--no-check-sections`, an `ld` script placing `hunkN` at 0) and taken out with `objcopy -O binary -j hunkN --set-section-flags hunkN=alloc,load,contents`: an MRI section carries no flags, and objcopy writes only what would be loaded. `SECTION name,CODE` is refused in MRI mode, so the type is dropped for the check; it decides where a loader puts a hunk, not its bytes.
 
-What an assembler writes differently from what a program holds, each found by the round trip and each written as `dc.w` with the instruction as a comment:
+**The second oracle is vasm** (IMP-020): `vasmm68k_mot -Fhunkexe -nosym`, once with `-devpac` and once without, writing an Amiga executable that is compared with the original *as the loader sees it* — each hunk's kind and memory, the bytes it loads (the file's, then zeros to its size) and its 32-bit relocations. Only this sees a relocation: linked at address 0, a relocated long holds the number the file stores, so a dropped one leaves the bytes right (BUG-020).
+
+**The source opens with `OPT O-`**, Devpac's switch for "no optimisation". vasm under `-devpac` optimises nothing anyway; under its defaults it writes `moveq` for `move.l #1,d0`, `addq` for `add.l #1,d0` and `(a0)` for `0(a0)` — though, unlike GNU `as`, it keeps `cmp.l #n` — and `OPT O-` stops it. GNU `as` in MRI mode refuses the line, and its check drops it.
+
+What an assembler writes differently from what a program holds, each found by a round trip and each written as `dc.w` with the instruction as a comment — kept even though `OPT O-` would cover most, so that the bytes do not depend on an assembler honouring it:
 
 | in the program | the assembler writes |
 |---|---|
@@ -695,9 +699,11 @@ What an assembler writes differently from what a program holds, each found by th
 | a relocated `jsr name` in the same section | `jsr name(pc)`: written `(name).l` |
 | `dc.w`/`dc.l` at an odd offset | aligned to even |
 
+**Every relocated long is a `dc.l` of its target's label, or named in an operand that holds it whole.** An instruction the long overlaps without fitting its extension words — the long in the opcode word, or running on into the next instruction — is written as data to the long's end. Only a long-sized operand is named by a relocation; an instruction holding the same value relocated in one operand and unrelocated in another (`addq.w #2,($2).l`) is data, since names go by value. A relocated long in the zeroed memory past a hunk's file data is a `dc.l` between `ds.b` gaps: the loader patches it too. One past the end of its hunk altogether — a damaged or hacked file's, which a loader would let patch memory the hunk does not own — has nowhere to go, and is counted in the source's header with those into missing hunks and at odd offsets. After data run on to an odd offset the export writes single bytes until it is even again, since an assembler aligns an instruction. A program none of whose hunks can be read is not exported.
+
 A label at an offset no line starts — inside a relocated long, past the hunk's bytes, before its start — is an `equ` from the hunk's first label, negative when the offset is past 2³¹. A branch to an odd address faults on a 68000 and is data. A relocation into a hunk the file does not have, or at an odd offset, cannot be a `dc.l` and is written as its number.
 
-**Over the corpus, 2026-10-29:** all 39,363 programs exported and assembled back to their own bytes, every hunk; 106,928,175 instructions written as instructions and 8,949,029 as words.
+**Over the corpus, 2026-10-29:** all 39,363 programs exported and assembled back to their own bytes, every hunk; 106,928,175 instructions written as instructions and 8,949,029 as words. **2026-11-08:** with vasm as well, 39,348 programs — the 15 others have no readable hunk and are not exported — load from vasm's executable exactly as from the original, relocations included, under `-devpac` and under vasm's defaults.
 
 ## Links
 

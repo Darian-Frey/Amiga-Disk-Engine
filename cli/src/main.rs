@@ -896,7 +896,7 @@ fn disasm(args: &Args) -> ExitCode {
         }
         Err(e) => {
             eprintln!("ade: {e}");
-            if inner.is_some() && !raw {
+            if inner.is_some() && !raw && args.view.is_none() {
                 eprintln!("ade: --raw decodes it anyway, from its first byte");
             }
             ExitCode::from(EXIT_FAULTS)
