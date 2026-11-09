@@ -9,7 +9,9 @@
 #include "../include/ade.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 static int failures = 0;
 
@@ -246,6 +248,30 @@ int main(int argc, char **argv) {
         check(boot_source && ade_disasm_refusal(boot_source).len > 0,
               "boot code has no source to rebuild it from");
         ade_disasm_free(boot_source);
+        /* Names (D-022), in a projects folder of the test's own: the boot
+           code's first byte named, then the name cleared again. */
+        char projects[64];
+        snprintf(projects, sizeof projects, "/tmp/ade-smoke-projects-%d", (int)getpid());
+        setenv("ADE_PROJECTS", projects, 1);
+        const AdeBytes boot_name = {(const uint8_t *)"Boot", 4};
+        const AdeBytes reg_name = {(const uint8_t *)"d0", 2};
+        const AdeBytes none = {(const uint8_t *)"", 0};
+        char *why = NULL;
+        check(ade_project_set_name(image, ADE_WHOLE_IMAGE, 0, 12, boot_name, &why) == ADE_OK,
+              "a place in the boot code takes a name");
+        check(ade_project_set_name(image, ADE_WHOLE_IMAGE, 0, 12, reg_name, &why) ==
+                      ADE_REFUSED && why != NULL,
+              "a register is refused, with the reason");
+        ade_string_free(why);
+        check(ade_project_set_name(image, ADE_WHOLE_IMAGE, 0, 12, none, NULL) == ADE_OK,
+              "and an empty name clears it");
+        rmdir(projects);
+        AdeSegments *runs = ade_disasm_bootblock_segments(image);
+        AdeSegment run;
+        check(runs && (ade_segments_count(runs) == 0 ||
+                       ade_segments_get(runs, 0, &run) == ADE_OK),
+              "the boot code's runs read");
+        ade_segments_free(runs);
         ade_listing_free(listing);
     }
 

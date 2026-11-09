@@ -20,8 +20,9 @@
 //!
 //! Bounded (D-006): a listing stops at [`MAX_LINES`] and says so.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
+use crate::annotations::Annotations;
 use crate::flow::Place;
 use crate::hunk::{self, Executable, Hunk, Kind, Memory};
 use crate::m68k::{Decoded, Names, Operand, decode};
@@ -150,7 +151,8 @@ fn decode_run(
     base: u64,
     origin: u32,
     labels: &HashMap<u32, String>,
-    relocs: &HashMap<u32, String>,
+    relocs: &HashMap<u32, usize>,
+    names: &BTreeMap<Place, String>,
 ) {
     // A first pass for where instructions start and what they point at, so a
     // branch target can be labelled where the listing reaches it. Only a
@@ -196,16 +198,24 @@ fn decode_run(
             Decoded::Instruction(i) => {
                 // A relocated long inside this instruction is an address the
                 // loader fills in; name it by what it points at.
-                let span: HashMap<u32, &String> = (2..len)
+                let span: HashMap<u32, usize> = (2..len)
                     .filter_map(|k| {
                         let pos = address.wrapping_add(u32::try_from(k).ok()?);
-                        let name = relocs.get(&pos)?;
+                        let target = relocs.get(&pos)?;
                         let value = ade_endian::u32_at(code, at.checked_add(k)?).ok()?;
-                        Some((value, name))
+                        Some((value, *target))
                     })
                     .collect();
                 let position = |v: u32| labels.get(&v).cloned();
-                let absolute = |v: u32| span.get(&v).map(|prefix| format!("{prefix}+${v:x}"));
+                // Named by the user's name for the place, or by its hunk.
+                let absolute = |v: u32| {
+                    span.get(&v).map(|&t| {
+                        names
+                            .get(&(t, v))
+                            .cloned()
+                            .unwrap_or_else(|| format!("hunk{t}+${v:x}"))
+                    })
+                };
                 let names = crate::m68k::Names {
                     position: &position,
                     absolute: &absolute,
@@ -300,6 +310,12 @@ const fn memory_name(m: Memory) -> &'static str {
 /// `None` when the bytes are not an executable at all.
 #[must_use]
 pub fn executable(bytes: &[u8]) -> Option<Listing> {
+    executable_with(bytes, &Annotations::default())
+}
+
+/// List an executable with the user's names and comments in it (D-022).
+#[must_use]
+pub fn executable_with(bytes: &[u8], notes: &Annotations) -> Option<Listing> {
     let exe: Executable = hunk::parse(bytes)?;
     let mut out = Listing::default();
     out.note(format!(
@@ -310,20 +326,83 @@ pub fn executable(bytes: &[u8]) -> Option<Listing> {
     for note in &exe.notes {
         out.note(note.clone());
     }
-    for h in &exe.hunks {
+    for (k, h) in exe.hunks.iter().enumerate() {
         out.blank();
-        hunk_listing(&mut out, bytes, h);
+        hunk_listing(&mut out, bytes, (k, h), notes);
         if out.truncated {
             break;
         }
     }
+    let offset = |(k, at): Place| {
+        let h = exe.hunks.get(k)?;
+        Some((h.file_offset as u64).saturating_add(u64::from(at)))
+    };
     if let Some(a) = crate::flow::executable(bytes) {
-        annotate(&mut out, &a, |(k, at)| {
-            let h = exe.hunks.get(k)?;
-            Some((h.file_offset as u64).saturating_add(u64::from(at)))
-        });
+        annotate(&mut out, &a, offset);
     }
+    remark(&mut out, notes, offset);
     Some(out)
+}
+
+/// The user's comments, each on a line of its own above the line it is
+/// about — shown whether or not explanations are, being the user's own —
+/// and a name for a place inside a data line, which no label line can
+/// carry, said above it.
+fn remark(out: &mut Listing, notes: &Annotations, offset: impl Fn(Place) -> Option<u64>) {
+    if notes.is_empty() {
+        return;
+    }
+    let comments: BTreeMap<u64, &String> = notes
+        .comments
+        .iter()
+        .filter_map(|(p, c)| Some((offset(*p)?, c)))
+        .collect();
+    let names: BTreeMap<u64, &String> = notes
+        .names
+        .iter()
+        .filter_map(|(p, n)| Some((offset(*p)?, n)))
+        .collect();
+    let old = std::mem::take(&mut out.lines);
+    let mut lines = Vec::with_capacity(old.len().saturating_add(comments.len()));
+    for line in old {
+        if let Some(start) = line.offset {
+            let end = start.saturating_add(u64::from(line.length.max(1)));
+            for (_, c) in comments.range(start..end) {
+                lines.push(Line {
+                    kind: LineKind::Note,
+                    offset: None,
+                    length: 0,
+                    text: format!("; {c}"),
+                    comment: None,
+                });
+            }
+            if line.kind == LineKind::Data {
+                for (at, n) in names.range(start..end) {
+                    let text = if *at == start {
+                        format!("{n}:")
+                    } else {
+                        format!(
+                            "; {n} is at +{} on the line below",
+                            at.saturating_sub(start)
+                        )
+                    };
+                    lines.push(Line {
+                        kind: if *at == start {
+                            LineKind::Label
+                        } else {
+                            LineKind::Note
+                        },
+                        offset: None,
+                        length: 0,
+                        text,
+                        comment: None,
+                    });
+                }
+            }
+        }
+        lines.push(line);
+    }
+    out.lines = lines;
 }
 
 /// What the walks of [`crate::flow`] found, put on the listing: a heading at
@@ -396,7 +475,7 @@ fn annotate(out: &mut Listing, a: &crate::flow::Analysis, offset: impl Fn(Place)
     out.lines = lines;
 }
 
-fn hunk_listing(out: &mut Listing, bytes: &[u8], h: &Hunk) {
+fn hunk_listing(out: &mut Listing, bytes: &[u8], (k, h): (usize, &Hunk), notes: &Annotations) {
     let name = h
         .name
         .as_deref()
@@ -429,14 +508,21 @@ fn hunk_listing(out: &mut Listing, bytes: &[u8], h: &Hunk) {
         }
         Kind::Data => data_run(out, data, base),
         Kind::Code => {
-            let labels: HashMap<u32, String> =
+            // Symbols label their places, and the user's names theirs, over
+            // a symbol's (D-022).
+            let mut labels: HashMap<u32, String> =
                 h.symbols.iter().map(|(n, v)| (*v, n.clone())).collect();
-            let relocs: HashMap<u32, String> = h
+            for (&(hunk, at), name) in &notes.names {
+                if hunk == k {
+                    labels.insert(at, name.clone());
+                }
+            }
+            let relocs: HashMap<u32, usize> = h
                 .relocs
                 .iter()
-                .map(|r| (r.offset, format!("hunk{}", r.target)))
+                .map(|r| (r.offset, r.target as usize))
                 .collect();
-            decode_run(out, data, base, 0, &labels, &relocs);
+            decode_run(out, data, base, 0, &labels, &relocs, &notes.names);
         }
     }
 }
@@ -444,6 +530,13 @@ fn hunk_listing(out: &mut Listing, bytes: &[u8], h: &Hunk) {
 /// List a bootblock's code. `boot` is the whole bootblock, both blocks.
 #[must_use]
 pub fn bootblock(boot: &[u8]) -> Listing {
+    bootblock_with(boot, &Annotations::default())
+}
+
+/// List a bootblock's code with the user's names and comments in it
+/// (D-022); its places are the bootblock's own offsets, in hunk 0.
+#[must_use]
+pub fn bootblock_with(boot: &[u8], notes: &Annotations) -> Listing {
     let mut out = Listing::default();
     let code = boot.get(BOOT_CODE_START..).unwrap_or(&[]);
     if code.iter().all(|&b| b == 0) {
@@ -458,18 +551,25 @@ pub fn bootblock(boot: &[u8]) -> Listing {
     );
     out.note("AmigaDOS calls this with a6 = ExecBase and a1 = the trackdisk IORequest");
     out.blank();
+    let labels: HashMap<u32, String> = notes
+        .names
+        .iter()
+        .filter(|((k, _), _)| *k == 0)
+        .map(|((_, at), n)| (*at, n.clone()))
+        .collect();
     decode_run(
         &mut out,
         code,
         BOOT_CODE_START as u64,
         u32::try_from(BOOT_CODE_START).unwrap_or(12),
+        &labels,
         &HashMap::new(),
-        &HashMap::new(),
+        &notes.names,
     );
     // A bootblock's places are its own offsets.
-    annotate(&mut out, &crate::flow::bootblock(boot), |(_, at)| {
-        Some(u64::from(at))
-    });
+    let offset = |(_, at): Place| Some(u64::from(at));
+    annotate(&mut out, &crate::flow::bootblock(boot), offset);
+    remark(&mut out, notes, offset);
     out
 }
 
@@ -481,7 +581,15 @@ pub fn raw(bytes: &[u8]) -> Listing {
     out.note("not an executable: decoded from the first byte as if it were code.");
     out.note("If it is not code, or the code starts elsewhere, what follows is noise.");
     out.blank();
-    decode_run(&mut out, bytes, 0, 0, &HashMap::new(), &HashMap::new());
+    decode_run(
+        &mut out,
+        bytes,
+        0,
+        0,
+        &HashMap::new(),
+        &HashMap::new(),
+        &BTreeMap::new(),
+    );
     out
 }
 

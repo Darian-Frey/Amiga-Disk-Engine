@@ -114,6 +114,16 @@ fn each_view_comes_by_its_flag() {
     assert!(text.contains("\tSECTION\thunk0,CODE"), "{text}");
     assert!(text.contains("\tjsr     _LVOOutput(a6)"), "{text}");
 
+    let (text, err, code) = run(&["disasm", &d, "prog", "--strings"]);
+    assert_eq!(code, Some(0), "{err}");
+    assert!(
+        text.contains("h0_0018     \"dos.library\"") && text.contains("address from h0_0004"),
+        "{text}"
+    );
+    let (text, err, code) = run(&["disasm", &d, "prog", "--variables"]);
+    assert_eq!(code, Some(0), "{err}");
+    assert!(text.contains("0 variables"), "{text}");
+
     // Refused, not ignored (BUG-007): a guess has no start to follow, one
     // view at a time, and boot code has no source.
     let (_, err, code) = run(&["disasm", &d, "prog", "--raw", "--functions"]);
@@ -125,5 +135,77 @@ fn each_view_comes_by_its_flag() {
     let (_, err, code) = run(&["disasm", &d, "--export"]);
     assert_ne!(code, Some(0));
     assert!(err.contains("not a program file"), "{err}");
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/// Run with a projects folder of the test's own, set on the child only.
+fn run_in(projects: &std::path::Path, args: &[&str]) -> (String, String, Option<i32>) {
+    let out = Command::new(ade())
+        .args(args)
+        .env("ADE_PROJECTS", projects)
+        .output()
+        .expect("ade runs");
+    (
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+        String::from_utf8_lossy(&out.stderr).into_owned(),
+        out.status.code(),
+    )
+}
+
+#[test]
+fn a_name_given_once_shows_in_every_view() {
+    let dir = std::env::temp_dir().join(format!("ade-annotate-cli-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    let projects = dir.join("projects");
+    let blank = dir.join("blank.adf");
+    let disk = dir.join("disk.adf");
+    fs::write(dir.join("prog"), program()).unwrap();
+    let s = |p: &PathBuf| p.to_str().unwrap().to_owned();
+    assert_eq!(run(&["create", &s(&blank)]).2, Some(0));
+    let (_, err, code) = run(&[
+        "put",
+        &s(&blank),
+        &s(&dir.join("prog")),
+        &format!("--output={}", s(&disk)),
+    ]);
+    assert_eq!(code, Some(0), "{err}");
+    let d = s(&disk);
+    let before = fs::read(&disk).unwrap();
+
+    let (out, err, code) = run_in(
+        &projects,
+        &["annotate", &d, "prog", "h0_0018", "--name=DosName"],
+    );
+    assert_eq!(code, Some(0), "{err}");
+    assert!(out.trim_end().ends_with(".adeproj"), "{out}");
+    // By the name it now has.
+    let (_, err, code) = run_in(
+        &projects,
+        &[
+            "annotate",
+            &d,
+            "prog",
+            "DosName",
+            "--comment=the library to open",
+        ],
+    );
+    assert_eq!(code, Some(0), "{err}");
+    let (_, err, code) = run_in(&projects, &["annotate", &d, "prog", "h0_0000", "--name=a6"]);
+    assert_eq!(code, Some(1));
+    assert!(err.contains("register"), "{err}");
+
+    let (text, _, _) = run_in(&projects, &["disasm", &d, "prog"]);
+    assert!(text.contains("lea     DosName(pc),a1"), "{text}");
+    assert!(text.contains("names and comments are yours"), "{text}");
+    let (text, _, _) = run_in(&projects, &["disasm", &d, "prog", "--strings"]);
+    assert!(text.contains("DosName     \"dos.library\""), "{text}");
+    let (text, _, _) = run_in(&projects, &["disasm", &d, "prog", "--export"]);
+    assert!(
+        text.contains("; the library to open\nDosName:") && text.contains("lea     DosName(pc),a1"),
+        "{text}"
+    );
+    // The image is never written.
+    assert_eq!(fs::read(&disk).unwrap(), before);
     let _ = fs::remove_dir_all(&dir);
 }

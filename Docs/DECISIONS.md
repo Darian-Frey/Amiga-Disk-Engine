@@ -671,3 +671,29 @@ Unchanged: Save As always makes a new file and still refuses the opened one and 
 **Reversal conditions.** Part 2 loosens only with a proof as strong as its two facts — following a base through memory would need every write to the variable accounted for, which means the whole program's writes, including through pointers. Part 4 does not loosen: an export that does not rebuild is a listing with a different extension. If GNU `as` stops being available, the round trip needs another assembler nobody here wrote, not a comparison with ADE's own encoder — and since 2026-11-08 it has one (below).
 
 **Amended 2026-11-08 (IMP-020, BUG-020).** Part 4's check was too weak for what part 4 promises. Linking every section at address 0 makes a relocated long hold exactly the number the file stores, so a relocation the export dropped still gave the right bytes — and 1,479 of 3,936 sampled programs had dropped some. The export is now also assembled by **vasm**, straight to an Amiga executable, and compared with the original as the loader sees it: hunk kinds, memory, the bytes loaded and **the relocation table** — under `-devpac` and under vasm's defaults. The source carries Devpac's `OPT O-` so that no assembler shortens what it writes. GNU `as` stays, as a second assembler nobody here wrote.
+
+---
+
+### D-022 A program's names and comments are the user's, kept per user and matched by the program's bytes
+**Decided:** 2026-11-09
+**Recorded:** 2026-11-09
+**Status:** Accepted
+**Authors:** Darian-Frey (decision); Claude (analysis)
+**Related:** D-019, D-021, F-036, D-018, AV-002, D-006
+
+**Context.** D-019 part 2 left "a project format" out of the Assembly view with the rest of the reverse-engineering suite; D-021 took five items from that list and left this one, because it is a different kind of thing. Everything else ADE shows is read from a disk. A project is what a *person* wrote — "this is the copper list setup", "this variable is the lives counter" — and keeping it is the first state ADE holds that it did not read. Asked for on 2026-11-09 with the rest of the disassembler surface.
+
+**Options.**
+- **Where it lives.** **A. Per user, by program** — the user's data folder, one file per program, found by a hash of the program's bytes. **B. Beside the disk image** — one sidecar per image. **C. Only where the user saves it**, as a document. **A is chosen.** The same program sits on many disks — a `c/` command on every Workbench copy, a game on its original and its cracked releases — and a name given once should be there on all of them. Nothing is written next to an image, which D-018 keeps the user's to change, and a read-only folder of images still takes notes. B ties notes to one copy; C makes a person remember to save, and to open, the right file.
+- **What it holds.** Names and comments; names alone; or names, comments and overrides marking bytes as code or data. **Names and comments are chosen.** Overrides would change what the walks report, which D-021 keeps to what the code proves; that needs its own rules and is left for its own decision.
+
+**Decision.**
+1. **A project is a text file per program**, `<sha1>.adeproj` in `$ADE_PROJECTS`, or `$XDG_DATA_HOME/ade/projects`, or `~/.local/share/ade/projects`. The SHA-1 is of the program file's bytes — or of the bootblock's 1,024 bytes for boot code — so a program changed by one byte is another program, with no names: a name is a claim about particular code. The file says which program it is for, one `name` or `comment` line per place, places written as the export labels them (`h1_0042`), and is meant to be read, copied and shared as it is.
+2. **A name is a label an assembler takes**: a letter, `_` or `.` first, then letters, digits, `_` and `.`, at most 64 characters; not a register, not ADE's own form (`h1_0042`, `lab_0042`, `_LVO…`), not another place's name in the same program. A comment is one line of printable text, at most 200 characters. Anything else is refused, with the reason, when it is given, and a line of a file that breaks the rules is reported and skipped when it is read — never guessed at.
+3. **A name shows everywhere the place is shown**: the listing's labels and the operands that reach the place, the functions, cross-references, call graph, strings and variables, and the exported source — which must still rebuild the program byte for byte (D-021 part 4), checked with names in it. A comment shows above its line in the listing and in the source.
+4. **Writing is atomic and confined**: a temporary file in the projects folder, then a rename, the folder made on first use. Nothing outside that folder is written, and a disk image never is. Reading a project is bounded (D-006): a file over 1 MB, or a line over 4 KB, is refused.
+5. **Nothing a person writes changes what ADE claims.** Names and comments are shown as the user's; the walks, the library naming and the export's checks are unchanged by them.
+
+**Consequences.** `ade_object::annotations` (the format and its rules) and `ade_core::project` (where, and the hash); the listing, the views and the export take a program's annotations; `ade annotate`; `ade_project_set_name` and `ade_project_set_comment` in the ABI; in the Assembly tab, a line's context menu names its place or comments on it.
+
+**Reversal conditions.** Part 1's storage gains a sidecar or explicit files if notes need to travel with an image rather than with a program — added beside the per-user store, not instead of it. Overrides of code and data need their own entry. Part 5 does not loosen: the day a user's name could make ADE claim something about the code, the user's words and the disk's would be indistinguishable.

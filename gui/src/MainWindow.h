@@ -15,6 +15,7 @@ class ImageTree;
 class QAction;
 class QLabel;
 class QComboBox;
+class SegmentBar;
 class QLineEdit;
 class QPushButton;
 class QCheckBox;
@@ -103,6 +104,10 @@ public:
     int addFiles(QTreeWidgetItem *target, const QStringList &paths);
     /// Make a directory, placed as `addFiles` places things.
     bool makeFolder(QTreeWidgetItem *target, const QString &name);
+    /// Name the place line `line` of the Assembly listing stands for, or
+    /// comment on it (D-022); empty text clears. Kept in the user's projects
+    /// folder, never in the image. A refusal goes to `errorOccurred`.
+    bool annotateAssemblyLine(int line, const QString &text, bool comment);
     /// Delete the entry `item` is: a file, or a folder with everything in it.
     /// A folder that holds anything is deleted only if the delete
     /// confirmation agrees. Undo brings it back until the disk is saved.
@@ -259,6 +264,8 @@ private:
     /// listing); `what` is set to what it is of, `why` to why there is none.
     ade::Disassembly assemblyFor(int view, QString &what, QString &why) const;
     void saveAssembly();
+    /// Move the listing to the line holding file offset `offset`.
+    void showAssemblyOffset(quint64 offset);
     // Fill the Decoded view for the selection, if it is showing and stale.
     void refreshDecoded();
     // Fill whichever of the hex and text panes is showing and not yet filled
@@ -331,6 +338,8 @@ private:
     QLabel *m_asmStatus = nullptr;
     QPushButton *m_asmRaw = nullptr;
     QCheckBox *m_asmExplain = nullptr;
+    /// The program to scale beside the listing (F-036).
+    SegmentBar *m_asmBar = nullptr;
     /// Which view: the listing, or one beside it (D-021).
     QComboBox *m_asmShow = nullptr;
     QPushButton *m_asmSave = nullptr;

@@ -574,12 +574,66 @@ typedef enum {
     ADE_ASM_REFERENCES     = 1, /* each place referred to, and from where   */
     ADE_ASM_CALL_GRAPH     = 2, /* who calls whom, as an indented tree      */
     ADE_ASM_CALL_GRAPH_DOT = 3, /* the same, for Graphviz                   */
-    ADE_ASM_SOURCE         = 4  /* source that assembles back to the bytes  */
+    ADE_ASM_SOURCE         = 4, /* source that assembles back to the bytes  */
+    ADE_ASM_STRINGS        = 5, /* strings outside the code, and their users */
+    ADE_ASM_VARIABLES      = 6  /* what the code reads and writes by name   */
 } AdeAsmView;
 
 AdeDisasm *ade_disasm_view(const AdeImage *image, uint32_t partition, uint32_t block,
                            AdeAsmView view);
 AdeDisasm *ade_disasm_bootblock_view(const AdeImage *image, AdeAsmView view);
+
+/* A program as runs of bytes by what they are, for a bar beside its listing:
+ * code a walk reached, code none reached, strings, other data, and zeroed
+ * memory. `offset` is the offset a listing line carries for the run's first
+ * byte, meaningful when `has_offset`; zeroed memory has none. A file that is
+ * not an executable gives a handle with no runs and a reason. */
+typedef enum {
+    ADE_SEG_REACHED   = 0, /* instructions a walk reached        */
+    ADE_SEG_UNREACHED = 1, /* a code hunk's bytes none reached    */
+    ADE_SEG_TEXT      = 2, /* a string                            */
+    ADE_SEG_DATA      = 3, /* a data hunk's other bytes           */
+    ADE_SEG_BSS       = 4  /* zeroed memory                       */
+} AdeSegmentClass;
+
+typedef struct {
+    uint32_t        hunk;
+    uint32_t        start;
+    uint32_t        length;
+    AdeSegmentClass class_;
+    bool            has_offset;
+    uint64_t        offset;
+} AdeSegment;
+
+typedef struct AdeSegments AdeSegments;
+
+AdeSegments *ade_disasm_segments(const AdeImage *image, uint32_t partition, uint32_t block);
+AdeSegments *ade_disasm_bootblock_segments(const AdeImage *image);
+size_t       ade_segments_count(const AdeSegments *segments);
+/* ADE_NOT_FOUND past the end. */
+AdeResult    ade_segments_get(const AdeSegments *segments, size_t index, AdeSegment *out);
+/* Why there are no runs, UTF-8, borrowed; empty when there are. */
+AdeBytes     ade_segments_refusal(const AdeSegments *segments);
+void         ade_segments_free(AdeSegments *segments);
+
+/* --- Names and comments (D-022) -----------------------------------------
+ *
+ * The user's own names for places in a program, and comments on its lines,
+ * kept per user in a projects folder ($ADE_PROJECTS, or
+ * ~/.local/share/ade/projects) and matched by the program's bytes, so the
+ * same program on any disk has them. Never written into the image. The
+ * listing, the views and the exported source show them.
+ *
+ * The place is the one the listing line at `offset` stands for, in the file
+ * at `block` — or in the boot code, for block 0. An empty name or comment
+ * clears it. ADE_REFUSED with the reason in *out_message (freed with
+ * ade_string_free) for a name the rules refuse: a register, ADE's own label
+ * form, another place's name; ADE_NOT_FOUND for a line that stands for no
+ * place in the program. */
+AdeResult ade_project_set_name(const AdeImage *image, uint32_t partition, uint32_t block,
+                               uint64_t offset, AdeBytes name, char **out_message);
+AdeResult ade_project_set_comment(const AdeImage *image, uint32_t partition, uint32_t block,
+                                  uint64_t offset, AdeBytes comment, char **out_message);
 
 /* --- Decoded files (F-033) ----------------------------------------------
  *

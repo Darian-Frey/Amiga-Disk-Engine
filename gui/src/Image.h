@@ -10,6 +10,7 @@
 #include <ade.h>
 
 #include "HexView.h"
+#include "SegmentBar.h"
 
 #include <QByteArray>
 #include <QImage>
@@ -93,6 +94,21 @@ inline Disassembly takeDisassembly(AdeDisasm *raw) {
                                  QString::fromUtf8(bytes(line.comment))});
     }
     ade_disasm_free(raw);
+    return out;
+}
+
+/// A program's runs for the segment bar (F-036); empty when it is not code.
+inline QVector<SegmentBar::Run> takeSegments(AdeSegments *raw) {
+    QVector<SegmentBar::Run> out;
+    if (!raw) return out;
+    const size_t count = ade_segments_count(raw);
+    out.reserve(static_cast<int>(count));
+    for (size_t i = 0; i < count; ++i) {
+        AdeSegment s{};
+        if (ade_segments_get(raw, i, &s) != ADE_OK) continue;
+        out.append(SegmentBar::Run{s.hunk, s.start, s.length, s.class_, s.has_offset, s.offset});
+    }
+    ade_segments_free(raw);
     return out;
 }
 
@@ -485,6 +501,14 @@ public:
     Disassembly codeView(quint32 partition, quint32 block, AdeAsmView view) const {
         return takeDisassembly(ade_disasm_view(m_raw, partition, block, view));
     }
+    /// A program's runs, for the bar beside its listing.
+    QVector<SegmentBar::Run> segments(quint32 partition, quint32 block) const {
+        return takeSegments(ade_disasm_segments(m_raw, partition, block));
+    }
+    /// The boot code's runs.
+    QVector<SegmentBar::Run> bootSegments() const {
+        return takeSegments(ade_disasm_bootblock_segments(m_raw));
+    }
     /// The same views of the boot code; it has no source.
     Disassembly bootView(AdeAsmView view) const {
         return takeDisassembly(ade_disasm_bootblock_view(m_raw, view));
@@ -638,6 +662,23 @@ public:
     }
     /// Where save() would write, or empty before any Save As.
     QString saveDestination() const { return take(ade_image_save_destination(m_raw)); }
+
+    /// Name the place a listing line stands for, or comment on it (D-022):
+    /// the line at `offset` of the file at `block`, or of the boot code for
+    /// block 0. Empty text clears. The reason it was refused, or empty.
+    QString annotate(quint32 partition, quint32 block, quint64 offset, const QString &text,
+                     bool comment) const {
+        const QByteArray utf8 = text.toUtf8();
+        char *message = nullptr;
+        const AdeResult result =
+            comment ? ade_project_set_comment(m_raw, partition, block, offset, view(utf8),
+                                              &message)
+                    : ade_project_set_name(m_raw, partition, block, offset, view(utf8),
+                                           &message);
+        const QString why = take(message);
+        if (result == ADE_OK) return {};
+        return why.isEmpty() ? QStringLiteral("refused") : why;
+    }
 
 private:
     static AdeBytes view(const QByteArray &b) {

@@ -21,6 +21,7 @@ pub mod health;
 pub mod inspect;
 pub mod json;
 pub mod layout;
+pub mod project;
 pub mod scan;
 pub mod specs;
 pub mod unpack;

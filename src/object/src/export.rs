@@ -29,6 +29,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
+use crate::annotations::Annotations;
 use crate::flow;
 use crate::hunk::{self, Executable, Hunk, Kind, Memory};
 use crate::m68k::{Decoded, Instruction, Names, Operand, decode};
@@ -48,6 +49,8 @@ pub struct Export {
     /// assembler puts a long, written as the numbers they hold; and those
     /// past the end of their hunk, where nothing can be written.
     pub unrelocated: usize,
+    /// The user's names and comments, which the source carries (D-022).
+    notes: Annotations,
 }
 
 /// The label for offset `at` of hunk `k`.
@@ -56,19 +59,34 @@ pub fn label(k: usize, at: u32) -> String {
     format!("h{k}_{at:04x}")
 }
 
-/// A label defined from its hunk's start, for one no line of the hunk can
-/// carry. An offset past 2^31 is one before the start, as a PC-relative
-/// reach or a relocated value can be: `h0_0000-4`, not four thousand million
-/// bytes on.
-fn equ(k: usize, at: u32) -> String {
-    let signed = i32::from_ne_bytes(at.to_ne_bytes());
-    let sign = if signed < 0 { '-' } else { '+' };
-    format!(
-        "{}\tequ\t{}{sign}{}",
-        label(k, at),
-        label(k, 0),
-        signed.unsigned_abs()
-    )
+impl Export {
+    /// The label for offset `at` of hunk `k`: the user's name for it, or
+    /// ADE's.
+    fn name(&self, k: usize, at: u32) -> String {
+        self.notes.label((k, at))
+    }
+
+    /// A label defined from its hunk's start, for one no line of the hunk
+    /// can carry. An offset past 2^31 is one before the start, as a
+    /// PC-relative reach or a relocated value can be: `h0_0000-4`, not four
+    /// thousand million bytes on.
+    fn equ(&self, k: usize, at: u32) -> String {
+        let signed = i32::from_ne_bytes(at.to_ne_bytes());
+        let sign = if signed < 0 { '-' } else { '+' };
+        format!(
+            "{}\tequ\t{}{sign}{}",
+            self.name(k, at),
+            self.name(k, 0),
+            signed.unsigned_abs()
+        )
+    }
+
+    /// The user's comment on a place, as a source line.
+    fn comment(&mut self, k: usize, at: u32) {
+        if let Some(c) = self.notes.comments.get(&(k, at)).cloned() {
+            self.line(&format!("; {c}"));
+        }
+    }
 }
 
 /// A hunk's bytes, as the file holds them.
@@ -80,8 +98,14 @@ fn data<'a>(bytes: &'a [u8], h: &Hunk) -> &'a [u8] {
 
 /// Every place a label goes, by hunk: the start of each, every relocated
 /// value's target, and in code every branch and PC-relative target.
-fn labels(exe: &Executable, bytes: &[u8]) -> Vec<BTreeSet<u32>> {
+fn labels(exe: &Executable, bytes: &[u8], notes: &Annotations) -> Vec<BTreeSet<u32>> {
     let mut out: Vec<BTreeSet<u32>> = exe.hunks.iter().map(|_| BTreeSet::from([0])).collect();
+    // A named place gets a label line, so the name has somewhere to be.
+    for &(k, at) in notes.names.keys() {
+        if let Some(set) = out.get_mut(k) {
+            set.insert(at);
+        }
+    }
     for h in &exe.hunks {
         let d = data(bytes, h);
         for r in &h.relocs {
@@ -191,9 +215,13 @@ fn data_run(
     let unit = if words { "dc.w" } else { "dc.b" };
     while at < to {
         let pos = u32::try_from(at).unwrap_or(u32::MAX);
+        if at != from && out.notes.comments.contains_key(&(k, pos)) {
+            flush(out, &mut pending, unit);
+            out.comment(k, pos);
+        }
         if at != from && labels.contains(&pos) {
             flush(out, &mut pending, unit);
-            out.line(&format!("{}:", label(k, pos)));
+            out.line(&format!("{}:", out.name(k, pos)));
         }
         if let Some((target, value)) = relocs.get(&pos)
             && at.saturating_add(4) <= to
@@ -202,7 +230,7 @@ fn data_run(
             flush(out, &mut pending, unit);
             out.line(&format!(
                 "\t; relocated, to {}: an odd offset no dc.l can sit at",
-                label(*target, *value)
+                out.name(*target, *value)
             ));
         }
         if let Some((target, value)) = relocs.get(&pos)
@@ -213,9 +241,9 @@ fn data_run(
             // A label inside the long is defined from the hunk's start, so
             // the long can stay one relocated value.
             for inner in labels.range(pos.saturating_add(1)..pos.saturating_add(4)) {
-                out.line(&equ(k, *inner));
+                out.line(&out.equ(k, *inner));
             }
-            out.line(&format!("\tdc.l\t{}", label(*target, *value)));
+            out.line(&format!("\tdc.l\t{}", out.name(*target, *value)));
             at = at.saturating_add(4);
             continue;
         }
@@ -290,8 +318,11 @@ fn code(
             out.line("");
             out.line(&heading(callers, entry));
         }
+        if at != 0 {
+            out.comment(k, address);
+        }
         if at != 0 && here.contains(&address) {
-            out.line(&format!("{}:", label(k, address)));
+            out.line(&format!("{}:", out.name(k, address)));
         }
         // Data run on to a relocated long at an odd offset leaves an odd
         // place, where every assembler would align an instruction: a byte,
@@ -337,7 +368,7 @@ fn code(
             Decoded::Instruction(i)
                 if !inside && !straddled && !reencoded(i, d.get(at..end).unwrap_or(&[])) =>
             {
-                instruction(i, (k, at, end), &here, relocs)
+                instruction(i, (k, at, end), &here, relocs, &out.notes)
             }
             _ => None,
         };
@@ -370,6 +401,7 @@ fn instruction(
     (k, at, end): (usize, usize, usize),
     here: &BTreeSet<u32>,
     relocs: &HashMap<u32, (usize, u32)>,
+    notes: &Annotations,
 ) -> Option<String> {
     // Every place the instruction reaches by position must carry a label.
     // A branch to an odd address is an address error, so this is data.
@@ -406,8 +438,8 @@ fn instruction(
         let moved = inside.iter().filter(|(_, w)| w == v).count();
         if held != moved
             || by_value
-                .insert(*v, label(*t, *v))
-                .is_some_and(|l| l != label(*t, *v))
+                .insert(*v, notes.label((*t, *v)))
+                .is_some_and(|l| l != notes.label((*t, *v)))
         {
             return None;
         }
@@ -429,7 +461,7 @@ fn instruction(
     if named_elsewhere {
         return None;
     }
-    let position = |t: u32| here.contains(&t).then(|| label(k, t));
+    let position = |t: u32| here.contains(&t).then(|| notes.label((k, t)));
     let absolute = |v: u32| by_value.get(&v).cloned();
     let names = Names {
         position: &position,
@@ -574,9 +606,20 @@ fn unrelocated(exe: &Executable, out: &mut Export) {
 /// with no sections would assemble to something, never to nothing.
 #[must_use]
 pub fn executable(bytes: &[u8]) -> Option<Export> {
+    executable_with(bytes, &Annotations::default())
+}
+
+/// Export an executable with the user's names and comments in it (D-022):
+/// each named place labelled with its name, each comment above its line.
+/// The source still rebuilds the program's bytes.
+#[must_use]
+pub fn executable_with(bytes: &[u8], notes: &Annotations) -> Option<Export> {
     let exe = hunk::parse(bytes).filter(|e| !e.hunks.is_empty())?;
-    let labels = labels(&exe, bytes);
-    let mut out = Export::default();
+    let labels = labels(&exe, bytes, notes);
+    let mut out = Export {
+        notes: notes.clone(),
+        ..Export::default()
+    };
     out.line("; Exported by ADE: Devpac source that rebuilds the program, a SECTION per");
     out.line("; hunk. Checked with vasm (vasmm68k_mot -Fhunkexe, with and without -devpac):");
     out.line("; the same hunks, memory, bytes and relocations. OPT O- keeps the assembler");
@@ -603,7 +646,8 @@ pub fn executable(bytes: &[u8]) -> Option<Export> {
         if let Some(&(callers, entry)) = known.get(&k).and_then(|kn| kn.functions.get(&0)) {
             out.line(&heading(callers, entry));
         }
-        out.line(&format!("{}:", label(k, 0)));
+        out.comment(k, 0);
+        out.line(&format!("{}:", out.name(k, 0)));
         let here = labels.get(k).cloned().unwrap_or_default();
         match h.kind {
             Kind::Code => code(
@@ -637,7 +681,7 @@ pub fn executable(bytes: &[u8]) -> Option<Export> {
             if o > pos {
                 out.line(&format!("\tds.b\t{}", o.saturating_sub(pos)));
             }
-            out.line(&format!("\tdc.l\t{}", label(target, 0)));
+            out.line(&format!("\tdc.l\t{}", out.name(target, 0)));
             pos = o.saturating_add(4);
         }
         if size > pos {
@@ -647,7 +691,7 @@ pub fn executable(bytes: &[u8]) -> Option<Export> {
         // beyond the hunk altogether — count from its start.
         for &at in here.range(u32::try_from(d.len()).unwrap_or(u32::MAX)..) {
             if at != 0 {
-                out.line(&equ(k, at));
+                out.line(&out.equ(k, at));
             }
         }
     }

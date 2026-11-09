@@ -705,6 +705,34 @@ A label at an offset no line starts — inside a relocated long, past the hunk's
 
 **Over the corpus, 2026-10-29:** all 39,363 programs exported and assembled back to their own bytes, every hunk; 106,928,175 instructions written as instructions and 8,949,029 as words. **2026-11-08:** with vasm as well, 39,348 programs — the 15 others have no readable hunk and are not exported — load from vasm's executable exactly as from the original, relocations included, under `-devpac` and under vasm's defaults.
 
+### Strings and variables (F-036)
+
+**A string** is a run of text bytes — `$20`–`$7E`, `$A0`–`$FF`, tab, newline, return, `$1B` and `$9B` (the console's escape and CSI) — none of them part of an instruction a walk reached, with no more than a quarter above `$7F`. It is listed when:
+
+| | in a data hunk | in a code hunk |
+|---|---|---|
+| referred to | two characters or more | and NUL-ended, with words: three lower-case letters running, or a space between two runs of two letters; or, short (≤ 4), letters and digits only |
+| not referred to | four or more, ≥ 70% letters, digits, spaces; NUL-ended or six long | as for a data hunk, and as for a referred-to code-hunk string, with at most one byte above `$7F` |
+
+A place whose address the code takes (`lea`, `pea`, a relocated pointer) starts a string that runs to the NUL, as C reads it, so strings may overlap: `graphics.library` and `.library` inside it. Text before the first such place in a run is a string of its own, ending there. A read or write inside a run starts nothing — programs reuse a name's bytes as storage. A place referred to as data (`lea`, a read, a relocated pointer) that a walk also reached is listed if it reads as a NUL-ended name with words, and marked: a walk that ran on past a `trap` whose handler never returns reads the program's data as code.
+
+**A variable** is a place, not inside a reached instruction, that a reached instruction reads or writes through an operand naming it — a relocated absolute address or a PC-relative one — or, in a data or BSS hunk, whose address it takes, unless a string starts there. A reference's width is the instruction's size; a variable lists every width it is moved at.
+
+**Over the corpus, 2026-11-09:** 39,363 programs, 1,139,647 strings (572,429 referred to), 732,463 variables. Every one of the 11,634 names `OpenLibrary` was given is a string at the place `a1` held, referred to by address; 116 of the 213,689 variables read or written as words or longs sit at odd addresses, where a 68000 would fault, all from walks that ran into data. The segment bar's 2,866,457 runs tile every hunk.
+
+### Names and comments (D-022)
+
+`<sha1>.adeproj` in `$ADE_PROJECTS`, or `$XDG_DATA_HOME/ade/projects`, or `~/.local/share/ade/projects`; the SHA-1 is of the program file's bytes, or of the 1,024-byte bootblock for boot code. UTF-8 text, a line at a time:
+
+```text
+# ADE project 1
+program <sha1> <length in bytes>
+name <place> <name>
+comment <place> <text>
+```
+
+A place is written as the export labels it, `h<hunk>_<hex offset>`; boot code is hunk 0, its places the bootblock's offsets 12–1023. Blank lines, `#` lines and the `program` line are not read for content. **A name** matches `[A-Za-z_.][A-Za-z0-9_.]*`, at most 64 characters, is not a register (`d0`–`d7`, `a0`–`a7`, `sp`, `pc`, `sr`, `ccr`, `usp`, `ssp`, in any case), not of ADE's own forms (`h<n>_<hex>`, `lab_<hex>`, `_LVO…`), and not another place's name ignoring case. **A comment** is at most 200 characters with no control characters. A file over 1 MB, or a line over 4 KB, is not read. Writing goes to `<file>.<pid>.tmp` in the same folder and is renamed over the file; notes with nothing in them remove it.
+
 ## Links
 
 Hard links are FFS-only and chain through `next_link`. Soft links were broken and support was removed in AmigaDOS 3.0. [FAQ §4.6]

@@ -509,7 +509,7 @@ fn fuzz_the_executable_parser_and_listing() {
     // hunk sizes, relocation counts, symbol name lengths. Each must be bounded
     // by what the file holds, and a listing must stay within its line cap
     // whatever the counts claim.
-    use ade_core::layers::object::{export, flow, hunk, listing};
+    use ade_core::layers::object::{export, flow, hunk, listing, program};
     let mut rng = Rng::new(0x5EED_0F32);
     let put = |v: &mut Vec<u8>, x: u32| {
         v.extend_from_slice(&[(x >> 24) as u8, (x >> 16) as u8, (x >> 8) as u8, x as u8]);
@@ -569,8 +569,54 @@ fn fuzz_the_executable_parser_and_listing() {
                     let _ = c.describe();
                 }
             }
-            let _ = flow::bootblock(&buf);
+            if let Some(a) = flow::executable(&buf) {
+                let _ = program::strings(&buf, &a);
+                let _ = program::variables(&buf, &a);
+                let _ = program::segments(&buf, &a);
+            }
+            let boot = flow::bootblock(&buf);
+            let _ = program::boot_strings(&buf, &boot);
+            let _ = program::boot_segments(&buf, &boot);
             let _ = export::executable(&buf);
+        });
+    }
+}
+
+#[test]
+fn fuzz_the_project_file_reader() {
+    // D-022. A project file is the user's, and may be edited by hand or
+    // shared: whatever it holds is read line by line, every bad line
+    // reported, nothing taken that breaks a rule, and nothing hangs.
+    use ade_core::layers::object::annotations::{self, Annotations};
+    let mut rng = Rng::new(0x5EED_0D22);
+    let base = b"# ADE project 1\nprogram ab 4\nname h0_0010 Start\nname h1_0002 lives\n\
+comment h0_0010 sets things up\n"
+        .to_vec();
+    for i in 0..iterations(20_000) {
+        let seed = u64::from(i);
+        let mut buf = base.clone();
+        for _ in 0..=rng.below(8) {
+            mutate(&mut buf, &mut rng);
+        }
+        if rng.below(4) == 0 {
+            buf.truncate(rng.below(buf.len() + 1));
+        }
+        let text = String::from_utf8_lossy(&buf).into_owned();
+        timed(seed, "project file", || {
+            let (notes, _) = Annotations::parse(&text);
+            for name in notes.names.values() {
+                assert!(annotations::name_problem(name).is_none(), "{name:?}");
+            }
+            for comment in notes.comments.values() {
+                assert!(
+                    annotations::comment_problem(comment).is_none(),
+                    "{comment:?}"
+                );
+            }
+            // What was taken writes out and reads back the same.
+            let (again, problems) = Annotations::parse(&notes.to_text(("ab", 4)));
+            assert!(problems.is_empty(), "{problems:?}");
+            assert_eq!(again, notes);
         });
     }
 }

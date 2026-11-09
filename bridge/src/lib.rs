@@ -2813,6 +2813,10 @@ pub enum AdeAsmView {
     CallGraphDot = 3,
     /// Source that assembles back to the program; executables only.
     Source = 4,
+    /// The strings outside the code, and what refers to each.
+    Strings = 5,
+    /// What the code reads, writes or takes the address of by name.
+    Variables = 6,
 }
 
 impl AdeAsmView {
@@ -2823,6 +2827,8 @@ impl AdeAsmView {
             Self::CallGraph => ade_core::disasm::View::CallGraph,
             Self::CallGraphDot => ade_core::disasm::View::CallGraphDot,
             Self::Source => ade_core::disasm::View::Source,
+            Self::Strings => ade_core::disasm::View::Strings,
+            Self::Variables => ade_core::disasm::View::Variables,
         }
     }
 }
@@ -2895,6 +2901,317 @@ pub unsafe extern "C" fn ade_disasm_bootblock_view(
         };
         AdeDisasm::view(ade_core::disasm::bootblock_view(handle, view.engine()))
     })
+}
+
+/// What a run of a program is (D-021): see [`ade_disasm_segments`].
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdeSegmentClass {
+    /// Instructions a walk reached.
+    Reached = 0,
+    /// Bytes of a code hunk no walk reached.
+    Unreached = 1,
+    /// A string.
+    Text = 2,
+    /// A data hunk's other bytes.
+    Data = 3,
+    /// Zeroed memory: BSS, or memory past a hunk's file bytes.
+    Bss = 4,
+}
+
+/// One run of a program's bytes.
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct AdeSegment {
+    /// The hunk; 0 for boot code.
+    pub hunk: u32,
+    /// Where in the hunk the run starts, as the program addresses it.
+    pub start: u32,
+    /// Its length in bytes.
+    pub length: u32,
+    /// What it is.
+    pub class: AdeSegmentClass,
+    /// Whether `offset` means anything: false for memory the file does not
+    /// hold.
+    pub has_offset: bool,
+    /// Where its first byte is in the file, or the image for boot code — the
+    /// offset a listing line carries.
+    pub offset: u64,
+}
+
+/// A program's runs, or the reason there are none.
+pub struct AdeSegments {
+    runs: Vec<AdeSegment>,
+    refusal: Vec<u8>,
+}
+
+impl AdeSegments {
+    fn from(
+        result: Result<Vec<ade_core::disasm::Segment>, ade_core::disasm::NotCode>,
+    ) -> *mut Self {
+        use ade_core::disasm::Class;
+        let handle = match result {
+            Ok(runs) => Self {
+                runs: runs
+                    .iter()
+                    .map(|r| AdeSegment {
+                        hunk: u32::try_from(r.hunk).unwrap_or(u32::MAX),
+                        start: r.start,
+                        length: r.length,
+                        class: match r.class {
+                            Class::Reached => AdeSegmentClass::Reached,
+                            Class::Unreached => AdeSegmentClass::Unreached,
+                            Class::Text => AdeSegmentClass::Text,
+                            Class::Data => AdeSegmentClass::Data,
+                            Class::Bss => AdeSegmentClass::Bss,
+                        },
+                        has_offset: r.offset.is_some(),
+                        offset: r.offset.unwrap_or(0),
+                    })
+                    .collect(),
+                refusal: Vec::new(),
+            },
+            Err(why) => Self {
+                runs: Vec::new(),
+                refusal: why.0.into_bytes(),
+            },
+        };
+        Box::into_raw(Box::new(handle))
+    }
+}
+
+/// The file at `block` as runs of reached code, unreached code, strings,
+/// data and zeroed memory, for a bar beside its listing. A handle with no
+/// runs and a reason for a file that is not an executable; null if the
+/// image is null or the file cannot be read.
+///
+/// # Safety
+/// `image` must be a live handle or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ade_disasm_segments(
+    image: *const AdeImage,
+    partition: u32,
+    block: u32,
+) -> *mut AdeSegments {
+    with_image(image, std::ptr::null_mut(), |image| {
+        let bytes = with_volume(image, partition, |volume| {
+            let entry = volume.entry_at(block).ok()?;
+            Some(volume.read_file(&entry).ok()?.into_bytes())
+        });
+        let Some(bytes) = bytes else {
+            return std::ptr::null_mut();
+        };
+        AdeSegments::from(ade_core::disasm::file_segments(&bytes))
+    })
+}
+
+/// The image's boot code as runs.
+///
+/// # Safety
+/// `image` must be a live handle or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ade_disasm_bootblock_segments(image: *const AdeImage) -> *mut AdeSegments {
+    with_image(image, std::ptr::null_mut(), |image| {
+        let Some(handle) = image.image.as_ref() else {
+            return AdeSegments::from(Err(ade_core::disasm::NotCode(
+                "ADE could not read this image's blocks".to_owned(),
+            )));
+        };
+        AdeSegments::from(ade_core::disasm::bootblock_segments(handle))
+    })
+}
+
+/// Runs in the handle; zero when there is a reason instead.
+///
+/// # Safety
+/// `segments` must be a live handle or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ade_segments_count(segments: *const AdeSegments) -> usize {
+    if segments.is_null() {
+        return 0;
+    }
+    // SAFETY: checked non-null; the caller promises a live handle.
+    guard(0, || unsafe { &*segments }.runs.len())
+}
+
+/// Copy run `index` into `*out`. [`AdeResult::NotFound`] past the end.
+///
+/// # Safety
+/// `segments` must be a live handle or null; `out` writable or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ade_segments_get(
+    segments: *const AdeSegments,
+    index: usize,
+    out: *mut AdeSegment,
+) -> AdeResult {
+    if segments.is_null() || out.is_null() {
+        return AdeResult::NullArgument;
+    }
+    guard(AdeResult::Internal, || {
+        // SAFETY: checked non-null; the caller promises a live handle.
+        let segments = unsafe { &*segments };
+        let Some(run) = segments.runs.get(index) else {
+            return AdeResult::NotFound;
+        };
+        // SAFETY: checked non-null; the caller promises it is writable.
+        unsafe { *out = *run };
+        AdeResult::Ok
+    })
+}
+
+/// Why there are no runs, as UTF-8 borrowed from the handle; empty when
+/// there are.
+///
+/// # Safety
+/// `segments` must be a live handle or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ade_segments_refusal(segments: *const AdeSegments) -> AdeBytes {
+    if segments.is_null() {
+        return AdeBytes::empty();
+    }
+    guard(AdeBytes::empty(), || {
+        // SAFETY: checked non-null; the caller promises a live handle.
+        let segments = unsafe { &*segments };
+        if segments.refusal.is_empty() {
+            AdeBytes::empty()
+        } else {
+            AdeBytes::of(&segments.refusal)
+        }
+    })
+}
+
+/// Release the runs.
+///
+/// # Safety
+/// `segments` must come from `ade_disasm_segments` or
+/// `ade_disasm_bootblock_segments` and not have been freed, or be null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ade_segments_free(segments: *mut AdeSegments) {
+    if segments.is_null() {
+        return;
+    }
+    guard((), || {
+        // SAFETY: checked non-null; the caller's contract.
+        drop(unsafe { Box::from_raw(segments) });
+    });
+}
+
+/// The program a listing is of — the file at `block`, or the boot code for
+/// block 0 — and the place a listing line's `offset` is in it.
+fn program_place(
+    image: &AdeImage,
+    partition: u32,
+    block: u32,
+    offset: u64,
+) -> Result<(Vec<u8>, bool, ade_core::disasm::Place), (AdeResult, String)> {
+    if block == 0 {
+        let Some(handle) = image.image.as_ref() else {
+            return Err((
+                AdeResult::Io,
+                "ADE could not read this image's blocks".to_owned(),
+            ));
+        };
+        let boot = handle.read_range(0, 1024);
+        let place = ade_core::project::boot_place_at(offset).ok_or((
+            AdeResult::NotFound,
+            "that line is not in the boot code".to_owned(),
+        ))?;
+        return Ok((boot, true, place));
+    }
+    let bytes = with_volume(image, partition, |volume| {
+        let entry = volume.entry_at(block).ok()?;
+        Some(volume.read_file(&entry).ok()?.into_bytes())
+    })
+    .ok_or((AdeResult::Io, "the file could not be read".to_owned()))?;
+    let place = ade_core::project::place_at(&bytes, offset).ok_or((
+        AdeResult::NotFound,
+        "that line is not in one of the program's hunks".to_owned(),
+    ))?;
+    Ok((bytes, false, place))
+}
+
+/// Name or comment on the place a listing line stands for (D-022).
+fn change_place(
+    image: *const AdeImage,
+    (partition, block, offset): (u32, u32, u64),
+    text: AdeBytes,
+    comment: bool,
+    out_message: *mut *mut c_char,
+) -> AdeResult {
+    // SAFETY: the caller's contract.
+    let Some(text) = (unsafe { borrowed(text) }) else {
+        return AdeResult::NullArgument;
+    };
+    with_image(image, AdeResult::NullArgument, |image| {
+        let Ok(text) = std::str::from_utf8(text) else {
+            set_message(out_message, "the text is not UTF-8");
+            return AdeResult::BadEncoding;
+        };
+        let (program, boot, place) = match program_place(image, partition, block, offset) {
+            Ok(found) => found,
+            Err((code, why)) => {
+                set_message(out_message, &why);
+                return code;
+            }
+        };
+        let given = (!text.is_empty()).then_some(text);
+        let change = if comment {
+            ade_core::project::Change::Comment(given)
+        } else {
+            ade_core::project::Change::Name(given)
+        };
+        match ade_core::project::change(&program, boot, place, change) {
+            Ok(_) => AdeResult::Ok,
+            Err(why) => {
+                set_message(out_message, &why);
+                AdeResult::Refused
+            }
+        }
+    })
+}
+
+/// Name the place a listing line stands for: the line at `offset` of the
+/// listing of the file at `block`, or of the boot code for block 0. An
+/// empty name clears it. Kept in the user's projects folder, by program,
+/// never in the image (D-022). [`AdeResult::Refused`] with the reason in
+/// `*out_message` for a name the rules refuse.
+///
+/// # Safety
+/// `image` must be a live handle or null; `name` must describe readable
+/// bytes; `out_message` writable or null, freed with [`ade_string_free`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ade_project_set_name(
+    image: *const AdeImage,
+    partition: u32,
+    block: u32,
+    offset: u64,
+    name: AdeBytes,
+    out_message: *mut *mut c_char,
+) -> AdeResult {
+    change_place(image, (partition, block, offset), name, false, out_message)
+}
+
+/// Comment on the place a listing line stands for, as
+/// [`ade_project_set_name`] names it. An empty comment clears it.
+///
+/// # Safety
+/// As [`ade_project_set_name`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ade_project_set_comment(
+    image: *const AdeImage,
+    partition: u32,
+    block: u32,
+    offset: u64,
+    comment: AdeBytes,
+    out_message: *mut *mut c_char,
+) -> AdeResult {
+    change_place(
+        image,
+        (partition, block, offset),
+        comment,
+        true,
+        out_message,
+    )
 }
 
 /// Lines in the listing; zero when there is a reason instead.

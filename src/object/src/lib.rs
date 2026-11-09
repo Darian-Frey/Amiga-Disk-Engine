@@ -7,6 +7,7 @@
 //! distinct from what a directory entry calls them.
 
 pub mod anim;
+pub mod annotations;
 pub mod catalog;
 pub mod datatype;
 pub mod decoded;
@@ -38,6 +39,7 @@ pub mod lvo;
 pub mod m68k;
 pub mod prefs;
 pub mod printer;
+pub mod program;
 pub mod signature;
 pub mod smus;
 pub mod svx;

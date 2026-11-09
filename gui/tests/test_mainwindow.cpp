@@ -26,6 +26,7 @@
 #include <QSignalSpy>
 #include <QClipboard>
 #include <QComboBox>
+#include <QRegularExpression>
 #include <QItemSelectionModel>
 #include <QStatusBar>
 #include <QTreeWidgetItemIterator>
@@ -105,6 +106,8 @@ private slots:
     void aPartitionOfAHardDiskIsNotWrittenInto();
     void aProgramShowsItsCodeInTheAssemblyView();
     void theViewsBesideTheListingFollowTheCode();
+    void theSegmentBarDrawsTheProgramAndGoesWhereItIsClicked();
+    void aPlaceTakesANameAndALineAComment();
     void oneDropIsOneUndo();
     void saveOnAnOpenedDiskAsksThenKeepsTheOriginal();
     void aDiskMadeHereSavesWithoutAskingOrBackup();
@@ -2346,6 +2349,108 @@ void TestMainWindow::theViewsBesideTheListingFollowTheCode() {
     showAssembly(window, row);
     QVERIFY(explain->isEnabled());
     QVERIFY(view->toPlainText().contains(QStringLiteral("moveq   #0,d0")));
+}
+
+// The segment bar beside the listing (F-036).
+void TestMainWindow::theSegmentBarDrawsTheProgramAndGoesWhereItIsClicked() {
+    QTemporaryDir dir;
+    const QString disk = blankDisk(dir, QStringLiteral("blank.adf"));
+    const QString host = dir.filePath(QStringLiteral("Hello"));
+    writeFile(host, program());
+    MainWindow window;
+    window.openImage(disk);
+    QCOMPARE(window.addFiles(browser(window)->topLevelItem(0), {host}), 1);
+    QTreeWidgetItem *row = childNamed(browser(window)->topLevelItem(0), QStringLiteral("Hello"));
+    QVERIFY(row);
+    QPlainTextEdit *view = showAssembly(window, row);
+    QVERIFY(view);
+    auto *bar = window.findChild<SegmentBar *>(QStringLiteral("assemblySegments"));
+    QVERIFY(bar);
+    QVERIFY(!bar->isHidden());
+    // moveq and rts, both reached: one run of four bytes.
+    QCOMPARE(bar->runs().size(), 1);
+    QCOMPARE(bar->runs().first().kind, ADE_SEG_REACHED);
+    QCOMPARE(bar->runs().first().length, 4u);
+
+    // A click's offset lands the listing on the line holding it.
+    view->moveCursor(QTextCursor::Start);
+    emit bar->jumpTo(bar->runs().first().offset + 2);
+    QVERIFY2(view->textCursor().block().text().contains(QStringLiteral("rts")),
+             qPrintable(view->textCursor().block().text()));
+
+    // The bar goes with the listing: another view has none.
+    auto *show = window.findChild<QComboBox *>(QStringLiteral("assemblyShow"));
+    show->setCurrentIndex(show->findText(QStringLiteral("Strings")));
+    QVERIFY(bar->isHidden());
+    QVERIFY2(view->toPlainText().contains(QStringLiteral("0 strings")),
+             qPrintable(view->toPlainText()));
+    show->setCurrentIndex(show->findText(QStringLiteral("Variables")));
+    QVERIFY(view->toPlainText().contains(QStringLiteral("0 variables")));
+    show->setCurrentIndex(show->findText(QStringLiteral("Listing")));
+    QVERIFY(!bar->isHidden());
+}
+
+// Names and comments (D-022), kept in a projects folder of the test's own.
+void TestMainWindow::aPlaceTakesANameAndALineAComment() {
+    QTemporaryDir dir;
+    const QByteArray before = qgetenv("ADE_PROJECTS");
+    qputenv("ADE_PROJECTS", dir.filePath(QStringLiteral("projects")).toUtf8());
+    const QString disk = blankDisk(dir, QStringLiteral("blank.adf"));
+    const QString host = dir.filePath(QStringLiteral("Hello"));
+    writeFile(host, program());
+    MainWindow window;
+    QStringList errors;
+    QObject::connect(&window, &MainWindow::errorOccurred, &window,
+                     [&errors](const QString &message) { errors << message; });
+    window.openImage(disk);
+    QCOMPARE(window.addFiles(browser(window)->topLevelItem(0), {host}), 1);
+    QTreeWidgetItem *row = childNamed(browser(window)->topLevelItem(0), QStringLiteral("Hello"));
+    QVERIFY(row);
+    QPlainTextEdit *view = showAssembly(window, row);
+    QVERIFY(view);
+    const QStringList lines = view->toPlainText().split(QLatin1Char('\n'));
+    int moveq = -1;
+    for (int i = 0; i < lines.size(); ++i) {
+        if (lines[i].contains(QStringLiteral("moveq   #0,d0"))) moveq = i;
+    }
+    QVERIFY(moveq >= 0);
+
+    QVERIFY(window.annotateAssemblyLine(moveq, QStringLiteral("Start"), false));
+    QVERIFY2(view->toPlainText().contains(QStringLiteral("\nStart:\n")),
+             qPrintable(view->toPlainText()));
+    QVERIFY(view->toPlainText().contains(QStringLiteral("names and comments are yours")));
+    // The line moved down by the label and the note; find it again.
+    const QStringList named = view->toPlainText().split(QLatin1Char('\n'));
+    moveq = static_cast<int>(named.indexOf(QRegularExpression(QStringLiteral(".*moveq.*"))));
+    QVERIFY(window.annotateAssemblyLine(moveq, QStringLiteral("returns nothing"), true));
+    QVERIFY(view->toPlainText().contains(QStringLiteral("; returns nothing\n")));
+
+    // A register is refused, with the reason, and nothing changes.
+    const QStringList now = view->toPlainText().split(QLatin1Char('\n'));
+    moveq = static_cast<int>(now.indexOf(QRegularExpression(QStringLiteral(".*moveq.*"))));
+    QVERIFY(!window.annotateAssemblyLine(moveq, QStringLiteral("d0"), false));
+    QCOMPARE(errors.size(), 1);
+    QVERIFY2(errors.first().contains(QStringLiteral("register")), qPrintable(errors.first()));
+    QVERIFY(view->toPlainText().contains(QStringLiteral("\nStart:\n")));
+
+    // The other views use the name.
+    auto *show = window.findChild<QComboBox *>(QStringLiteral("assemblyShow"));
+    show->setCurrentIndex(show->findText(QStringLiteral("Functions")));
+    QVERIFY(view->toPlainText().contains(QStringLiteral("Start (entry)")));
+    show->setCurrentIndex(show->findText(QStringLiteral("Listing")));
+
+    // Empty clears; with nothing left, the notes file goes.
+    QVERIFY(window.annotateAssemblyLine(moveq, QString(), false));
+    const QStringList cleared = view->toPlainText().split(QLatin1Char('\n'));
+    moveq = static_cast<int>(cleared.indexOf(QRegularExpression(QStringLiteral(".*moveq.*"))));
+    QVERIFY(window.annotateAssemblyLine(moveq, QString(), true));
+    QVERIFY(!view->toPlainText().contains(QStringLiteral("Start")));
+    QVERIFY(QDir(dir.filePath(QStringLiteral("projects"))).entryList(QDir::Files).isEmpty());
+    if (before.isEmpty()) {
+        qunsetenv("ADE_PROJECTS");
+    } else {
+        qputenv("ADE_PROJECTS", before);
+    }
 }
 
 void TestMainWindow::aFileThatIsNotAProgramSaysWhyAndCanBeDecodedAnyway() {

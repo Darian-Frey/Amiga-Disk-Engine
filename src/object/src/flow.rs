@@ -81,6 +81,9 @@ pub struct Reference {
     pub to: Place,
     /// How.
     pub kind: RefKind,
+    /// For a read or a write, the bytes the instruction moves at a time — 1,
+    /// 2 or 4 — when its size says.
+    pub width: Option<u8>,
 }
 
 /// One call through a library base the walk had proved.
@@ -415,6 +418,12 @@ impl Walk<'_> {
             _ => None,
         };
         let last = ins.operands.len().saturating_sub(1);
+        let width = ins.size.and_then(|s| match s.suffix() {
+            "b" => Some(1),
+            "w" => Some(2),
+            "l" => Some(4),
+            _ => None,
+        });
         for (n, o) in ins.operands.iter().enumerate() {
             let data = if n == last && !writes_nothing(mnemonic) && ins.operands.len() > 1 {
                 RefKind::Write
@@ -447,6 +456,9 @@ impl Walk<'_> {
                 from: here,
                 to,
                 kind,
+                width: matches!(kind, RefKind::Read | RefKind::Write)
+                    .then_some(width)
+                    .flatten(),
             });
         }
     }
@@ -739,6 +751,7 @@ pub fn executable(bytes: &[u8]) -> Option<Analysis> {
                     from: (k, r.offset),
                     to: (r.target as usize, v),
                     kind: RefKind::Pointer,
+                    width: None,
                 });
             }
         }

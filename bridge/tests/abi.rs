@@ -1733,10 +1733,91 @@ fn a_program_on_the_disk_has_its_views_beside_the_listing() {
         assert_eq!(ade::ade_disasm_count(not_code), 0);
         assert!(ade::ade_disasm_refusal(not_code).len > 0);
         ade::ade_disasm_free(not_code);
+        let strings = text(ade::ade_disasm_view(
+            image,
+            ade::ADE_WHOLE_IMAGE,
+            exe,
+            ade::AdeAsmView::Strings,
+        ));
+        assert!(strings.contains("0 strings"), "{strings}");
+        let variables = text(ade::ade_disasm_view(
+            image,
+            ade::ADE_WHOLE_IMAGE,
+            exe,
+            ade::AdeAsmView::Variables,
+        ));
+        assert!(variables.contains("0 variables"), "{variables}");
+
         // Boot code has no hunks to rebuild; and a blank disk's has none.
         let boot_source = ade::ade_disasm_bootblock_view(image, ade::AdeAsmView::Source);
         assert!(ade::ade_disasm_refusal(boot_source).len > 0);
         ade::ade_disasm_free(boot_source);
+
+        ade::ade_image_free(image);
+    }
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn a_program_on_the_disk_has_its_runs_and_takes_no_name_for_no_place() {
+    let (disk, exe, plain) = code_disk();
+    let (path, c_path) = fixture("disasm-runs", &disk);
+    // SAFETY: a valid path; every handle is freed once.
+    unsafe {
+        let image = ade::ade_image_open(c_path.as_ptr(), std::ptr::null(), std::ptr::null_mut());
+        assert!(!image.is_null());
+        // The program to scale: moveq, rts, nop, nop — reached, then not.
+        let runs = ade::ade_disasm_segments(image, ade::ADE_WHOLE_IMAGE, exe);
+        assert!(!runs.is_null());
+        assert_eq!(ade::ade_segments_refusal(runs).len, 0);
+        let mut run = std::mem::zeroed::<ade::AdeSegment>();
+        let mut kinds = Vec::new();
+        for i in 0..ade::ade_segments_count(runs) {
+            assert_eq!(ade::ade_segments_get(runs, i, &raw mut run), AdeResult::Ok);
+            assert!(run.has_offset);
+            kinds.push((run.class, run.start, run.length));
+        }
+        assert_eq!(
+            kinds,
+            [
+                (ade::AdeSegmentClass::Reached, 0, 4),
+                (ade::AdeSegmentClass::Unreached, 4, 4)
+            ]
+        );
+        let n = ade::ade_segments_count(runs);
+        assert_eq!(
+            ade::ade_segments_get(runs, n, &raw mut run),
+            AdeResult::NotFound
+        );
+        ade::ade_segments_free(runs);
+        let none = ade::ade_disasm_segments(image, ade::ADE_WHOLE_IMAGE, plain);
+        assert_eq!(ade::ade_segments_count(none), 0);
+        assert!(ade::ade_segments_refusal(none).len > 0);
+        ade::ade_segments_free(none);
+        assert!(ade::ade_disasm_segments(std::ptr::null(), 0, 0).is_null());
+        assert!(ade::ade_disasm_bootblock_segments(std::ptr::null()).is_null());
+        assert_eq!(ade::ade_segments_count(std::ptr::null()), 0);
+        ade::ade_segments_free(std::ptr::null_mut());
+
+        // Naming refuses a line that stands for no place, before it looks
+        // for a projects folder (the success path is the C smoke test's,
+        // which can set the folder: these tests run in threads).
+        let mut message: *mut std::ffi::c_char = std::ptr::null_mut();
+        let name = b"Start";
+        let bytes = ade::AdeBytes {
+            data: name.as_ptr(),
+            len: name.len(),
+        };
+        assert_eq!(
+            ade::ade_project_set_name(image, ade::ADE_WHOLE_IMAGE, exe, 0, bytes, &raw mut message),
+            AdeResult::NotFound
+        );
+        assert!(!message.is_null());
+        ade::ade_string_free(message);
+        assert_eq!(
+            ade::ade_project_set_name(std::ptr::null(), 0, 0, 0, bytes, std::ptr::null_mut()),
+            AdeResult::NullArgument
+        );
 
         ade::ade_image_free(image);
     }

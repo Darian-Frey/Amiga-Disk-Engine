@@ -3,6 +3,7 @@
 #include "HexView.h"
 #include "MapView.h"
 #include "SurfaceView.h"
+#include "SegmentBar.h"
 #include "ImageTree.h"
 
 #include <QAction>
@@ -310,6 +311,33 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
     m_asm->setLineWrapMode(QPlainTextEdit::NoWrap);
     m_asm->setFont(QFontDatabase::systemFont(QFontDatabase::FixedFont));
     new AsmHighlighter(m_asm->document(), m_asm);
+    // Naming a place and commenting on a line (D-022), from the line itself.
+    m_asm->setContextMenuPolicy(Qt::CustomContextMenu);
+    connect(m_asm, &QWidget::customContextMenuRequested, this, [this](const QPoint &at) {
+        const int line = m_asm->cursorForPosition(at).blockNumber();
+        QMenu *menu = m_asm->createStandardContextMenu();
+        const int view = m_asmShow ? m_asmShow->currentData().toInt() : -1;
+        const bool placed = view < 0 && !m_asmForceRaw && line >= 0 &&
+                            line < m_asmShown.lines.size() && m_asmShown.lines[line].hasOffset;
+        menu->addSeparator();
+        QAction *name = menu->addAction(QStringLiteral("Name this place..."));
+        QAction *note = menu->addAction(QStringLiteral("Comment on this line..."));
+        name->setEnabled(placed);
+        note->setEnabled(placed);
+        const auto ask = [this, line](bool comment) {
+            bool ok = false;
+            const QString text = QInputDialog::getText(
+                this, comment ? QStringLiteral("Comment") : QStringLiteral("Name"),
+                comment ? QStringLiteral("Comment on this line (empty to clear):")
+                        : QStringLiteral("Name for this place (empty to clear):"),
+                QLineEdit::Normal, QString(), &ok);
+            if (ok) annotateAssemblyLine(line, text.trimmed(), comment);
+        };
+        connect(name, &QAction::triggered, this, [ask] { ask(false); });
+        connect(note, &QAction::triggered, this, [ask] { ask(true); });
+        menu->exec(m_asm->viewport()->mapToGlobal(at));
+        delete menu;
+    });
     m_asmStatus = new QLabel(this);
     m_asmStatus->setObjectName(QStringLiteral("assemblyStatus"));
     m_asmStatus->setWordWrap(true);
@@ -346,12 +374,14 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
     m_asmShow->addItem(QStringLiteral("Functions"), int(ADE_ASM_FUNCTIONS));
     m_asmShow->addItem(QStringLiteral("Cross-references"), int(ADE_ASM_REFERENCES));
     m_asmShow->addItem(QStringLiteral("Call graph"), int(ADE_ASM_CALL_GRAPH));
+    m_asmShow->addItem(QStringLiteral("Strings"), int(ADE_ASM_STRINGS));
+    m_asmShow->addItem(QStringLiteral("Variables"), int(ADE_ASM_VARIABLES));
     m_asmShow->addItem(QStringLiteral("Source"), int(ADE_ASM_SOURCE));
     m_asmShow->setToolTip(QStringLiteral(
         "Listing: every byte of the code, decoded.\n"
-        "Functions, Cross-references, Call graph: what following the code from where it\n"
-        "starts finds. A library call is named only where the code proves which library\n"
-        "it calls.\n"
+        "Functions, Cross-references, Call graph, Strings, Variables: what following\n"
+        "the code from where it starts finds. A library call is named only where the\n"
+        "code proves which library it calls.\n"
         "Source: the program as assembler source that builds back into the same bytes."));
     connect(m_asmShow, &QComboBox::currentIndexChanged, this, [this] {
         m_asmStale = true;
@@ -373,7 +403,18 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
     asmLayout->setContentsMargins(0, 0, 0, 0);
     asmLayout->setSpacing(0);
     asmLayout->addLayout(asmBar);
-    asmLayout->addWidget(m_asm);
+    // The program to scale beside its listing (F-036); a click goes there.
+    m_asmBar = new SegmentBar(this);
+    m_asmBar->setObjectName(QStringLiteral("assemblySegments"));
+    m_asmBar->hide();
+    connect(m_asmBar, &SegmentBar::jumpTo, this,
+            [this](quint64 offset) { showAssemblyOffset(offset); });
+    auto *asmBody = new QHBoxLayout;
+    asmBody->setContentsMargins(0, 0, 0, 0);
+    asmBody->setSpacing(2);
+    asmBody->addWidget(m_asm, 1);
+    asmBody->addWidget(m_asmBar);
+    asmLayout->addLayout(asmBody, 1);
     m_views->addTab(m_asmTab, QStringLiteral("Assembly"));
 
     // The Decoded view (F-033): a file ADE recognises, in words. Built only
@@ -2761,6 +2802,10 @@ void MainWindow::refreshAssembly() {
         m_asm->clear();
         m_asmStatus->setText(why);
         if (m_asmSave) m_asmSave->setEnabled(false);
+        if (m_asmBar) {
+            m_asmBar->clear();
+            m_asmBar->hide();
+        }
     };
     QString what;
     QString why;
@@ -2792,7 +2837,60 @@ void MainWindow::refreshAssembly() {
     m_asmShown = std::move(listing);
     m_asmWhat = what;
     if (m_asmSave) m_asmSave->setEnabled(true);
+    // The bar goes with the listing, which is what it finds places in; a
+    // guess has no walks to draw.
+    if (m_asmBar) {
+        QVector<SegmentBar::Run> runs;
+        const Open *open = imageFor(m_selected);
+        if (view < 0 && !m_asmForceRaw && open) {
+            runs = m_selected->parent()
+                       ? open->image.segments(m_selected->data(0, RolePartition).toUInt(),
+                                              m_selected->data(0, RoleBlock).toUInt())
+                       : open->image.bootSegments();
+        }
+        m_asmBar->setRuns(runs);
+        m_asmBar->setVisible(!runs.isEmpty());
+    }
     renderAssembly();
+}
+
+bool MainWindow::annotateAssemblyLine(int line, const QString &text, bool comment) {
+    if (line < 0 || line >= m_asmShown.lines.size() || !m_asmShown.lines[line].hasOffset)
+        return false;
+    QTreeWidgetItem *item = m_selected;
+    const Open *open = imageFor(item);
+    if (!open) return false;
+    // The disk's own row is its boot code: block 0.
+    const quint32 block = item->parent() ? item->data(0, RoleBlock).toUInt() : 0;
+    const quint32 partition = item->parent() ? item->data(0, RolePartition).toUInt() : 0;
+    const QString why = open->image.annotate(partition, block, m_asmShown.lines[line].offset,
+                                             text, comment);
+    if (!why.isEmpty()) {
+        emit errorOccurred(why);
+        return false;
+    }
+    // Shown again with the change, where the reader was.
+    const int top = m_asm->verticalScrollBar()->value();
+    m_asmStale = true;
+    refreshAssembly();
+    m_asm->verticalScrollBar()->setValue(top);
+    return true;
+}
+
+void MainWindow::showAssemblyOffset(quint64 offset) {
+    // The line holding the offset: the last one starting at or before it.
+    int found = -1;
+    for (int i = 0; i < m_asmShown.lines.size(); ++i) {
+        const ade::AsmLine &line = m_asmShown.lines[i];
+        if (!line.hasOffset) continue;
+        if (line.offset > offset) break;
+        found = i;
+    }
+    if (found < 0) return;
+    // A block per line, as renderAssembly writes them.
+    QTextCursor cursor(m_asm->document()->findBlockByNumber(found));
+    m_asm->setTextCursor(cursor);
+    m_asm->centerCursor();
 }
 
 void MainWindow::saveAssembly() {

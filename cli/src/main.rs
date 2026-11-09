@@ -164,8 +164,11 @@ struct Args {
     text: bool,
     /// `find` matches ASCII letters in either case.
     ignore_case: bool,
-    /// The volume name `create` gives a new disk.
+    /// The volume name `create` gives a new disk; or, for `annotate`, the
+    /// name to give a place.
     volume_name: Option<String>,
+    /// `annotate`'s comment for a place.
+    comment: Option<String>,
     /// The filesystem `create` formats with: `ofs` or `ffs`.
     volume_type: Option<String>,
     /// `create` makes a high-density disk rather than double-density.
@@ -198,6 +201,8 @@ fn view_flag(arg: &str) -> Option<ade_core::disasm::View> {
         "--xrefs" => Some(View::References),
         "--call-graph" => Some(View::CallGraph),
         "--call-graph=dot" => Some(View::CallGraphDot),
+        "--strings" => Some(View::Strings),
+        "--variables" => Some(View::Variables),
         _ => None,
     }
 }
@@ -217,12 +222,25 @@ fn take_view(arg: &str, view: &mut Option<ade_core::disasm::View>) -> Result<boo
     Ok(true)
 }
 
+/// Take `arg` as one of the options that carry text, `--name=` and the
+/// like, into the slot its prefix names; whether it was one.
+fn text_option<const N: usize>(arg: &str, slots: [(&str, &mut Option<String>); N]) -> bool {
+    for (prefix, slot) in slots {
+        if let Some(value) = arg.strip_prefix(prefix) {
+            *slot = Some(value.to_owned());
+            return true;
+        }
+    }
+    false
+}
+
 fn parse_args(raw: Vec<String>) -> Result<Args, String> {
     let mut positional: Vec<String> = Vec::new();
     let mut format = Format::Text;
     let mut hash = false;
     let mut convert_to: Option<String> = None;
     let mut volume_name: Option<String> = None;
+    let mut comment: Option<String> = None;
     let mut volume_type: Option<String> = None;
     let mut hd = false;
     let mut all = false;
@@ -258,15 +276,16 @@ fn parse_args(raw: Vec<String>) -> Result<Args, String> {
             }
             "--text" => text = true,
             "--ignore-case" | "-i" => ignore_case = true,
-            _ if arg.starts_with("--name=") => {
-                volume_name = Some(arg.trim_start_matches("--name=").to_owned());
-            }
-            _ if arg.starts_with("--type=") => {
-                volume_type = Some(arg.trim_start_matches("--type=").to_owned());
-            }
-            _ if arg.starts_with("--convert=") => {
-                convert_to = Some(arg.trim_start_matches("--convert=").to_owned());
-            }
+            _ if text_option(
+                &arg,
+                [
+                    ("--comment=", &mut comment),
+                    ("--name=", &mut volume_name),
+                    ("--type=", &mut volume_type),
+                    ("--convert=", &mut convert_to),
+                    ("--partition=", &mut partition),
+                ],
+            ) => {}
             "--format=json" | "--json" => format = Format::Json,
             "--format=text" => format = Format::Text,
             other if other.starts_with("--format=") => {
@@ -280,9 +299,6 @@ fn parse_args(raw: Vec<String>) -> Result<Args, String> {
             }
             other if other.starts_with("--output=") => {
                 output = Some(PathBuf::from(other.trim_start_matches("--output=")));
-            }
-            other if other.starts_with("--partition=") => {
-                partition = Some(other.trim_start_matches("--partition=").to_owned());
             }
             "--version" | "-V" | "--help" | "-h" => positional.push(arg),
             other if other.starts_with("--") => return Err(format!("unknown option: {other}")),
@@ -301,6 +317,7 @@ fn parse_args(raw: Vec<String>) -> Result<Args, String> {
         hash,
         convert_to,
         volume_name,
+        comment,
         volume_type,
         hd,
         all,
@@ -370,6 +387,7 @@ fn main() -> ExitCode {
             edit_command(&args)
         }
         ("disasm", 1 | 2) => disasm(&args),
+        ("annotate", 2 | 3) => annotate(&args),
         ("decode", 2) => decode(&args),
         ("scan", 1) => scan(Path::new(p(0)), args.format),
         ("find", 2) => find(
@@ -418,7 +436,7 @@ fn main() -> ExitCode {
 }
 
 fn usage() {
-    let lines = vec![
+    let mut lines = vec![
         format!("ade {} — Amiga Disk Engine", ade_core::version()),
         String::new(),
         "USAGE:".to_owned(),
@@ -449,6 +467,8 @@ fn usage() {
             .to_owned(),
         "    ade disasm <image> [path]          a program's 68000 code; no path: the bootblock"
             .to_owned(),
+        "    ade annotate <image> [path] <place>  name a place in a program, or comment on it"
+            .to_owned(),
         "    ade decode <image> <path>          what a file says, in words (F-033)".to_owned(),
         "    ade scan <image>                   find known content by its magic (F-020)".to_owned(),
         "    ade find <image> <pattern>         search the image for text or hex (F-021)"
@@ -466,6 +486,14 @@ fn usage() {
             .to_owned(),
         "    ade consolidate <a> <b> [...]      what several dumps agree on (F-008)".to_owned(),
         "    ade --version".to_owned(),
+    ];
+    lines.extend(options());
+    emit_lines(&mut std::io::stdout().lock(), &lines);
+}
+
+/// The help's options and exit codes.
+fn options() -> Vec<String> {
+    vec![
         String::new(),
         "OPTIONS:".to_owned(),
         "    --format=text   human-readable (default); layout is not stable".to_owned(),
@@ -477,6 +505,12 @@ fn usage() {
         "    --xrefs         disasm: every place the code refers to, and from where".to_owned(),
         "    --call-graph    disasm: who calls whom; --call-graph=dot for Graphviz".to_owned(),
         "    --export        disasm: source that assembles back to the program".to_owned(),
+        "    --strings       disasm: the program's strings, and what refers to each".to_owned(),
+        "    --variables     disasm: what the code reads and writes by name".to_owned(),
+        "    --comment=TEXT  annotate: a comment on the place; --name=N names it instead"
+            .to_owned(),
+        "                    (empty clears; kept per program in ~/.local/share/ade/projects)"
+            .to_owned(),
         "    --hash          include SHA-1 content hashes (not free; see VOCABULARY.md)".to_owned(),
         "    --name=NAME     create: the volume name (default \"Empty\"); format: a new one"
             .to_owned(),
@@ -511,8 +545,7 @@ fn usage() {
         "    0  clean   1  faults   2  usage   3  unreadable   4  no volume".to_owned(),
         String::new(),
         "`check` exits 1 on any warning, and 5 when an error would lose data.".to_owned(),
-    ];
-    emit_lines(&mut std::io::stdout().lock(), &lines);
+    ]
 }
 
 /// Split `A/B/Name` into the directory part and the last component.
@@ -910,6 +943,98 @@ fn listing_lines(l: &ade_core::disasm::Listing) -> Vec<String> {
         .iter()
         .map(ade_core::disasm::Line::with_comment)
         .collect()
+}
+
+/// `ade annotate`: name a place in a program, or comment on it (D-022).
+///
+/// The notes are the user's, kept per program in the projects folder, never
+/// in the image. An empty `--name=` or `--comment=` clears it.
+fn annotate(args: &Args) -> ExitCode {
+    use ade_core::project::{self, Change};
+    // Refused rather than ignored (BUG-007).
+    if args.format == Format::Json {
+        eprintln!("ade: annotate has no JSON output; it reports in text only");
+        return ExitCode::from(EXIT_USAGE);
+    }
+    let path = Path::new(args.positional.first().map_or("", String::as_str));
+    let (inner, place) = match args.positional.as_slice() {
+        [_, place] => (None, place.as_str()),
+        [_, inner, place] => (Some(inner.as_str()), place.as_str()),
+        _ => return ExitCode::from(EXIT_USAGE),
+    };
+    let change = match (&args.volume_name, &args.comment) {
+        (Some(n), None) => Change::Name((!n.is_empty()).then_some(n.as_str())),
+        (None, Some(c)) => Change::Comment((!c.is_empty()).then_some(c.as_str())),
+        _ => {
+            eprintln!("ade: annotate takes one of --name= and --comment=");
+            return ExitCode::from(EXIT_USAGE);
+        }
+    };
+    let image = match Image::open(path) {
+        Ok(i) => i,
+        Err(e) => {
+            eprintln!("ade: {}: {e}", path.display());
+            return ExitCode::from(EXIT_UNREADABLE);
+        }
+    };
+    let (program, boot) = match inner {
+        None => (image.read_range(0, 1024), true),
+        Some(inner) => {
+            let window = match select_partition(&image, args.partition.as_deref()) {
+                Ok(w) => w,
+                Err(e) => {
+                    eprintln!("ade: {}: {e}", path.display());
+                    return ExitCode::from(EXIT_NO_VOLUME);
+                }
+            };
+            let mounted = match &window {
+                Some(w) => Volume::mount(w),
+                None => image.volume(),
+            };
+            let volume = match mounted {
+                Ok(v) => v,
+                Err(e) => {
+                    eprintln!("ade: {}: {e}", path.display());
+                    return ExitCode::from(EXIT_NO_VOLUME);
+                }
+            };
+            match lookup(&volume, inner).and_then(|e| volume.read_file(&e)) {
+                Ok(d) => (d.into_bytes(), false),
+                Err(e) => {
+                    eprintln!("ade: {inner}: {e}");
+                    return ExitCode::from(EXIT_FAULTS);
+                }
+            }
+        }
+    };
+    // A place by its label, or by the name it has been given.
+    let (notes, _) = project::load(&program);
+    let found = ade_object_place(place).or_else(|| {
+        notes
+            .names
+            .iter()
+            .find(|(_, n)| n.as_str() == place)
+            .map(|(p, _)| *p)
+    });
+    let Some(found) = found else {
+        eprintln!("ade: {place}: not a place like h0_0042, nor a name given to one");
+        return ExitCode::from(EXIT_USAGE);
+    };
+    match project::change(&program, boot, found, change) {
+        Ok(file) => {
+            println!("{}", file.display());
+            ExitCode::from(EXIT_CLEAN)
+        }
+        Err(why) => {
+            eprintln!("ade: {why}");
+            ExitCode::from(EXIT_FAULTS)
+        }
+    }
+}
+
+/// A place written as the export labels it.
+fn ade_object_place(text: &str) -> Option<ade_core::disasm::Place> {
+    ade_core::layers::object::annotations::parse_place(text)
 }
 
 /// `ade decode`: what a file says, in words (F-033).

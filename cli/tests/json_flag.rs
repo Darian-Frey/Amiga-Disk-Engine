@@ -298,6 +298,11 @@ fn every_command_either_emits_json_or_refuses_it() {
         ("diff", vec![d.clone(), d.clone()], Json::Emits),
         ("consolidate", vec![d.clone(), d.clone()], Json::Emits),
         ("disasm", vec![d.clone()], Json::Refuses),
+        (
+            "annotate",
+            vec![d.clone(), "h0_000c".into(), "--name=Boot".into()],
+            Json::Refuses,
+        ),
         ("decode", vec![d.clone(), "startup".into()], Json::Refuses),
         (
             "rm",

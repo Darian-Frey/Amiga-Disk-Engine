@@ -11,7 +11,9 @@
 //! the type is dropped here; it decides only where a loader puts a hunk, not
 //! its bytes. Local only: the corpus is not in the repository (D-010), and
 //! the tools are `m68k-linux-gnu-as`, `-ld` and `-objcopy`. Any missing, the
-//! test skips. A second test does the same with vasm (IMP-020), which also
+//! test skips. Every other program is exported with a name at every place
+//! the code refers to and a comment on every function (D-022), and must
+//! rebuild all the same. A second test does the same with vasm (IMP-020), which also
 //! sees the relocations — linked at zero, a dropped relocation leaves every
 //! byte right (BUG-020). `ADE_DISASM_CORPUS=all` takes every executable; by default
 //! every 10th. Measured 2026-11-08 with all: 39,348 programs, every hunk
@@ -33,8 +35,9 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use ade_core::Image;
-use ade_core::layers::object::export;
+use ade_core::layers::object::annotations::Annotations;
 use ade_core::layers::object::hunk::{self, Kind, Memory};
+use ade_core::layers::object::{export, flow};
 
 fn tool(name: &str) -> Option<String> {
     let candidate = format!("m68k-linux-gnu-{name}");
@@ -44,6 +47,36 @@ fn tool(name: &str) -> Option<String> {
         .ok()
         .filter(|o| o.status.success())
         .map(|_| candidate)
+}
+
+/// Names and comments for every other program (D-022): a name for every
+/// function start and every place the code refers to, a comment on every
+/// function — far more than anybody would write, so that names land
+/// everywhere a label can, and the source must still rebuild.
+fn notes_for(bytes: &[u8], n: usize) -> Annotations {
+    let mut notes = Annotations::default();
+    if n % 2 == 0 {
+        return notes;
+    }
+    let Some(a) = flow::executable(bytes) else {
+        return notes;
+    };
+    for f in &a.functions {
+        let (k, at) = f.start;
+        notes
+            .set_name(f.start, Some(&format!("fn_{k}_{at:x}")))
+            .unwrap();
+        notes.set_comment(f.start, Some("a function")).unwrap();
+    }
+    for r in &a.references {
+        let (k, at) = r.to;
+        if !notes.names.contains_key(&r.to) {
+            notes
+                .set_name(r.to, Some(&format!("v_{k}_{at:x}")))
+                .unwrap();
+        }
+    }
+    notes
 }
 
 /// Every executable on every corpus disk, as (where, bytes).
@@ -176,8 +209,8 @@ fn every_exported_program_assembles_back_to_its_own_bytes() {
     std::fs::create_dir_all(&dir).unwrap();
     let (mut programs, mut instructions, mut words) = (0usize, 0usize, 0usize);
     let mut failures = Vec::new();
-    for (place, bytes) in executables(&corpus, step) {
-        let Some(e) = export::executable(&bytes) else {
+    for (n, (place, bytes)) in executables(&corpus, step).into_iter().enumerate() {
+        let Some(e) = export::executable_with(&bytes, &notes_for(&bytes, n)) else {
             continue;
         };
         let hunks = export::hunk_bytes(&bytes).unwrap();
@@ -318,8 +351,8 @@ fn every_exported_program_rebuilds_with_vasm() {
     let keep = std::env::var_os("ADE_EXPORT_KEEP").is_some();
     let mut programs = 0usize;
     let mut failures = Vec::new();
-    for (place, bytes) in executables(&corpus, step) {
-        let Some(e) = export::executable(&bytes) else {
+    for (n, (place, bytes)) in executables(&corpus, step).into_iter().enumerate() {
+        let Some(e) = export::executable_with(&bytes, &notes_for(&bytes, n)) else {
             continue;
         };
         let want = loaded(&bytes).unwrap();

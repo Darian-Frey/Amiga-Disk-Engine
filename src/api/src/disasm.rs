@@ -50,9 +50,41 @@ pub fn file(bytes: &[u8], mode: Mode) -> Result<Listing, NotCode> {
                 .to_owned(),
         ));
     }
-    ade_object::listing::executable(bytes).ok_or_else(|| {
+    let (notes, problems) = crate::project::load(bytes);
+    let mut listing = ade_object::listing::executable_with(bytes, &notes).ok_or_else(|| {
         NotCode("it begins like an executable, but its hunk header is unreadable".to_owned())
-    })
+    })?;
+    say_whose(&mut listing, bytes, &notes, &problems);
+    Ok(listing)
+}
+
+/// Say at the top of a listing that names and comments in it are the
+/// user's, from which file, and what of that file could not be read.
+fn say_whose(listing: &mut Listing, program: &[u8], notes: &Annotations, problems: &[String]) {
+    let mut said: Vec<String> = problems.iter().map(|p| format!("; project: {p}")).collect();
+    if !notes.is_empty()
+        && let Some(dir) = crate::project::location()
+    {
+        said.insert(
+            0,
+            format!(
+                "; names and comments are yours, from {}",
+                crate::project::file_in(&dir, program).display()
+            ),
+        );
+    }
+    for (n, text) in said.into_iter().enumerate() {
+        listing.lines.insert(
+            n,
+            Line {
+                kind: LineKind::Note,
+                offset: None,
+                length: 0,
+                text,
+                comment: None,
+            },
+        );
+    }
 }
 
 /// The image's boot code as a listing.
@@ -67,7 +99,10 @@ pub fn bootblock(image: &Image) -> Result<Listing, NotCode> {
             "this image does not begin with an AmigaDOS bootblock".to_owned(),
         ));
     }
-    Ok(ade_object::listing::bootblock(&boot))
+    let (notes, problems) = crate::project::load(&boot);
+    let mut listing = ade_object::listing::bootblock_with(&boot, &notes);
+    say_whose(&mut listing, &boot, &notes, &problems);
+    Ok(listing)
 }
 
 /// One of the views beside the listing (D-021).
@@ -83,8 +118,13 @@ pub enum View {
     CallGraphDot,
     /// Source that assembles back to the program (executables only).
     Source,
+    /// Every string outside the code, and what refers to it.
+    Strings,
+    /// Every place the code reads, writes or takes the address of by name.
+    Variables,
 }
 
+pub use ade_object::annotations::Annotations;
 pub use ade_object::export::Export;
 pub use ade_object::flow::{Analysis, Function, LibraryCall, Place, RefKind, Reference};
 
@@ -119,14 +159,30 @@ pub fn bootblock_analysis(image: &Image) -> Result<Analysis, NotCode> {
 /// # Errors
 /// [`NotCode`] for what is not an executable.
 pub fn file_view(bytes: &[u8], view: View) -> Result<Vec<String>, NotCode> {
+    use ade_object::program;
+    let (notes, _) = crate::project::load(bytes);
+    let n = &notes;
+    if matches!(view, View::Strings | View::Variables) {
+        let a = analysis(bytes)?;
+        let unreadable = || NotCode("its hunk header is unreadable".to_owned());
+        return Ok(if view == View::Strings {
+            strings(&program::strings(bytes, &a).ok_or_else(unreadable)?, &a, n)
+        } else {
+            variables(
+                &program::variables(bytes, &a).ok_or_else(unreadable)?,
+                &a,
+                n,
+            )
+        });
+    }
     if view == View::Source {
         file(bytes, Mode::Auto)?;
-        let e = ade_object::export::executable(bytes).ok_or_else(|| {
+        let e = ade_object::export::executable_with(bytes, n).ok_or_else(|| {
             NotCode("none of its hunks can be read, so there is nothing to rebuild".to_owned())
         })?;
         return Ok(e.source.lines().map(str::to_owned).collect());
     }
-    Ok(render(&analysis(bytes)?, view))
+    Ok(render_with(&analysis(bytes)?, view, n))
 }
 
 /// A view of the image's boot code, as lines of text.
@@ -140,19 +196,132 @@ pub fn bootblock_view(image: &Image, view: View) -> Result<Vec<String>, NotCode>
             "boot code is not a program file, so there is no source to rebuild it from".to_owned(),
         ));
     }
-    Ok(render(&bootblock_analysis(image)?, view))
+    let a = bootblock_analysis(image)?;
+    let boot = image.read_range(0, 1024);
+    let (notes, _) = crate::project::load(&boot);
+    let n = &notes;
+    Ok(match view {
+        View::Strings => strings(&ade_object::program::boot_strings(&boot, &a), &a, n),
+        View::Variables => variables(&ade_object::program::boot_variables(&boot, &a), &a, n),
+        _ => render_with(&a, view, n),
+    })
 }
 
 /// An analysis as the lines of one view.
+///
+/// The views that need the program's bytes as well — source, strings and
+/// variables — come from [`file_view`] and [`bootblock_view`], and are empty
+/// here.
 #[must_use]
 pub fn render(a: &Analysis, view: View) -> Vec<String> {
+    render_with(a, view, &Annotations::default())
+}
+
+/// [`render`], each place called by the user's name for it (D-022).
+#[must_use]
+pub fn render_with(a: &Analysis, view: View, n: &Annotations) -> Vec<String> {
     match view {
-        View::Functions => functions(a),
-        View::References => references(a),
-        View::CallGraph => call_tree(a),
-        View::CallGraphDot => call_dot(a),
-        View::Source => Vec::new(),
+        View::Functions => functions(a, n),
+        View::References => references(a, n),
+        View::CallGraph => call_tree(a, n),
+        View::CallGraphDot => call_dot(a, n),
+        View::Source | View::Strings | View::Variables => Vec::new(),
     }
+}
+
+/// References, grouped by how they refer: `read from h0_0010, h0_0024;
+/// write from h0_0030`.
+fn how_referred(refs: &[Reference], n: &Annotations) -> String {
+    let mut by_kind: std::collections::BTreeMap<RefKind, Vec<String>> =
+        std::collections::BTreeMap::new();
+    for r in refs {
+        by_kind.entry(r.kind).or_default().push(n.label(r.from));
+    }
+    by_kind
+        .iter()
+        .map(|(k, from)| {
+            // A long list is cut: the cross-references view has it whole.
+            let shown: Vec<String> = from.iter().take(8).cloned().collect();
+            let more = from.len().saturating_sub(shown.len());
+            let tail = if more > 0 {
+                format!(" and {more} more")
+            } else {
+                String::new()
+            };
+            format!("{} from {}{tail}", k.name(), shown.join(", "))
+        })
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
+fn strings(texts: &[ade_object::program::Text], a: &Analysis, n: &Annotations) -> Vec<String> {
+    let used = texts.iter().filter(|t| !t.references.is_empty()).count();
+    let mut out = vec![format!(
+        "; {} string{} outside the code the walks reached; {used} of them referred to by the code",
+        texts.len(),
+        if texts.len() == 1 { "" } else { "s" },
+    )];
+    caveats(a, &mut out);
+    out.push(
+        "; one nothing refers to is listed only if it looks like text: it may be data that does"
+            .to_owned(),
+    );
+    out.push(String::new());
+    for t in texts {
+        let mut line = format!("{:<12}{}", n.label(t.at), t.quoted());
+        if !t.references.is_empty() {
+            line = format!("{line:<60}  ; {}", how_referred(&t.references, n));
+        }
+        if t.also_code {
+            line.push_str("; a walk also read it as code, so the listing there is likely wrong");
+        }
+        out.push(line);
+    }
+    out
+}
+
+fn variables(vars: &[ade_object::program::Variable], a: &Analysis, n: &Annotations) -> Vec<String> {
+    let mut out = vec![format!(
+        "; {} variable{}: places the code reads, writes or takes the address of by name",
+        vars.len(),
+        if vars.len() == 1 { "" } else { "s" },
+    )];
+    caveats(a, &mut out);
+    out.push(
+        "; one reached only through a register — a small-data base like $1c(a4) — is not seen"
+            .to_owned(),
+    );
+    out.push(String::new());
+    out.push(format!(
+        "{:<12}{:<6}{:<11}{:>6}{:>7}{:>9}  referred to",
+        "place", "hunk", "size", "reads", "writes", "address"
+    ));
+    for v in vars {
+        let size = if v.widths.is_empty() {
+            "-".to_owned()
+        } else {
+            v.widths
+                .iter()
+                .map(|w| match w {
+                    1 => "byte",
+                    2 => "word",
+                    _ => "long",
+                })
+                .collect::<Vec<_>>()
+                .join(",")
+        };
+        out.push(format!(
+            "{:<12}{:<6}{:<11}{:>6}{:>7}{:>9}  {}",
+            n.label(v.at),
+            v.kind.name().to_ascii_lowercase(),
+            size,
+            v.reads,
+            v.writes,
+            v.addresses,
+            how_referred(&v.references, n)
+        ));
+    }
+    out
 }
 
 /// What a walk says about itself: what it could not follow, and a stop.
@@ -174,8 +343,8 @@ fn caveats(a: &Analysis, out: &mut Vec<String>) {
     }
 }
 
-fn function_name(f: &Function) -> String {
-    let mut name = place_name(f.start);
+fn function_name(f: &Function, n: &Annotations) -> String {
+    let mut name = n.label(f.start);
     if let Some(symbol) = &f.name {
         name = format!("{name} {symbol}");
     }
@@ -185,7 +354,7 @@ fn function_name(f: &Function) -> String {
     name
 }
 
-fn functions(a: &Analysis) -> Vec<String> {
+fn functions(a: &Analysis, n: &Annotations) -> Vec<String> {
     let mut out = vec![format!(
         "; {} function{}, found by following the code from where it starts; {} library call{} \
          whose library the code proves",
@@ -203,7 +372,7 @@ fn functions(a: &Analysis) -> Vec<String> {
     for f in &a.functions {
         out.push(format!(
             "{:<28}{:>7}{:>14}{:>9}{:>7}{:>10}",
-            function_name(f),
+            function_name(f, n),
             f.bytes,
             f.instructions,
             f.callers.len(),
@@ -215,13 +384,13 @@ fn functions(a: &Analysis) -> Vec<String> {
         out.push(String::new());
         out.push("; library calls".to_owned());
         for c in &a.library_calls {
-            out.push(format!("{:<12}{}", place_name(c.at), c.describe()));
+            out.push(format!("{:<12}{}", n.label(c.at), c.describe()));
         }
     }
     out
 }
 
-fn references(a: &Analysis) -> Vec<String> {
+fn references(a: &Analysis, n: &Annotations) -> Vec<String> {
     let targets: std::collections::BTreeSet<Place> = a.references.iter().map(|r| r.to).collect();
     let mut out = vec![format!(
         "; {} place{} referred to, by {} reference{} from code the walks reached and from \
@@ -237,13 +406,13 @@ fn references(a: &Analysis) -> Vec<String> {
         let mut by_kind: std::collections::BTreeMap<RefKind, Vec<String>> =
             std::collections::BTreeMap::new();
         for r in a.references_to(to) {
-            by_kind.entry(r.kind).or_default().push(place_name(r.from));
+            by_kind.entry(r.kind).or_default().push(n.label(r.from));
         }
         let what: Vec<String> = by_kind
             .iter()
             .map(|(k, from)| format!("{} from {}", k.name(), from.join(", ")))
             .collect();
-        let mut name = place_name(to);
+        let mut name = n.label(to);
         if a.function(to).is_some() {
             name.push_str(" (function)");
         }
@@ -277,7 +446,7 @@ fn library_leaves(a: &Analysis, f: &Function) -> Vec<String> {
 /// Lines a call tree may hold before it stops.
 const MAX_TREE: usize = 20_000;
 
-fn call_tree(a: &Analysis) -> Vec<String> {
+fn call_tree(a: &Analysis, n: &Annotations) -> Vec<String> {
     let mut out = vec![
         "; who calls whom, from where the program starts; a function already shown is not \
          shown again"
@@ -299,10 +468,10 @@ fn call_tree(a: &Analysis) -> Vec<String> {
             let Some(f) = a.function(at) else { continue };
             let indent = "  ".repeat(depth);
             if !shown.insert(at) {
-                out.push(format!("{indent}{} (above)", function_name(f)));
+                out.push(format!("{indent}{} (above)", function_name(f, n)));
                 continue;
             }
-            out.push(format!("{indent}{}", function_name(f)));
+            out.push(format!("{indent}{}", function_name(f, n)));
             for leaf in library_leaves(a, f) {
                 out.push(format!("{indent}  - {leaf}"));
             }
@@ -314,7 +483,7 @@ fn call_tree(a: &Analysis) -> Vec<String> {
     out
 }
 
-fn call_dot(a: &Analysis) -> Vec<String> {
+fn call_dot(a: &Analysis, n: &Annotations) -> Vec<String> {
     let mut out = vec![
         "digraph calls {".to_owned(),
         "  node [shape=box, fontname=\"monospace\"];".to_owned(),
@@ -323,24 +492,49 @@ fn call_dot(a: &Analysis) -> Vec<String> {
         let shape = if f.entry { ", style=bold" } else { "" };
         out.push(format!(
             "  \"{}\" [label=\"{}\"{shape}];",
-            place_name(f.start),
-            function_name(f).replace('"', "'")
+            n.label(f.start),
+            function_name(f, n).replace('"', "'")
         ));
         for callee in &f.calls {
             out.push(format!(
                 "  \"{}\" -> \"{}\";",
-                place_name(f.start),
-                place_name(*callee)
+                n.label(f.start),
+                n.label(*callee)
             ));
         }
         for leaf in library_leaves(a, f) {
             out.push(format!(
                 "  \"{0}\" -> \"{0}:{1}\"; \"{0}:{1}\" [label=\"{1}\", shape=note];",
-                place_name(f.start),
+                n.label(f.start),
                 leaf.replace('"', "'")
             ));
         }
     }
     out.push("}".to_owned());
     out
+}
+
+pub use ade_object::program::{Class, Segment};
+
+/// A program as runs of reached code, unreached code, strings, data and
+/// zeroed memory, for a bar beside the listing.
+///
+/// # Errors
+/// [`NotCode`] as [`analysis`] gives it.
+pub fn file_segments(bytes: &[u8]) -> Result<Vec<Segment>, NotCode> {
+    let a = analysis(bytes)?;
+    ade_object::program::segments(bytes, &a)
+        .ok_or_else(|| NotCode("its hunk header is unreadable".to_owned()))
+}
+
+/// The boot code as runs, as [`file_segments`] gives a program's.
+///
+/// # Errors
+/// [`NotCode`] as [`bootblock`] gives it.
+pub fn bootblock_segments(image: &Image) -> Result<Vec<Segment>, NotCode> {
+    let a = bootblock_analysis(image)?;
+    Ok(ade_object::program::boot_segments(
+        &image.read_range(0, 1024),
+        &a,
+    ))
 }

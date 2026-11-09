@@ -43,11 +43,13 @@ qt_add_executable(ade-gui
     src/HexView.cpp
     src/MapView.cpp
     src/SurfaceView.cpp
+    src/SegmentBar.cpp
     src/MainWindow.h
     src/ImageTree.h
     src/HexView.h
     src/MapView.h
     src/SurfaceView.h
+    src/SegmentBar.h
     src/Image.h
 )
 add_dependencies(ade-gui ade_bridge)
@@ -71,11 +73,13 @@ if(Qt6Test_FOUND)
         src/HexView.cpp
         src/MapView.cpp
         src/SurfaceView.cpp
+        src/SegmentBar.cpp
         src/MainWindow.h
         src/ImageTree.h
         src/HexView.h
         src/MapView.h
         src/SurfaceView.h
+        src/SegmentBar.h
         src/Image.h
     )
     add_dependencies(ade-gui-tests ade_bridge)
