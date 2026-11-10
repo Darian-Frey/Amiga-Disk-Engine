@@ -793,6 +793,10 @@ bool MainWindow::closeAll() {
     m_hex->clear();
     m_images.clear();
     clearViews();
+    // Image numbers start again from 0, so the map's must not linger.
+    m_map->clear();
+    m_mapLegend->hide();
+    m_mapImage = NoMap;
     setWindowTitle(QStringLiteral("Amiga Disk Engine"));
     m_summary->clear();
     m_lastEdited = static_cast<size_t>(-1);
@@ -1854,6 +1858,7 @@ void MainWindow::showWholeDisk(QTreeWidgetItem *item) {
     const QVector<HexRegion> regions = open->image.regions();
     m_map->setMap(regions, open->image.size() / 512, 512);
     showMapLegend(regions);
+    m_mapImage = open->index;
     m_hex->setSource(size, read);
     m_hex->setRegions(regions);
     m_diskRegions = regions;
@@ -1936,6 +1941,11 @@ void MainWindow::showEntry(QTreeWidgetItem *item) {
     }
     if (!item || item->data(0, RoleIsDir).toBool()) {
         clearViews();
+        // A folder is on a disk too: its map, with the folder's own block.
+        if (item) {
+            mapDiskOf(item);
+            m_map->highlightOwner(item->data(0, RoleBlock).toUInt());
+        }
         return;
     }
     m_extract->setEnabled(true);
@@ -1952,9 +1962,11 @@ void MainWindow::showEntry(QTreeWidgetItem *item) {
     if (m_follow) m_follow->stop();
     markRow(0);
     showLegend({});
-    // The map stays: it belongs to the disk, not to the row. Selecting a file
-    // picks its blocks out instead, which is the thing a listing cannot show —
-    // where the file actually lives, and how scattered it is.
+    // The map belongs to the disk, not to the row. Selecting a file picks its
+    // blocks out, which is the thing a listing cannot show — where the file
+    // actually lives, and how scattered it is. On its own disk's map: built
+    // now if a file is the first thing selected, or another disk's is up.
+    mapDiskOf(item);
     m_map->highlightOwner(item->data(0, RoleBlock).toUInt());
 
     const QByteArray data = contentsOf(item);
@@ -1980,6 +1992,18 @@ void MainWindow::showEntry(QTreeWidgetItem *item) {
     } else {
         statusBar()->showMessage(QStringLiteral("%1 bytes").arg(data.size()));
     }
+}
+
+void MainWindow::mapDiskOf(QTreeWidgetItem *item) {
+    const Open *open = imageFor(item);
+    if (open && open->index != m_mapImage) buildMap(*open);
+}
+
+void MainWindow::buildMap(const Open &open) {
+    const QVector<HexRegion> regions = open.image.regions();
+    m_map->setMap(regions, open.image.size() / 512, 512);
+    showMapLegend(regions);
+    m_mapImage = open.index;
 }
 
 void MainWindow::extractSelected() {
@@ -2580,6 +2604,8 @@ void MainWindow::reloadImage(Open &open) {
             }
         }
     }
+    // An edit moves blocks: a map of this disk is drawn again.
+    if (m_mapImage == open.index) buildMap(open);
     showSummary();
     updateEditActions();
 }

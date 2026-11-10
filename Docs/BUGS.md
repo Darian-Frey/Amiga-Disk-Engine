@@ -14,6 +14,18 @@ _None._
 
 ## Fixed
 
+### BUG-022 The map was empty until the disk's own row had been selected, and could show another disk's
+**Severity:** low
+**Status:** fixed
+**Found:** 2026-11-10, from screenshots: open *Zzzep*, select `PARADISE`, then the Map tab — empty; select the disk's row, and the map appears, and the file can then be picked out on it. **Fixed** 2026-11-10.
+**Where:** [gui/src/MainWindow.cpp](../gui/src/MainWindow.cpp): the map was drawn only by `showWholeDisk`, which only selecting a disk's row calls.
+
+**What is wrong.** The map belongs to the disk, and selecting a file picks its blocks out on it — but nothing drew the map when a file was selected. So a file selected first had no map to be picked out on. And with two disks open, the map stayed on whichever disk's row was selected last, so a file on the other disk lit up its block numbers on the wrong disk's map, which looks deliberate and is not.
+
+**Correct behaviour.** Selecting anything on a disk — a file, a folder, or the disk — shows that disk's map, with the selection picked out.
+
+**The fix.** The window remembers which image the map shows; selecting a file or a folder on another image, or on one whose map has not been drawn, draws that image's map first. An edit draws its disk's map again, since it moves blocks, and Close All forgets it, since image numbers start again. `aFileSelectedFirstStillHasItsDisksMap` opens two disks, selects a file first, then the other disk, then the file again; without the fix it finds no map.
+
 ### BUG-021 The map's unclaimed blocks read as empty page in a dark theme, and its legend's outlines were never drawn
 **Severity:** low
 **Status:** fixed

@@ -252,6 +252,10 @@ private:
     // A file entry's bytes, or empty for a directory or an unreadable one.
     void showHit(QTreeWidgetItem *item);
     void showWholeDisk(QTreeWidgetItem *item);
+    /// Make the map show the disk `item` is on, if it shows another.
+    void mapDiskOf(QTreeWidgetItem *item);
+    /// Draw the map of `open`'s disk.
+    void buildMap(const Open &open);
     void showLegend(const QVector<HexRegion> &regions);
     void showMapLegend(const QVector<HexRegion> &regions);
     void goToOffset(quint64 offset);
@@ -311,6 +315,11 @@ private:
     /// image happens to hold that block number.
     qulonglong m_diskImage = 0;
     quint32 m_diskPartition = 0;
+    /// Which image the map shows, or none. The map belongs to a disk, not to
+    /// a row, so selecting a file picks its blocks out on its own disk's map
+    /// — built first if the map shows another disk, or none yet.
+    static constexpr qulonglong NoMap = ~qulonglong{0};
+    qulonglong m_mapImage = NoMap;
     /// The row currently marked as "this is what you are looking at".
     QTreeWidgetItem *m_marked = nullptr;
     QPlainTextEdit *m_text = nullptr;

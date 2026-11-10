@@ -169,6 +169,7 @@ private slots:
     void theMapColoursFilesAndKeepsEmptySpaceVisible();
     void theMapShowsTheDiskAndClickingACellGoesToIt();
     void selectingAFilePicksOutItsBlocksOnTheMap();
+    void aFileSelectedFirstStillHasItsDisksMap();
     void newDiskIsOfferedAndItsTypesComeFromTheEngine();
     void aFileThatIsNotADiskImageIsDeclinedRatherThanShown();
     void thereIsAHelpMenuWithAnAboutBox();
@@ -1737,6 +1738,48 @@ void TestMainWindow::theMapShowsTheDiskAndClickingACellGoesToIt() {
     auto *tabs = window->findChild<QTabWidget *>();
     QVERIFY(tabs);
     QCOMPARE(tabs->tabText(tabs->currentIndex()), QStringLiteral("Hex"));
+}
+
+namespace {
+QString blankDisk(const QTemporaryDir &dir, const QString &name);
+}  // namespace
+
+// Reported from the window: open a disk, click a file, then Map — empty,
+// until the disk's own row had been clicked once. And with two disks open,
+// a file was picked out on whichever disk's map was up.
+void TestMainWindow::aFileSelectedFirstStillHasItsDisksMap() {
+    QTemporaryDir dir;
+    const QString other = blankDisk(dir, QStringLiteral("other.adf"));
+    MainWindow window;
+    window.resize(1200, 700);
+    window.show();
+    window.openImage(m_image);
+    window.openImage(other);
+    auto *map = window.findChild<MapView *>(QStringLiteral("map"));
+    auto *legend = window.findChild<QLabel *>(QStringLiteral("mapLegend"));
+    QVERIFY(map && legend);
+    map->resize(400, 400);
+    auto *tree = browser(window);
+    QTreeWidgetItem *first = tree->topLevelItem(0);
+    tree->expandItem(first);
+    QTreeWidgetItem *file = childNamed(first, QStringLiteral("data.bin"));
+    QVERIFY(file);
+
+    // A file first, no disk row ever selected: its disk's map, file picked out.
+    tree->setCurrentItem(file, 0, QItemSelectionModel::ClearAndSelect);
+    QApplication::processEvents();
+    QVERIFY2(!legend->isHidden() && legend->text().contains(QStringLiteral("bootblock")),
+             qPrintable(legend->text()));
+    const QImage picked = map->grab().toImage();
+
+    // The other disk's row shows its map; back to the file, its own again.
+    tree->setCurrentItem(tree->topLevelItem(1), 0, QItemSelectionModel::ClearAndSelect);
+    QApplication::processEvents();
+    const QImage blank = map->grab().toImage();
+    QVERIFY2(blank != picked, "the other disk's map is another picture");
+    tree->setCurrentItem(file, 0, QItemSelectionModel::ClearAndSelect);
+    QApplication::processEvents();
+    QCOMPARE(map->grab().toImage(), picked);
 }
 
 void TestMainWindow::selectingAFilePicksOutItsBlocksOnTheMap() {

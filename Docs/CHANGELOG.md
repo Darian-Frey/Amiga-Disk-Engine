@@ -50,6 +50,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com). Reference F-, D-,
 - `Geometry::reserved()`, `Geometry::FLOPPY_RESERVED`, and `GeometryError::ReservedExceedsVolume`.
 
 ### Fixed
+- **The map shows the selected file's own disk, whatever was selected first (BUG-022).** It had been drawn only when a disk's row was selected, so a file selected first showed an empty map, and with two disks open a file could be picked out on the other disk's map.
 - **The map's unclaimed blocks are visible in a dark theme, and its legend's swatches are outlined (BUG-021).** Unclaimed space was the page's own grey on a dark theme; it is now a lighter shade midway between the page and files. The legend's outlines had never been drawn — Qt ignores a border on a span — so the unclaimed swatch vanished against the window; the swatches are now bordered cells.
 - **The export dropped relocations (BUG-020)**: a relocated long running across two decoded instructions, in an opcode word, or in the zeroed memory past a hunk's file data was written as a number, and a byte or word immediate matching a relocated value was named as if it were the long. The address-0 byte comparison it shipped with could not see any of it; vasm's relocation table did, on 1,479 of 3,936 sampled programs. Every relocation now comes back.
 - **An IFF chunk was cut at the end its `FORM` header states (BUG-019),** so a picture whose `FORM` understates its own length lost its last rows. Chunks are now read to their own length, as far as the file goes. No corpus ILBM was affected; seven ACBMs were.
