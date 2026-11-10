@@ -125,6 +125,8 @@ pub struct BitmapHealth {
     /// whether or not deleting left them. Always zero on a volume with
     /// entries.
     pub free_holding_data: usize,
+    /// Those blocks, for a map to show.
+    pub free_holding_data_blocks: Vec<u32>,
 }
 
 /// The condition of one image.
@@ -367,6 +369,98 @@ impl Health {
     pub fn is_sound(&self) -> bool {
         self.worst().is_none_or(|s| s < Severity::Warning)
     }
+}
+
+/// What a block is wrong with, for a map to show (F-027) — the Amiga's
+/// answer to the Atari engine's orphaned, cross-linked and bad clusters.
+/// Ordered worst first: a block wrong in two ways is shown by the worse.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Damage {
+    /// Claimed by two files: writing either corrupts the other.
+    CrossLinked,
+    /// A header, bitmap or rootblock whose checksum does not match.
+    Checksum,
+    /// Another error the health report names this block for.
+    Structure,
+    /// In use by a file, but the bitmap marks it free: the next write may
+    /// land on it.
+    AtRisk,
+    /// Marked in use, and nothing reaches it.
+    Orphaned,
+    /// On a volume with no files, marked free and holding data — usually a
+    /// game its own loader reads (IMP-019).
+    HoldsData,
+}
+
+impl Damage {
+    /// Its name, for a legend.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::CrossLinked => "cross-linked",
+            Self::Checksum => "bad checksum",
+            Self::Structure => "damaged",
+            Self::AtRisk => "at risk",
+            Self::Orphaned => "orphaned",
+            Self::HoldsData => "free, holding data",
+        }
+    }
+
+    /// What it means, in a line.
+    #[must_use]
+    pub const fn describes(self) -> &'static str {
+        match self {
+            Self::CrossLinked => "two files claim this block: writing either corrupts the other",
+            Self::Checksum => {
+                "its checksum does not match: the block is damaged, or not what it seems"
+            }
+            Self::Structure => "the health report finds this block wrong",
+            Self::AtRisk => {
+                "a file uses it, but the bitmap says free: the next write may land here"
+            }
+            Self::Orphaned => {
+                "marked in use, and nothing reaches it: lost space, or a loader's data"
+            }
+            Self::HoldsData => {
+                "marked free on a volume with no files, and holding data a loader may read"
+            }
+        }
+    }
+}
+
+/// Every block the health report finds something wrong with, once each, by
+/// the worst thing wrong with it, in block order.
+#[must_use]
+pub fn damaged_blocks(health: &Health) -> Vec<(u32, Damage)> {
+    let mut worst: std::collections::BTreeMap<u32, Damage> = std::collections::BTreeMap::new();
+    let mut mark = |block: u32, damage: Damage| {
+        worst
+            .entry(block)
+            .and_modify(|d| *d = (*d).min(damage))
+            .or_insert(damage);
+    };
+    for f in &health.findings {
+        let Some(block) = f.block else { continue };
+        if f.code == "cross-linked-block" {
+            mark(block, Damage::CrossLinked);
+        } else if f.code.ends_with("-checksum") {
+            mark(block, Damage::Checksum);
+        } else if f.severity == Severity::Error {
+            mark(block, Damage::Structure);
+        }
+    }
+    if let Some(b) = &health.bitmap {
+        for &block in &b.at_risk_blocks {
+            mark(block, Damage::AtRisk);
+        }
+        for &block in &b.orphaned_blocks {
+            mark(block, Damage::Orphaned);
+        }
+        for &block in &b.free_holding_data_blocks {
+            mark(block, Damage::HoldsData);
+        }
+    }
+    worst.into_iter().collect()
 }
 
 /// Examine an image and report its condition.
@@ -1188,11 +1282,12 @@ fn cross_check_bitmap(
         ));
     }
 
-    let free_holding_data = if empty {
+    let free_holding_data_blocks = if empty {
         report_free_data(image, volume.geometry(), &bitmap, &referenced, findings)
     } else {
-        0
+        Vec::new()
     };
+    let free_holding_data = free_holding_data_blocks.len();
 
     Some(BitmapHealth {
         marked_used: bitmap.used_count(),
@@ -1204,18 +1299,19 @@ fn cross_check_bitmap(
         covered: bitmap.covered(),
         flagged_valid: bitmap.flagged_valid,
         free_holding_data,
+        free_holding_data_blocks,
     })
 }
 
 /// On a volume with no entries, report free blocks that hold data, and
-/// return how many there are.
+/// return them.
 fn report_free_data(
     image: &dyn ade_block::BlockSource,
     geometry: &ade_block::Geometry,
     bitmap: &Bitmap,
     referenced: &HashSet<u32>,
     findings: &mut Vec<Finding>,
-) -> usize {
+) -> Vec<u32> {
     // A game that loads its own tracks can still carry a valid, empty root,
     // so Workbench shows a named disk — and leave the blocks it reads marked
     // free, since it never asked AmigaDOS for them. Such a disk reads as empty
@@ -1225,7 +1321,7 @@ fn report_free_data(
     // an empty volume, because free blocks holding deleted files are ordinary.
     let (holding, listed) = free_holding_data(image, geometry, bitmap, referenced);
     if holding.is_empty() {
-        return 0;
+        return holding;
     }
     let (blocks, hold) = if holding.len() == 1 {
         ("1 block".to_owned(), "holds")
@@ -1247,7 +1343,7 @@ fn report_free_data(
                 summarise(&holding)
             ),
         ));
-        return holding.len();
+        return holding;
     }
     let deleted = match listed {
         0 => String::new(),
@@ -1264,7 +1360,7 @@ fn report_free_data(
             summarise(&holding)
         ),
     ));
-    holding.len()
+    holding
 }
 
 /// The bitmap cross-check as JSON, split out to keep `Health::to_json`

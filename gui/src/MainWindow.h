@@ -16,6 +16,7 @@ class QAction;
 class QLabel;
 class QComboBox;
 class SegmentBar;
+class QToolButton;
 class QLineEdit;
 class QPushButton;
 class QCheckBox;
@@ -108,6 +109,10 @@ public:
     /// comment on it (D-022); empty text clears. Kept in the user's projects
     /// folder, never in the image. A refusal goes to `errorOccurred`.
     bool annotateAssemblyLine(int line, const QString &text, bool comment);
+    /// Draw the control flow of the function line `line` of the Assembly
+    /// listing is in, or (with `calls`) the program's call graph, in a window
+    /// of its own beside the listing. Whether there was one to draw.
+    bool drawAssemblyGraph(int line, bool calls);
     /// Delete the entry `item` is: a file, or a folder with everything in it.
     /// A folder that holds anything is deleted only if the delete
     /// confirmation agrees. Undo brings it back until the disk is saved.
@@ -257,7 +262,7 @@ private:
     /// Draw the map of `open`'s disk.
     void buildMap(const Open &open);
     void showLegend(const QVector<HexRegion> &regions);
-    void showMapLegend(const QVector<HexRegion> &regions);
+    void showMapLegend(const QVector<HexRegion> &regions, const ade::DiskDamage &damage);
     void goToOffset(quint64 offset);
     void markWhatIsOnScreen();
     // Fill the Assembly view for the selection, if it is showing and stale.
@@ -270,6 +275,24 @@ private:
     void saveAssembly();
     /// Move the listing to the line holding file offset `offset`.
     void showAssemblyOffset(quint64 offset);
+    /// Move the listing to line `line`, remembering where it was for Back.
+    void goToAssemblyLine(int line);
+    /// Go to the place `name` names; whether there is one. From another
+    /// view, the listing is shown first.
+    bool goToAssemblyName(const QString &name);
+    /// Follow line `line`: to the one place it refers to, or a choice.
+    void followAssemblyLine(int line);
+    /// Back (-1) or forward (+1) through the places gone to.
+    void stepAssemblyHistory(int step);
+    /// Say what refers to the line the cursor is on.
+    void showAssemblyReferrers();
+    /// Find the next line holding the find text.
+    void findInAssembly();
+
+protected:
+    bool eventFilter(QObject *watched, QEvent *event) override;
+
+private:
     // Fill the Decoded view for the selection, if it is showing and stale.
     void refreshDecoded();
     // Fill whichever of the hex and text panes is showing and not yet filled
@@ -349,6 +372,19 @@ private:
     QCheckBox *m_asmExplain = nullptr;
     /// The program to scale beside the listing (F-036).
     SegmentBar *m_asmBar = nullptr;
+    /// The window a drawn graph is in.
+    QDialog *m_graph = nullptr;
+    /// What refers to the cursor's line, and the way back and forward.
+    QLabel *m_asmRefs = nullptr;
+    QToolButton *m_asmBack = nullptr;
+    QToolButton *m_asmForward = nullptr;
+    QVector<int> m_asmHistory;
+    int m_asmHistoryAt = -1;
+    /// Which lines refer to each offset, for the strip.
+    QHash<quint64, QVector<int>> m_asmReferrers;
+    QString m_asmFind;
+    /// A name to go to once the listing is next shown.
+    QString m_asmPendingName;
     /// Which view: the listing, or one beside it (D-021).
     QComboBox *m_asmShow = nullptr;
     QPushButton *m_asmSave = nullptr;

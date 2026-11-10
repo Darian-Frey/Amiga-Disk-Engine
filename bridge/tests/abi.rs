@@ -1662,6 +1662,28 @@ fn a_program_on_the_disk_lists_and_a_text_file_says_why_not() {
         assert!(std::str::from_utf8(first).unwrap().contains("no boot code"));
         ade::ade_disasm_free(boot);
 
+        // A sound disk has no damage, and counts that add up.
+        let damage = ade::ade_image_damage(image, ade::ADE_WHOLE_IMAGE);
+        assert!(!damage.is_null());
+        assert_eq!(ade::ade_damage_count(damage), 0);
+        let counts = ade::ade_damage_counts(damage);
+        assert!(counts.known && counts.files == 2, "{counts:?}");
+        assert_eq!(counts.used + counts.free, counts.blocks);
+        let mut one = std::mem::zeroed::<ade::AdeDamagedBlock>();
+        assert_eq!(
+            ade::ade_damage_get(damage, 0, &raw mut one),
+            AdeResult::NotFound
+        );
+        ade::ade_damage_free(damage);
+        assert!(
+            ade::ade_image_damage(image, 0).is_null(),
+            "a partition is refused"
+        );
+        assert!(!std::ffi::CStr::from_ptr(ade::ade_damage_name(0)).is_empty());
+        assert!(std::ffi::CStr::from_ptr(ade::ade_damage_name(99)).is_empty());
+        assert!(ade::ade_image_damage(std::ptr::null(), ade::ADE_WHOLE_IMAGE).is_null());
+        ade::ade_damage_free(std::ptr::null_mut());
+
         // Null is tolerated.
         assert!(ade::ade_disasm_view(std::ptr::null(), 0, 0, ade::AdeAsmView::Functions).is_null());
         assert!(
@@ -1672,6 +1694,97 @@ fn a_program_on_the_disk_lists_and_a_text_file_says_why_not() {
         assert_eq!(ade::ade_disasm_count(std::ptr::null()), 0);
         assert_eq!(ade::ade_disasm_refusal(std::ptr::null()).len, 0);
         ade::ade_disasm_free(std::ptr::null_mut());
+        ade::ade_image_free(image);
+    }
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn a_listing_line_says_where_it_goes_and_a_name_finds_its_place() {
+    let (disk, exe, plain) = code_disk();
+    let (path, c_path) = fixture("disasm-lines", &disk);
+    // SAFETY: a valid path; every handle is freed once.
+    unsafe {
+        let image = ade::ade_image_open(c_path.as_ptr(), std::ptr::null(), std::ptr::null_mut());
+        assert!(!image.is_null());
+        let listing = ade::ade_disasm_open(image, ade::ADE_WHOLE_IMAGE, exe, false);
+        assert!(!listing.is_null());
+        // Where control goes, what a line refers to, and where a name is.
+        let flows: Vec<ade::AdeAsmFlow> = (0..ade::ade_disasm_count(listing))
+            .map(|i| ade::ade_disasm_line_flow(listing, i))
+            .collect();
+        assert!(flows.contains(&ade::AdeAsmFlow::Return), "{flows:?}");
+        assert_eq!(
+            ade::ade_disasm_line_flow(listing, usize::MAX),
+            ade::AdeAsmFlow::None
+        );
+        assert_eq!(
+            ade::ade_disasm_line_targets(listing, 0, std::ptr::null_mut(), 0),
+            0
+        );
+        let mut at = 0u64;
+        let entry = b"h0_0000";
+        let unknown = b"nowhere";
+        let bytes = |b: &[u8]| ade::AdeBytes {
+            data: b.as_ptr(),
+            len: b.len(),
+        };
+        assert_eq!(
+            ade::ade_disasm_locate(listing, bytes(entry), &raw mut at),
+            AdeResult::Ok
+        );
+        assert!(at > 0, "the code's first byte is past the hunk header");
+        assert_eq!(
+            ade::ade_disasm_locate(listing, bytes(unknown), &raw mut at),
+            AdeResult::NotFound
+        );
+        ade::ade_disasm_free(listing);
+        // Drawn graphs: the function's one block, and a call graph of one.
+        let flow = ade::ade_disasm_flow_graph(image, ade::ADE_WHOLE_IMAGE, exe, 32);
+        assert_eq!(ade::ade_graph_refusal(flow).len, 0);
+        assert_eq!(ade::ade_graph_node_count(flow), 1);
+        let mut node = std::mem::zeroed::<ade::AdeGraphNode>();
+        assert_eq!(ade::ade_graph_node(flow, 0, &raw mut node), AdeResult::Ok);
+        assert!(
+            node.has_offset && node.offset == 32 && node.kind == 1,
+            "the entry block"
+        );
+        assert_eq!(
+            ade::ade_graph_node(flow, 1, &raw mut node),
+            AdeResult::NotFound
+        );
+        ade::ade_graph_free(flow);
+        let calls = ade::ade_disasm_call_graph(image, ade::ADE_WHOLE_IMAGE, exe);
+        assert_eq!(ade::ade_graph_node_count(calls), 1);
+        assert_eq!(ade::ade_graph_edge_count(calls), 0);
+        ade::ade_graph_free(calls);
+        let not_code = ade::ade_disasm_call_graph(image, ade::ADE_WHOLE_IMAGE, plain);
+        assert!(ade::ade_graph_refusal(not_code).len > 0);
+        ade::ade_graph_free(not_code);
+        assert!(ade::ade_disasm_call_graph(std::ptr::null(), 0, 0).is_null());
+        ade::ade_graph_free(std::ptr::null_mut());
+
+        // What each file is, for its icon: the codes as the header numbers them.
+        assert_eq!(
+            ade::ade_file_kind(image, ade::ADE_WHOLE_IMAGE, exe),
+            1,
+            "ADE_FILE_PROGRAM"
+        );
+        assert_eq!(
+            ade::ade_file_kind(image, ade::ADE_WHOLE_IMAGE, plain),
+            11,
+            "ADE_FILE_TEXT"
+        );
+        assert_eq!(
+            std::ffi::CStr::from_ptr(ade::ade_file_kind_name(1)),
+            c"a program"
+        );
+        assert_eq!(
+            std::ffi::CStr::from_ptr(ade::ade_file_kind_name(18)),
+            c"data"
+        );
+        assert!(std::ffi::CStr::from_ptr(ade::ade_file_kind_name(19)).is_empty());
+
         ade::ade_image_free(image);
     }
     let _ = std::fs::remove_file(&path);

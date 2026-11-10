@@ -7,7 +7,7 @@
 //! file name.
 
 use ade_object::hunk;
-pub use ade_object::listing::{Line, LineKind, Listing};
+pub use ade_object::listing::{Flow, Line, LineKind, Listing};
 
 use crate::Image;
 
@@ -82,6 +82,8 @@ fn say_whose(listing: &mut Listing, program: &[u8], notes: &Annotations, problem
                 length: 0,
                 text,
                 comment: None,
+                flow: Flow::None,
+                targets: Vec::new(),
             },
         );
     }
@@ -537,4 +539,182 @@ pub fn bootblock_segments(image: &Image) -> Result<Vec<Segment>, NotCode> {
         &image.read_range(0, 1024),
         &a,
     ))
+}
+
+pub use ade_object::graph::{Edge, EdgeKind, Graph, Node, NodeKind};
+
+/// A graph to draw, its nodes placed by the offsets listing lines carry, so
+/// a front end can show a block's lines and go to a node.
+#[derive(Debug, Clone, Default)]
+pub struct Drawn {
+    /// The graph, laid out.
+    pub graph: Graph,
+    /// Each node's first and end offsets, in the file or the bootblock; the
+    /// end is past its last byte. `None` for a node with no bytes of its own,
+    /// as a library function.
+    pub offsets: Vec<Option<(u64, u64)>>,
+}
+
+/// One hunk of code, as a graph is drawn from it.
+struct CodeHunk {
+    bytes: Vec<u8>,
+    /// Where its bytes are, as listing lines carry offsets.
+    base: u64,
+    /// Its relocations: the place each relocated long points at.
+    relocs: std::collections::HashMap<u32, Place>,
+}
+
+/// The code of an executable, by hunk.
+fn code_hunks(bytes: &[u8]) -> Option<Vec<CodeHunk>> {
+    let exe = hunk::parse(bytes)?;
+    let count = exe.hunks.len();
+    Some(
+        exe.hunks
+            .iter()
+            .map(|h| {
+                let all = bytes
+                    .get(h.file_offset..h.file_offset.saturating_add(h.file_len))
+                    .unwrap_or(&[]);
+                let relocs = h
+                    .relocs
+                    .iter()
+                    .filter(|r| (r.target as usize) < count)
+                    .filter_map(|r| {
+                        let v = ade_endian::u32_at(all, r.offset as usize).ok()?;
+                        Some((r.offset, (r.target as usize, v)))
+                    })
+                    .collect();
+                CodeHunk {
+                    bytes: if h.kind == hunk::Kind::Code {
+                        all.to_vec()
+                    } else {
+                        Vec::new()
+                    },
+                    base: h.file_offset as u64,
+                    relocs,
+                }
+            })
+            .collect(),
+    )
+}
+
+/// The control flow of the function a line of code is in, from the hunks'
+/// bytes, where they are, and the code's origin.
+fn flow_graph_in(
+    hunks: &[CodeHunk],
+    origin: u32,
+    a: &Analysis,
+    (k, at): Place,
+    n: &Annotations,
+) -> Drawn {
+    let Some(CodeHunk {
+        bytes: code,
+        base,
+        relocs,
+    }) = hunks.get(k)
+    else {
+        return Drawn::default();
+    };
+    let label = |p: Place| n.label(p);
+    let draw = |start: u32| ade_object::graph::function(code, (origin, k), relocs, start, &label);
+    // The latest function start at or before the line whose code reaches it;
+    // failing that, the code from the line itself.
+    let mut starts: Vec<u32> = a
+        .functions
+        .iter()
+        .filter(|f| f.start.0 == k && f.start.1 <= at)
+        .map(|f| f.start.1)
+        .collect();
+    starts.sort_unstable_by(|x, y| y.cmp(x));
+    let graph = starts
+        .iter()
+        .take(64)
+        .map(|&s| draw(s))
+        .find(|g| g.nodes.iter().any(|b| b.place.1 <= at && at < b.end))
+        .unwrap_or_else(|| draw(at));
+    let to_offset = |p: u32| base.saturating_add(u64::from(p.saturating_sub(origin)));
+    let offsets = graph
+        .nodes
+        .iter()
+        .map(|b| Some((to_offset(b.place.1), to_offset(b.end))))
+        .collect();
+    Drawn { graph, offsets }
+}
+
+/// The control flow of the function the listing line at `offset` is in.
+///
+/// # Errors
+/// [`NotCode`] for what is not an executable, or a line in no code hunk.
+pub fn file_flow_graph(bytes: &[u8], offset: u64) -> Result<Drawn, NotCode> {
+    let a = analysis(bytes)?;
+    let place = crate::project::place_at(bytes, offset)
+        .ok_or_else(|| NotCode("that line is not in one of the program's hunks".to_owned()))?;
+    let hunks =
+        code_hunks(bytes).ok_or_else(|| NotCode("its hunk header is unreadable".to_owned()))?;
+    if hunks.get(place.0).is_none_or(|h| h.bytes.is_empty()) {
+        return Err(NotCode("that line is not in a code hunk".to_owned()));
+    }
+    let (notes, _) = crate::project::load(bytes);
+    Ok(flow_graph_in(&hunks, 0, &a, place, &notes))
+}
+
+/// The control flow of the boot code's function the line at `offset` is in.
+///
+/// # Errors
+/// [`NotCode`] for an image with no bootblock, or a line outside its code.
+pub fn bootblock_flow_graph(image: &Image, offset: u64) -> Result<Drawn, NotCode> {
+    let a = bootblock_analysis(image)?;
+    let boot = image.read_range(0, 1024);
+    let place = crate::project::boot_place_at(offset)
+        .ok_or_else(|| NotCode("that line is not in the boot code".to_owned()))?;
+    let code = boot.get(12..).unwrap_or(&[]).to_vec();
+    let (notes, _) = crate::project::load(&boot);
+    // The boot code's bytes start at offset 12, as its places do.
+    let hunk = CodeHunk {
+        bytes: code,
+        base: 12,
+        relocs: std::collections::HashMap::new(),
+    };
+    Ok(flow_graph_in(&[hunk], 12, &a, place, &notes))
+}
+
+/// Who calls whom, laid out, with each function at its offset.
+fn call_graph_drawn(a: &Analysis, n: &Annotations, offset: impl Fn(Place) -> Option<u64>) -> Drawn {
+    let label = |p: Place| n.label(p);
+    let graph = ade_object::graph::calls(a, &label);
+    let offsets = graph
+        .nodes
+        .iter()
+        .map(|node| match node.kind {
+            NodeKind::Library => None,
+            _ => offset(node.place).map(|o| (o, o)),
+        })
+        .collect();
+    Drawn { graph, offsets }
+}
+
+/// An executable's call graph, laid out to draw.
+///
+/// # Errors
+/// [`NotCode`] for what is not an executable.
+pub fn file_call_graph(bytes: &[u8]) -> Result<Drawn, NotCode> {
+    let a = analysis(bytes)?;
+    let exe =
+        hunk::parse(bytes).ok_or_else(|| NotCode("its hunk header is unreadable".to_owned()))?;
+    let (notes, _) = crate::project::load(bytes);
+    Ok(call_graph_drawn(&a, &notes, |(k, at)| {
+        exe.hunks
+            .get(k)
+            .map(|h| (h.file_offset as u64).saturating_add(u64::from(at)))
+    }))
+}
+
+/// The boot code's call graph, laid out to draw.
+///
+/// # Errors
+/// [`NotCode`] for an image with no bootblock.
+pub fn bootblock_call_graph(image: &Image) -> Result<Drawn, NotCode> {
+    let a = bootblock_analysis(image)?;
+    let (notes, _) = crate::project::load(&image.read_range(0, 1024));
+    Ok(call_graph_drawn(&a, &notes, |(_, at)| Some(u64::from(at))))
 }

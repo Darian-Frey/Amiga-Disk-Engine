@@ -509,7 +509,7 @@ fn fuzz_the_executable_parser_and_listing() {
     // hunk sizes, relocation counts, symbol name lengths. Each must be bounded
     // by what the file holds, and a listing must stay within its line cap
     // whatever the counts claim.
-    use ade_core::layers::object::{export, flow, hunk, listing, program};
+    use ade_core::layers::object::{export, flow, graph, hunk, listing, program};
     let mut rng = Rng::new(0x5EED_0F32);
     let put = |v: &mut Vec<u8>, x: u32| {
         v.extend_from_slice(&[(x >> 24) as u8, (x >> 16) as u8, (x >> 8) as u8, x as u8]);
@@ -573,7 +573,22 @@ fn fuzz_the_executable_parser_and_listing() {
                 let _ = program::strings(&buf, &a);
                 let _ = program::variables(&buf, &a);
                 let _ = program::segments(&buf, &a);
+                // The drawn graphs: every function's, and the calls.
+                let label = |(k, at): flow::Place| format!("h{k}_{at:x}");
+                let calls = graph::calls(&a, &label);
+                assert!(calls.nodes.len() <= graph::MAX_NODES);
+                for f in a.functions.iter().take(8) {
+                    let g = graph::function(
+                        &buf,
+                        (0, f.start.0),
+                        &std::collections::HashMap::new(),
+                        f.start.1,
+                        &label,
+                    );
+                    assert!(g.nodes.len() <= graph::MAX_NODES);
+                }
             }
+            let _ = ade_core::decode::kind(b"x", &buf);
             let boot = flow::bootblock(&buf);
             let _ = program::boot_strings(&buf, &boot);
             let _ = program::boot_segments(&buf, &boot);

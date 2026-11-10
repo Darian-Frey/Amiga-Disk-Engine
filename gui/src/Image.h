@@ -17,6 +17,9 @@
 #include <QString>
 #include <QVector>
 
+#include <memory>
+#include <vector>
+#include <optional>
 #include <utility>
 
 namespace ade {
@@ -67,6 +70,11 @@ struct AsmLine {
     QString text;
     /// What the line does, in words; empty when there is nothing to explain.
     QString comment;
+    /// Where control goes from it, for colouring.
+    AdeAsmFlow flow = ADE_FLOW_NONE;
+    /// The offsets it refers to, for following it and for finding what
+    /// refers to a line.
+    QVector<quint64> targets;
 };
 
 /// A disassembly, or why there is none.
@@ -76,6 +84,20 @@ struct Disassembly {
     QVector<AsmLine> lines;
     /// False when the file could not be read at all.
     bool read = false;
+    /// The engine's listing, kept for its names.
+    std::shared_ptr<AdeDisasm> handle;
+
+    /// The offset of the place `name` names — a label, `h1_0042`, a symbol,
+    /// the user's name — or nothing.
+    std::optional<quint64> locate(const QString &name) const {
+        if (!handle) return std::nullopt;
+        const QByteArray utf8 = name.trimmed().toUtf8();
+        uint64_t at = 0;
+        const AdeBytes text{reinterpret_cast<const uint8_t *>(utf8.constData()),
+                            static_cast<size_t>(utf8.size())};
+        if (ade_disasm_locate(handle.get(), text, &at) != ADE_OK) return std::nullopt;
+        return at;
+    }
 };
 
 /// Take an engine listing into Qt types, freeing it.
@@ -89,11 +111,19 @@ inline Disassembly takeDisassembly(AdeDisasm *raw) {
     for (size_t i = 0; i < count; ++i) {
         AdeAsmLine line{};
         if (ade_disasm_line(raw, i, &line) != ADE_OK) continue;
-        out.lines.append(AsmLine{line.kind, line.has_offset, line.offset, line.length,
-                                 QString::fromUtf8(bytes(line.text)),
-                                 QString::fromUtf8(bytes(line.comment))});
+        AsmLine taken{line.kind, line.has_offset, line.offset, line.length,
+                      QString::fromUtf8(bytes(line.text)),
+                      QString::fromUtf8(bytes(line.comment)), ade_disasm_line_flow(raw, i), {}};
+        const size_t targets = ade_disasm_line_targets(raw, i, nullptr, 0);
+        if (targets > 0) {
+            std::vector<uint64_t> offsets(targets);
+            ade_disasm_line_targets(raw, i, offsets.data(), targets);
+            taken.targets.reserve(static_cast<int>(targets));
+            for (uint64_t o : offsets) taken.targets.append(o);
+        }
+        out.lines.append(std::move(taken));
     }
-    ade_disasm_free(raw);
+    out.handle = std::shared_ptr<AdeDisasm>(raw, ade_disasm_free);
     return out;
 }
 
@@ -111,6 +141,43 @@ inline QVector<SegmentBar::Run> takeSegments(AdeSegments *raw) {
     ade_segments_free(raw);
     return out;
 }
+
+/// A graph laid out by the engine to draw (F-036), or why there is none.
+struct Graph {
+    QString refusal;
+    QVector<AdeGraphNode> nodes;
+    QVector<QString> labels;
+    QVector<AdeGraphEdge> edges;
+};
+
+/// Take an engine graph into Qt types, freeing it.
+inline Graph takeGraph(AdeGraph *raw) {
+    Graph out;
+    if (!raw) {
+        out.refusal = QStringLiteral("the file could not be read");
+        return out;
+    }
+    out.refusal = QString::fromUtf8(bytes(ade_graph_refusal(raw)));
+    for (size_t i = 0; i < ade_graph_node_count(raw); ++i) {
+        AdeGraphNode n{};
+        if (ade_graph_node(raw, i, &n) != ADE_OK) continue;
+        out.nodes.append(n);
+        out.labels.append(QString::fromUtf8(bytes(n.label)));
+    }
+    for (size_t i = 0; i < ade_graph_edge_count(raw); ++i) {
+        AdeGraphEdge e{};
+        if (ade_graph_edge(raw, i, &e) == ADE_OK) out.edges.append(e);
+    }
+    ade_graph_free(raw);
+    return out;
+}
+
+/// What the health report finds wrong with a disk's blocks, and its counts,
+/// for the map (F-027).
+struct DiskDamage {
+    QVector<QPair<quint32, int>> blocks;
+    AdeBlockCounts counts{};
+};
 
 /// One decoded setting (F-033).
 struct DecodedField {
@@ -501,6 +568,19 @@ public:
     Disassembly codeView(quint32 partition, quint32 block, AdeAsmView view) const {
         return takeDisassembly(ade_disasm_view(m_raw, partition, block, view));
     }
+    /// The control flow of the function the listing line at `offset` is in:
+    /// of the file at `block`, or of the boot code for block 0.
+    Graph flowGraph(quint32 partition, quint32 block, quint64 offset) const {
+        return takeGraph(ade_disasm_flow_graph(m_raw, partition, block, offset));
+    }
+    /// Who calls whom, as `flowGraph` chooses the program.
+    Graph callGraph(quint32 partition, quint32 block) const {
+        return takeGraph(ade_disasm_call_graph(m_raw, partition, block));
+    }
+    /// What the file at `block` is (an `AdeFileKind`), for its icon.
+    quint32 fileKind(quint32 partition, quint32 block) const {
+        return ade_file_kind(m_raw, partition, block);
+    }
     /// A program's runs, for the bar beside its listing.
     QVector<SegmentBar::Run> segments(quint32 partition, quint32 block) const {
         return takeSegments(ade_disasm_segments(m_raw, partition, block));
@@ -508,6 +588,21 @@ public:
     /// The boot code's runs.
     QVector<SegmentBar::Run> bootSegments() const {
         return takeSegments(ade_disasm_bootblock_segments(m_raw));
+    }
+    /// The blocks the health report finds wrong, as the disk now stands.
+    DiskDamage damage() const {
+        DiskDamage out;
+        AdeDamage *raw = ade_image_damage(m_raw, ADE_WHOLE_IMAGE);
+        if (!raw) return out;
+        const size_t count = ade_damage_count(raw);
+        out.blocks.reserve(static_cast<int>(count));
+        for (size_t i = 0; i < count; ++i) {
+            AdeDamagedBlock b{};
+            if (ade_damage_get(raw, i, &b) == ADE_OK) out.blocks.append({b.block, int(b.kind)});
+        }
+        out.counts = ade_damage_counts(raw);
+        ade_damage_free(raw);
+        return out;
     }
     /// The same views of the boot code; it has no source.
     Disassembly bootView(AdeAsmView view) const {

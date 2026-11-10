@@ -35,6 +35,12 @@ public:
     /// abstraction the moment it is drawn.
     void highlightOwner(quint32 ownerBlock);
 
+    /// Mark the blocks the health report finds wrong, each with an
+    /// `AdeDamageKind`, drawn over their regions, hatched.
+    void setDamage(const QVector<QPair<quint32, int>> &blocks);
+    /// The colour a kind of damage is drawn in.
+    static QColor damageColourFor(const QPalette &palette, int kind);
+
     /// The colour a region is drawn in.
     ///
     /// **Files are coloured here, unlike in the hex pane.** There the tint sits
@@ -70,6 +76,8 @@ private:
 
     /// One region code per block, and the owning entry per block.
     QVector<quint8> m_region;
+    /// The worst damage per block, -1 for none.
+    QVector<qint8> m_damage;
     QVector<quint32> m_owner;
     QVector<QString> m_paths;   ///< owner path per block, empty where none
     quint32 m_blockSize = 512;

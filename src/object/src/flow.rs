@@ -249,7 +249,7 @@ const fn a(n: u8) -> usize {
     (n as usize).saturating_add(8)
 }
 
-fn is_branch(m: &str) -> bool {
+pub(crate) fn is_branch(m: &str) -> bool {
     matches!(
         m,
         "bhi"
@@ -269,7 +269,7 @@ fn is_branch(m: &str) -> bool {
     )
 }
 
-fn is_db(m: &str) -> bool {
+pub(crate) fn is_db(m: &str) -> bool {
     m.starts_with("db")
 }
 

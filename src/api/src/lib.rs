@@ -31,8 +31,8 @@ pub use batch::{Record, Summary};
 pub use consolidate::{Consolidation, Diff, consolidate, diff};
 pub use convert::{Conversion, conversion};
 pub use health::{
-    BitmapHealth, DirCacheHealth, DiskKind, Examined, Finding, Health, Severity, examine,
-    examine_partition,
+    BitmapHealth, Damage, DirCacheHealth, DiskKind, Examined, Finding, Health, Severity,
+    damaged_blocks, examine, examine_partition,
 };
 pub use inspect::{
     Compression, Description, Fault, Image, Inspection, InspectionError, MAX_DECOMPRESSED,

@@ -237,6 +237,8 @@ Sized S/M/L on ADE's terms, with the constraint each one runs into. **None of th
 
 - **Run the disk in an emulator** (S, but external). Atari's "Test in Hatari" launches the image in an emulator. The Amiga equivalent is FS-UAE or WinUAE, and it is a `QProcess` and a configurable path rather than engine work. AV-002 is not offended — ADE would still be executing nothing; it would be handing a file to a program the user chose. The reason it is unscheduled is that it is the first feature that makes ADE depend on software it does not ship.
 
+- **The Atari engine's visual features** — adopted 2026-11-10: the disassembler's navigation, colours and xref strip, its control-flow and call-graph windows, the FAT map's damage states and counts, and the tree's file icons and banding (F-036, F-027, F-004). Not taken: the minimap (the segment bar does its work), the boot-sector editor and themes (declined above), and the Lua console (below).
+
 ### What the map does not say
 
 The traffic is not one-way, and the reverse list is longer: flux and SCP, MFM encode and decode, extended ADF, RDB partitioning, dircache, hard links, gzip containers, TOSEC identification, corpus-scale batch, image consolidation, a stable JSON surface, a C ABI, a CLI at all, and a 4,652-image differential corpus with an external oracle. The Atari engine has none of these. It is also a **4,237-line class with 75 methods**, measured today — which is what D-003 exists to prevent, and the reason its feature count is not the thing to envy.

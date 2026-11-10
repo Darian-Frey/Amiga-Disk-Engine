@@ -15,6 +15,8 @@
 #include "../src/SurfaceView.h"
 #include "../src/ImageTree.h"
 #include "../src/MainWindow.h"
+#include "../src/GraphView.h"
+#include "../src/SegmentBar.h"
 
 #include <QApplication>
 #include <QLineEdit>
@@ -26,6 +28,8 @@
 #include <QSignalSpy>
 #include <QClipboard>
 #include <QComboBox>
+#include <QKeyEvent>
+#include <QToolButton>
 #include <QRegularExpression>
 #include <QItemSelectionModel>
 #include <QStatusBar>
@@ -108,6 +112,8 @@ private slots:
     void theViewsBesideTheListingFollowTheCode();
     void theSegmentBarDrawsTheProgramAndGoesWhereItIsClicked();
     void aPlaceTakesANameAndALineAComment();
+    void theListingIsSomethingToMoveAboutIn();
+    void aFunctionAndTheProgramDrawAsGraphs();
     void oneDropIsOneUndo();
     void saveOnAnOpenedDiskAsksThenKeepsTheOriginal();
     void aDiskMadeHereSavesWithoutAskingOrBackup();
@@ -170,6 +176,8 @@ private slots:
     void theMapShowsTheDiskAndClickingACellGoesToIt();
     void selectingAFilePicksOutItsBlocksOnTheMap();
     void aFileSelectedFirstStillHasItsDisksMap();
+    void theMapShowsDamageAndCountsBesideIt();
+    void eachRowSaysWhatItIs();
     void newDiskIsOfferedAndItsTypesComeFromTheEngine();
     void aFileThatIsNotADiskImageIsDeclinedRatherThanShown();
     void thereIsAHelpMenuWithAnAboutBox();
@@ -1742,6 +1750,8 @@ void TestMainWindow::theMapShowsTheDiskAndClickingACellGoesToIt() {
 
 namespace {
 QString blankDisk(const QTemporaryDir &dir, const QString &name);
+void writeFile(const QString &path, const QByteArray &data);
+QByteArray program();
 }  // namespace
 
 // Reported from the window: open a disk, click a file, then Map — empty,
@@ -1780,6 +1790,47 @@ void TestMainWindow::aFileSelectedFirstStillHasItsDisksMap() {
     tree->setCurrentItem(file, 0, QItemSelectionModel::ClearAndSelect);
     QApplication::processEvents();
     QCOMPARE(map->grab().toImage(), picked);
+}
+
+// An icon and a word for what each file is, from its contents.
+void TestMainWindow::eachRowSaysWhatItIs() {
+    QTemporaryDir dir;
+    const QString disk = blankDisk(dir, QStringLiteral("blank.adf"));
+    const QString host = dir.filePath(QStringLiteral("Hello"));
+    writeFile(host, program());
+    MainWindow window;
+    window.openImage(disk);
+    QCOMPARE(window.addFiles(browser(window)->topLevelItem(0), {host}), 1);
+    QTreeWidgetItem *row = childNamed(browser(window)->topLevelItem(0), QStringLiteral("Hello"));
+    QVERIFY(row);
+    QVERIFY(!row->icon(0).isNull());
+    QVERIFY2(row->toolTip(0).contains(QStringLiteral("a program")), qPrintable(row->toolTip(0)));
+    QVERIFY(browser(window)->alternatingRowColors());
+}
+
+// The Atari engine's FAT map showed orphaned, cross-linked and bad clusters;
+// ADE's shows what its health report finds, hatched over the regions.
+void TestMainWindow::theMapShowsDamageAndCountsBesideIt() {
+    QScopedPointer<MainWindow> window(diskWindow(m_image));
+    auto *legend = window->findChild<QLabel *>(QStringLiteral("mapLegend"));
+    QVERIFY(legend);
+    QVERIFY2(legend->text().contains(QStringLiteral("blocks used")),
+             qPrintable(legend->text()));
+
+    MapView map;
+    map.resize(300, 300);
+    map.setMap({HexRegion{0, 1760 * 512, ADE_REGION_FILE, 0, {}}}, 1760, 512);
+    const QColor file = map.grab().toImage().pixelColor(1, 1);
+    map.setDamage({{0, ADE_DAMAGE_ORPHANED}});
+    const QImage after = map.grab().toImage();
+    const QColor orphan = MapView::damageColourFor(map.palette(), ADE_DAMAGE_ORPHANED);
+    // Hatched: the cell holds the damage colour, and is not the file's.
+    bool found = false;
+    for (int y = 0; y < 6; ++y) {
+        for (int x = 0; x < 6; ++x) found = found || after.pixelColor(x, y) == orphan;
+    }
+    QVERIFY(found);
+    QVERIFY(after.pixelColor(1, 1) != file || after.pixelColor(2, 1) != file);
 }
 
 void TestMainWindow::selectingAFilePicksOutItsBlocksOnTheMap() {
@@ -2440,6 +2491,124 @@ void TestMainWindow::theSegmentBarDrawsTheProgramAndGoesWhereItIsClicked() {
     QVERIFY(view->toPlainText().contains(QStringLiteral("0 variables")));
     show->setCurrentIndex(show->findText(QStringLiteral("Listing")));
     QVERIFY(!bar->isHidden());
+}
+
+namespace {
+
+// `bsr.s $4; rts` then, at 4, `moveq #1,d0; rts`.
+QByteArray callingProgram() {
+    const quint32 longs[] = {0x3F3, 0, 1, 0, 0, 2, 0x3E9, 2, 0x61024E75, 0x70014E75, 0x3F2};
+    QByteArray out;
+    for (quint32 v : longs) {
+        for (int shift : {24, 16, 8, 0}) out.append(static_cast<char>(v >> shift));
+    }
+    return out;
+}
+
+// The block holding `text`, or -1.
+int blockWith(QPlainTextEdit *view, const QString &text) {
+    for (QTextBlock b = view->document()->begin(); b.isValid(); b = b.next()) {
+        if (b.text().contains(text)) return b.blockNumber();
+    }
+    return -1;
+}
+
+void press(QWidget *target, int key, Qt::KeyboardModifiers modifiers = Qt::NoModifier) {
+    QKeyEvent down(QEvent::KeyPress, key, modifiers);
+    QApplication::sendEvent(target, &down);
+}
+
+}  // namespace
+
+// The Atari engine's control-flow and call-graph windows.
+void TestMainWindow::aFunctionAndTheProgramDrawAsGraphs() {
+    QTemporaryDir dir;
+    const QString disk = blankDisk(dir, QStringLiteral("blank.adf"));
+    const QString host = dir.filePath(QStringLiteral("Caller"));
+    writeFile(host, callingProgram());
+    MainWindow window;
+    window.openImage(disk);
+    QCOMPARE(window.addFiles(browser(window)->topLevelItem(0), {host}), 1);
+    QTreeWidgetItem *row = childNamed(browser(window)->topLevelItem(0), QStringLiteral("Caller"));
+    QPlainTextEdit *view = showAssembly(window, row);
+    QVERIFY(view);
+    const int call = blockWith(view, QStringLiteral("bsr.s   h0_0004"));
+    QVERIFY(call >= 0);
+
+    // The entry function: bsr and rts, one block.
+    QVERIFY(window.drawAssemblyGraph(call, false));
+    auto *graph = window.findChild<GraphView *>(QStringLiteral("assemblyGraphView"));
+    QVERIFY(graph);
+    QCOMPARE(graph->nodeCount(), 1);
+
+    // The call graph: two functions, one call.
+    QVERIFY(window.drawAssemblyGraph(call, true));
+    QCOMPARE(graph->nodeCount(), 2);
+    QCOMPARE(graph->edgeCount(), 1);
+    // A node double-clicked goes to it in the listing.
+    emit graph->activated(32 + 4);  // the code starts 32 bytes into the file
+    QVERIFY2(view->textCursor().block().text().contains(QStringLiteral("moveq   #1,d0")),
+             qPrintable(view->textCursor().block().text()));
+}
+
+// Moving about the listing, as the Atari engine's listing allowed.
+void TestMainWindow::theListingIsSomethingToMoveAboutIn() {
+    QTemporaryDir dir;
+    const QString disk = blankDisk(dir, QStringLiteral("blank.adf"));
+    const QString host = dir.filePath(QStringLiteral("Caller"));
+    writeFile(host, callingProgram());
+    MainWindow window;
+    window.openImage(disk);
+    QCOMPARE(window.addFiles(browser(window)->topLevelItem(0), {host}), 1);
+    QTreeWidgetItem *row = childNamed(browser(window)->topLevelItem(0), QStringLiteral("Caller"));
+    QVERIFY(row);
+    QPlainTextEdit *view = showAssembly(window, row);
+    QVERIFY(view);
+    const int call = blockWith(view, QStringLiteral("bsr.s   h0_0004"));
+    const int target = blockWith(view, QStringLiteral("moveq   #1,d0"));
+    QVERIFY2(call >= 0 && target > call, qPrintable(view->toPlainText()));
+
+    // The call is coloured as a call, from the instruction column on, and
+    // the line after it is not.
+    const auto weightAt = [view](int block) {
+        for (const QTextLayout::FormatRange &r :
+             view->document()->findBlockByNumber(block).layout()->formats()) {
+            if (r.start == 36) return r.format.fontWeight();
+        }
+        return static_cast<int>(QFont::Normal);
+    };
+    QCOMPARE(weightAt(call), static_cast<int>(QFont::DemiBold));
+    QCOMPARE(weightAt(target), static_cast<int>(QFont::Normal));
+
+    // Enter on the call goes where it calls; Alt+Left comes back.
+    view->setTextCursor(QTextCursor(view->document()->findBlockByNumber(call)));
+    press(view, Qt::Key_Return);
+    QCOMPARE(view->textCursor().blockNumber(), target);
+    // There, the strip says what refers to it, and is a link back.
+    auto *refs = window.findChild<QLabel *>(QStringLiteral("assemblyReferrers"));
+    QVERIFY(refs && !refs->isHidden());
+    QVERIFY2(refs->text().contains(QStringLiteral("bsr.s")), qPrintable(refs->text()));
+    press(view, Qt::Key_Left, Qt::AltModifier);
+    QCOMPARE(view->textCursor().blockNumber(), call);
+    auto *forward = window.findChild<QToolButton *>(QStringLiteral("assemblyForward"));
+    QVERIFY(forward && forward->isEnabled());
+    forward->click();
+    QCOMPARE(view->textCursor().blockNumber(), target);
+
+    // A name double-clicked in another view goes to it in the listing.
+    auto *show = window.findChild<QComboBox *>(QStringLiteral("assemblyShow"));
+    show->setCurrentIndex(show->findText(QStringLiteral("Functions")));
+    const int named = blockWith(view, QStringLiteral("h0_0004"));
+    QVERIFY(named >= 0);
+    QTextCursor on(view->document()->findBlockByNumber(named));
+    on.setPosition(on.position() + 2);
+    const QPoint at = view->cursorRect(on).center();
+    QMouseEvent click(QEvent::MouseButtonDblClick, at, view->viewport()->mapToGlobal(at),
+                      Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+    QApplication::sendEvent(view->viewport(), &click);
+    QCOMPARE(show->currentText(), QStringLiteral("Listing"));
+    QVERIFY2(view->textCursor().block().text().contains(QStringLiteral("moveq   #1,d0")),
+             qPrintable(view->textCursor().block().text()));
 }
 
 // Names and comments (D-022), kept in a projects folder of the test's own.

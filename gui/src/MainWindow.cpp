@@ -4,9 +4,16 @@
 #include "MapView.h"
 #include "SurfaceView.h"
 #include "SegmentBar.h"
+#include "GraphView.h"
 #include "ImageTree.h"
 
 #include <QAction>
+#include <QApplication>
+#include <functional>
+#include <QMouseEvent>
+#include <QKeyEvent>
+#include <QToolButton>
+#include <QShortcut>
 #include <QCheckBox>
 #include <QSyntaxHighlighter>
 #include <QCloseEvent>
@@ -73,7 +80,24 @@ public:
         m_label.setFontWeight(QFont::Bold);
         m_data.setForeground(mix(0.6));
         m_address.setForeground(mix(0.5));
+        // Where control goes, as the Atari engine's listing showed it: a hue
+        // half mixed into the text colour, so it reads on either theme.
+        const auto hue = [&](int r, int g, int b) {
+            return QColor::fromRgbF((r / 255.0 + text.redF()) / 2, (g / 255.0 + text.greenF()) / 2,
+                                    (b / 255.0 + text.blueF()) / 2);
+        };
+        m_flow[ADE_FLOW_CALL].setForeground(hue(60, 120, 230));
+        m_flow[ADE_FLOW_RETURN].setForeground(hue(40, 170, 80));
+        m_flow[ADE_FLOW_JUMP].setForeground(hue(60, 120, 230));
+        m_flow[ADE_FLOW_BRANCH].setForeground(hue(40, 160, 190));
+        m_flow[ADE_FLOW_TRAP].setForeground(hue(220, 150, 30));
+        m_flow[ADE_FLOW_LIBRARY].setForeground(hue(170, 80, 200));
+        m_flow[ADE_FLOW_CALL].setFontWeight(QFont::DemiBold);
+        m_flow[ADE_FLOW_LIBRARY].setFontWeight(QFont::DemiBold);
     }
+
+    /// How to learn where control goes from the line in block `n`.
+    void setFlowOf(std::function<AdeAsmFlow(int)> flowOf) { m_flowOf = std::move(flowOf); }
 
 protected:
     void highlightBlock(const QString &line) override {
@@ -92,6 +116,11 @@ protected:
             setFormat(Columns, static_cast<int>(line.size()) - Columns, m_data);
         }
         const auto comment = line.indexOf(QStringLiteral("; "), Columns);
+        const AdeAsmFlow flow = m_flowOf ? m_flowOf(currentBlock().blockNumber()) : ADE_FLOW_NONE;
+        if (flow != ADE_FLOW_NONE && line.size() > Columns) {
+            const int end = comment > 0 ? static_cast<int>(comment) : static_cast<int>(line.size());
+            setFormat(Columns, end - Columns, m_flow[flow]);
+        }
         if (comment > 0) {
             setFormat(static_cast<int>(comment), static_cast<int>(line.size() - comment), m_remark);
         }
@@ -99,8 +128,41 @@ protected:
 
 private:
     QTextCharFormat m_remark, m_label, m_data, m_address;
+    QTextCharFormat m_flow[ADE_FLOW_LIBRARY + 1];
+    std::function<AdeAsmFlow(int)> m_flowOf;
 };
 
+
+// The icon for a kind of file (an `AdeFileKind`, -1 for a folder): the
+// desktop theme's, so it matches the person's other file views, and the
+// style's plain file or folder where the theme has none.
+QIcon kindIcon(int kind) {
+    const char *name = nullptr;
+    switch (kind) {
+        case -1:                    name = "folder"; break;
+        case ADE_FILE_PROGRAM:      name = "application-x-executable"; break;
+        case ADE_FILE_LIBRARY:      name = "application-x-sharedlib"; break;
+        case ADE_FILE_FONT:         name = "font-x-generic"; break;
+        case ADE_FILE_KEYMAP:       name = "input-keyboard"; break;
+        case ADE_FILE_PRINTER:      name = "printer"; break;
+        case ADE_FILE_ICON:         name = "preferences-desktop-icons"; break;
+        case ADE_FILE_PICTURE:      name = "image-x-generic"; break;
+        case ADE_FILE_ANIMATION:    name = "video-x-generic"; break;
+        case ADE_FILE_SOUND:        name = "audio-x-generic"; break;
+        case ADE_FILE_MUSIC:        name = "audio-x-generic"; break;
+        case ADE_FILE_TEXT:         name = "text-x-generic"; break;
+        case ADE_FILE_CATALOG:      name = "preferences-desktop-locale"; break;
+        case ADE_FILE_PREFERENCES:  name = "preferences-system"; break;
+        case ADE_FILE_DATATYPE:     name = "preferences-system"; break;
+        case ADE_FILE_PACKED:       name = "package-x-generic"; break;
+        case ADE_FILE_ARCHIVE:      name = "package-x-generic"; break;
+        case ADE_FILE_DISK_IMAGE:   name = "media-floppy"; break;
+        default:                    name = "text-x-generic-template"; break;
+    }
+    const QIcon fallback = QApplication::style()->standardIcon(
+        kind == -1 ? QStyle::SP_DirIcon : QStyle::SP_FileIcon);
+    return QIcon::fromTheme(QString::fromLatin1(name), fallback);
+}
 
 // How much of a file to show. A preview is a preview: reading a whole 512 KB
 // file into a text widget to look at its first line is a poor trade.
@@ -209,6 +271,9 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
     m_tree->setColumnWidth(ColProtection,
                            metrics.horizontalAdvance(QStringLiteral("hsparwed")) + padding);
     m_tree->setUniformRowHeights(true);
+    // Banded, as the Atari engine's tree was: long listings are easier to
+    // follow across four columns.
+    m_tree->setAlternatingRowColors(true);
 
     m_hex = new HexPane(this);
     m_hex->setObjectName(QStringLiteral("hex"));
@@ -310,7 +375,18 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
     m_asm->setReadOnly(true);
     m_asm->setLineWrapMode(QPlainTextEdit::NoWrap);
     m_asm->setFont(QFontDatabase::systemFont(QFontDatabase::FixedFont));
-    new AsmHighlighter(m_asm->document(), m_asm);
+    auto *highlighter = new AsmHighlighter(m_asm->document(), m_asm);
+    highlighter->setFlowOf([this](int block) {
+        return block >= 0 && block < m_asmShown.lines.size() ? m_asmShown.lines[block].flow
+                                                            : ADE_FLOW_NONE;
+    });
+    // Moving about the listing: double-click or Enter follows, Alt+arrows go
+    // back and forward (the filter), and a strip below says what refers to
+    // the line the cursor is on.
+    m_asm->viewport()->installEventFilter(this);
+    m_asm->installEventFilter(this);
+    connect(m_asm, &QPlainTextEdit::cursorPositionChanged, this,
+            [this] { showAssemblyReferrers(); });
     // Naming a place and commenting on a line (D-022), from the line itself.
     m_asm->setContextMenuPolicy(Qt::CustomContextMenu);
     connect(m_asm, &QWidget::customContextMenuRequested, this, [this](const QPoint &at) {
@@ -319,6 +395,13 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
         const int view = m_asmShow ? m_asmShow->currentData().toInt() : -1;
         const bool placed = view < 0 && !m_asmForceRaw && line >= 0 &&
                             line < m_asmShown.lines.size() && m_asmShown.lines[line].hasOffset;
+        menu->addSeparator();
+        QAction *flowGraph = menu->addAction(QStringLiteral("Control flow of this function (G)"));
+        QAction *callGraph = menu->addAction(QStringLiteral("Call graph"));
+        flowGraph->setEnabled(placed);
+        callGraph->setEnabled(view < 0 && !m_asmForceRaw && !m_asmShown.lines.isEmpty());
+        connect(flowGraph, &QAction::triggered, this, [this, line] { drawAssemblyGraph(line, false); });
+        connect(callGraph, &QAction::triggered, this, [this, line] { drawAssemblyGraph(line, true); });
         menu->addSeparator();
         QAction *name = menu->addAction(QStringLiteral("Name this place..."));
         QAction *note = menu->addAction(QStringLiteral("Comment on this line..."));
@@ -415,6 +498,61 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
     asmBody->addWidget(m_asm, 1);
     asmBody->addWidget(m_asmBar);
     asmLayout->addLayout(asmBody, 1);
+    m_asmRefs = new QLabel(this);
+    m_asmRefs->setObjectName(QStringLiteral("assemblyReferrers"));
+    m_asmRefs->setTextFormat(Qt::RichText);
+    m_asmRefs->setWordWrap(true);
+    m_asmRefs->setContentsMargins(4, 2, 4, 2);
+    m_asmRefs->hide();
+    connect(m_asmRefs, &QLabel::linkActivated, this,
+            [this](const QString &line) { goToAssemblyLine(line.toInt()); });
+    asmLayout->addWidget(m_asmRefs);
+    // Back and forward, beside the view selector.
+    m_asmBack = new QToolButton(this);
+    m_asmBack->setObjectName(QStringLiteral("assemblyBack"));
+    m_asmBack->setArrowType(Qt::LeftArrow);
+    m_asmBack->setToolTip(QStringLiteral("Back (Alt+Left)"));
+    m_asmBack->setEnabled(false);
+    connect(m_asmBack, &QToolButton::clicked, this, [this] { stepAssemblyHistory(-1); });
+    m_asmForward = new QToolButton(this);
+    m_asmForward->setObjectName(QStringLiteral("assemblyForward"));
+    m_asmForward->setArrowType(Qt::RightArrow);
+    m_asmForward->setToolTip(QStringLiteral("Forward (Alt+Right)"));
+    m_asmForward->setEnabled(false);
+    connect(m_asmForward, &QToolButton::clicked, this, [this] { stepAssemblyHistory(1); });
+    asmBar->insertWidget(1, m_asmBack);
+    asmBar->insertWidget(2, m_asmForward);
+    // Go to a name, and find text, while the Assembly tab has focus.
+    auto *goTo = new QShortcut(QKeySequence(QStringLiteral("Ctrl+G")), m_asmTab);
+    goTo->setContext(Qt::WidgetWithChildrenShortcut);
+    connect(goTo, &QShortcut::activated, this, [this] {
+        bool ok = false;
+        const QString name = QInputDialog::getText(
+            this, QStringLiteral("Go to"),
+            QStringLiteral("A name — a label, h1_0042, a symbol or your own:"), QLineEdit::Normal,
+            QString(), &ok);
+        if (ok && !goToAssemblyName(name)) {
+            emit errorOccurred(QStringLiteral("Nothing in this listing is called %1.").arg(name));
+        }
+    });
+    // Ctrl+F is the window's search across every image; finding in the
+    // listing takes Ctrl+Shift+F, and F3 again, set by key: the platform's
+    // "find next" can include Ctrl+G, which is Go to here.
+    auto *findHere = new QShortcut(QKeySequence(QStringLiteral("Ctrl+Shift+F")), m_asmTab);
+    findHere->setContext(Qt::WidgetWithChildrenShortcut);
+    connect(findHere, &QShortcut::activated, this, [this] {
+        bool ok = false;
+        const QString text = QInputDialog::getText(this, QStringLiteral("Find"),
+                                                   QStringLiteral("Find in the listing:"),
+                                                   QLineEdit::Normal, m_asmFind, &ok);
+        if (ok && !text.isEmpty()) {
+            m_asmFind = text;
+            findInAssembly();
+        }
+    });
+    auto *again = new QShortcut(QKeySequence(Qt::Key_F3), m_asmTab);
+    again->setContext(Qt::WidgetWithChildrenShortcut);
+    connect(again, &QShortcut::activated, this, [this] { findInAssembly(); });
     m_views->addTab(m_asmTab, QStringLiteral("Assembly"));
 
     // The Decoded view (F-033): a file ADE recognises, in words. Built only
@@ -1077,6 +1215,17 @@ void MainWindow::populate(QTreeWidgetItem *parent, const Open &open, quint32 par
         item->setData(0, RoleIsDir, isDir);
         item->setData(0, RoleImage, static_cast<qulonglong>(open.index));
         item->setData(0, RolePartition, partition);
+        // What it is, at a glance, as the Atari engine's tree showed: the
+        // engine names the kind from the file's contents.
+        if (isDir) {
+            item->setIcon(ColName, kindIcon(-1));
+        } else if (!isVolume) {
+            const quint32 kind = open.image.fileKind(partition, entry.block);
+            item->setIcon(ColName, kindIcon(static_cast<int>(kind)));
+            item->setToolTip(ColName, QStringLiteral("%1 — %2").arg(
+                                          item->text(ColName),
+                                          QString::fromUtf8(ade_file_kind_name(kind))));
+        }
 
         if (isDir) {
             // A placeholder child makes the expander appear; the real children
@@ -1715,7 +1864,8 @@ void MainWindow::showAbout() {
 }
 
 /// The map's own legend. Same shape as the hex pane's, different colours.
-void MainWindow::showMapLegend(const QVector<HexRegion> &regions) {
+void MainWindow::showMapLegend(const QVector<HexRegion> &regions,
+                               const ade::DiskDamage &damage) {
     if (!m_mapLegend) return;
     if (regions.isEmpty()) {
         m_mapLegend->hide();
@@ -1754,8 +1904,52 @@ void MainWindow::showMapLegend(const QVector<HexRegion> &regions) {
                    .arg(frame.name(), MapView::colourFor(m_map->palette(), region).name(), name);
         tips << QStringLiteral("<b>%1</b> — %2").arg(name, describes);
     }
+    // The damage this disk has, after the regions, hatched as on the map.
+    QList<int> kinds;
+    for (const auto &[block, kind] : damage.blocks) {
+        Q_UNUSED(block);
+        if (!kinds.contains(kind)) kinds.append(kind);
+    }
+    std::sort(kinds.begin(), kinds.end());
+    for (int kind : kinds) {
+        const auto k = static_cast<AdeDamageKind>(kind);
+        const QString name = QString::fromUtf8(ade_damage_name(k)).toHtmlEscaped();
+        int count = 0;
+        for (const auto &d : damage.blocks) count += d.second == kind ? 1 : 0;
+        row += QStringLiteral(
+                   "<td><table border=1 cellspacing=0 cellpadding=0 "
+                   "style='border-color:%1; border-style:solid'><tr>"
+                   "<td bgcolor='%2' width=12 height=12></td></tr></table></td>"
+                   "<td>&nbsp;%3 (%4)&nbsp;&nbsp;&nbsp;&nbsp;</td>")
+                   .arg(frame.name(), MapView::damageColourFor(m_map->palette(), kind).name(),
+                        name)
+                   .arg(count);
+        tips << QStringLiteral("<b>%1</b> — %2")
+                    .arg(name, QString::fromUtf8(ade_damage_describes(k)).toHtmlEscaped());
+    }
+    // And the counts, as the Atari engine's map gave them beside it.
+    QString counts;
+    if (damage.counts.known && damage.counts.blocks > 0) {
+        const quint64 used = damage.counts.used;
+        const quint64 all = damage.counts.blocks;
+        counts = QStringLiteral("%1 of %2 blocks used (%3%), %4 free")
+                     .arg(used)
+                     .arg(all)
+                     .arg(used * 100 / all)
+                     .arg(damage.counts.free);
+        if (damage.counts.files > 0) {
+            counts += QStringLiteral("  ·  %1 file%2")
+                          .arg(damage.counts.files)
+                          .arg(damage.counts.files == 1 ? "" : "s");
+            if (damage.counts.in_pieces > 0) {
+                counts += QStringLiteral(", %1 in more than one piece").arg(damage.counts.in_pieces);
+            }
+        }
+        if (damage.blocks.isEmpty()) counts += QStringLiteral("  ·  nothing damaged");
+    }
     m_mapLegend->setText(
-        QStringLiteral("<table cellspacing=0 cellpadding=0><tr>%1</tr></table>").arg(row));
+        QStringLiteral("<table cellspacing=0 cellpadding=0><tr>%1</tr></table>%2")
+            .arg(row, counts.isEmpty() ? QString() : QStringLiteral("<p>%1</p>").arg(counts)));
     m_mapLegend->setToolTip(tips.join(QStringLiteral("<br>")));
     m_mapLegend->show();
 }
@@ -1856,9 +2050,7 @@ void MainWindow::showWholeDisk(QTreeWidgetItem *item) {
     };
 
     const QVector<HexRegion> regions = open->image.regions();
-    m_map->setMap(regions, open->image.size() / 512, 512);
-    showMapLegend(regions);
-    m_mapImage = open->index;
+    buildMap(*open);
     m_hex->setSource(size, read);
     m_hex->setRegions(regions);
     m_diskRegions = regions;
@@ -2002,7 +2194,10 @@ void MainWindow::mapDiskOf(QTreeWidgetItem *item) {
 void MainWindow::buildMap(const Open &open) {
     const QVector<HexRegion> regions = open.image.regions();
     m_map->setMap(regions, open.image.size() / 512, 512);
-    showMapLegend(regions);
+    // What the health report finds wrong, block by block, over the regions.
+    const ade::DiskDamage damage = open.image.damage();
+    m_map->setDamage(damage.blocks);
+    showMapLegend(regions, damage);
     m_mapImage = open.index;
 }
 
@@ -2841,6 +3036,7 @@ void MainWindow::refreshAssembly() {
             m_asmBar->clear();
             m_asmBar->hide();
         }
+        if (m_asmRefs) m_asmRefs->hide();
     };
     QString what;
     QString why;
@@ -2872,6 +3068,15 @@ void MainWindow::refreshAssembly() {
     m_asmShown = std::move(listing);
     m_asmWhat = what;
     if (m_asmSave) m_asmSave->setEnabled(true);
+    // What refers to each line, for the strip; and the way back starts anew.
+    m_asmReferrers.clear();
+    for (int i = 0; i < m_asmShown.lines.size(); ++i) {
+        for (quint64 t : m_asmShown.lines[i].targets) m_asmReferrers[t].append(i);
+    }
+    m_asmHistory.clear();
+    m_asmHistoryAt = -1;
+    m_asmBack->setEnabled(false);
+    m_asmForward->setEnabled(false);
     // The bar goes with the listing, which is what it finds places in; a
     // guess has no walks to draw.
     if (m_asmBar) {
@@ -2887,6 +3092,14 @@ void MainWindow::refreshAssembly() {
         m_asmBar->setVisible(!runs.isEmpty());
     }
     renderAssembly();
+    // A name another view asked for, now the listing is here to hold it.
+    if (!m_asmPendingName.isEmpty() && view < 0) {
+        if (const std::optional<quint64> at = m_asmShown.locate(m_asmPendingName)) {
+            showAssemblyOffset(*at);
+            m_asmPendingName.clear();
+        }
+    }
+    showAssemblyReferrers();
 }
 
 bool MainWindow::annotateAssemblyLine(int line, const QString &text, bool comment) {
@@ -2912,6 +3125,100 @@ bool MainWindow::annotateAssemblyLine(int line, const QString &text, bool commen
     return true;
 }
 
+bool MainWindow::drawAssemblyGraph(int line, bool calls) {
+    const int view = m_asmShow ? m_asmShow->currentData().toInt() : -1;
+    if (view >= 0 || m_asmForceRaw || line < 0 || line >= m_asmShown.lines.size()) return false;
+    // A flow graph is of the function a line of code is in: the line itself,
+    // or the first below a label.
+    int at = line;
+    while (!calls && at < m_asmShown.lines.size() && !m_asmShown.lines[at].hasOffset) ++at;
+    if (!calls && at >= m_asmShown.lines.size()) return false;
+    QTreeWidgetItem *item = m_selected;
+    const Open *open = imageFor(item);
+    if (!open) return false;
+    const quint32 block = item->parent() ? item->data(0, RoleBlock).toUInt() : 0;
+    const quint32 partition = item->parent() ? item->data(0, RolePartition).toUInt() : 0;
+    const ade::Graph graph = calls ? open->image.callGraph(partition, block)
+                                   : open->image.flowGraph(partition, block,
+                                                           m_asmShown.lines[at].offset);
+    if (!graph.refusal.isEmpty() || graph.nodes.isEmpty()) {
+        emit errorOccurred(graph.refusal.isEmpty() ? QStringLiteral("There is nothing to draw.")
+                                                   : graph.refusal);
+        return false;
+    }
+    // A block shows its instructions, from the listing: the instruction
+    // column of every line between its first byte and its end.
+    QVector<GraphView::Node> nodes;
+    for (int i = 0; i < graph.nodes.size(); ++i) {
+        const AdeGraphNode &n = graph.nodes[i];
+        GraphView::Node node{n.has_offset, n.offset, n.kind, n.layer, n.order, graph.labels[i], {}};
+        if (!calls && n.has_offset) {
+            for (const ade::AsmLine &l : m_asmShown.lines) {
+                if (!l.hasOffset || l.offset < n.offset) continue;
+                if (l.offset >= n.end) break;
+                node.lines << l.text.mid(36).trimmed();
+                if (node.lines.size() >= 40) {
+                    node.lines << QStringLiteral("...");
+                    break;
+                }
+            }
+        }
+        nodes.append(node);
+    }
+    QVector<GraphView::Edge> edges;
+    for (const AdeGraphEdge &e : graph.edges) edges.append({e.from, e.to, e.kind, e.back});
+
+    // One window, reused: a graph is looked at beside the listing.
+    if (!m_graph) {
+        m_graph = new QDialog(this);
+        m_graph->setObjectName(QStringLiteral("assemblyGraph"));
+        m_graph->resize(900, 700);
+        auto *layout = new QVBoxLayout(m_graph);
+        auto *bar = new QHBoxLayout;
+        auto *what = new QLabel(m_graph);
+        what->setObjectName(QStringLiteral("assemblyGraphWhat"));
+        auto *view = new GraphView(m_graph);
+        view->setObjectName(QStringLiteral("assemblyGraphView"));
+        auto *fit = new QPushButton(QStringLiteral("Fit"), m_graph);
+        auto *in = new QPushButton(QStringLiteral("+"), m_graph);
+        auto *out = new QPushButton(QStringLiteral("-"), m_graph);
+        connect(fit, &QPushButton::clicked, view, &GraphView::fit);
+        connect(in, &QPushButton::clicked, view, [view] { view->zoom(1.25); });
+        connect(out, &QPushButton::clicked, view, [view] { view->zoom(0.8); });
+        connect(view, &GraphView::activated, this, [this](quint64 offset) {
+            showAssemblyOffset(offset);
+            activateWindow();
+        });
+        bar->addWidget(what, 1);
+        bar->addWidget(fit);
+        bar->addWidget(out);
+        bar->addWidget(in);
+        layout->addLayout(bar);
+        layout->addWidget(view, 1);
+        auto *legend = new QLabel(
+            QStringLiteral("Green T: branch taken · red F: not taken · up the left: a loop · "
+                           "double-click a box to go to it · Ctrl+wheel zooms, drag pans"),
+            m_graph);
+        legend->setWordWrap(true);
+        layout->addWidget(legend);
+    }
+    auto *drawn = m_graph->findChild<GraphView *>(QStringLiteral("assemblyGraphView"));
+    auto *what = m_graph->findChild<QLabel *>(QStringLiteral("assemblyGraphWhat"));
+    drawn->setGraph(nodes, edges);
+    const QString title = calls ? QStringLiteral("Call graph of %1").arg(m_asmWhat)
+                                : QStringLiteral("Control flow of %1 in %2")
+                                      .arg(graph.labels.value(0), m_asmWhat);
+    what->setText(QStringLiteral("%1 — %2 boxes, %3 edges")
+                      .arg(title)
+                      .arg(nodes.size())
+                      .arg(edges.size()));
+    m_graph->setWindowTitle(title);
+    m_graph->show();
+    m_graph->raise();
+    drawn->fit();
+    return true;
+}
+
 void MainWindow::showAssemblyOffset(quint64 offset) {
     // The line holding the offset: the last one starting at or before it.
     int found = -1;
@@ -2921,11 +3228,176 @@ void MainWindow::showAssemblyOffset(quint64 offset) {
         if (line.offset > offset) break;
         found = i;
     }
-    if (found < 0) return;
+    if (found >= 0) goToAssemblyLine(found);
+}
+
+void MainWindow::goToAssemblyLine(int line) {
+    if (line < 0 || line >= m_asm->document()->blockCount()) return;
+    // Where the reader was goes on the way back; anything ahead is dropped,
+    // as a browser drops it.
+    const int here = m_asm->textCursor().blockNumber();
+    if (here != line) {
+        m_asmHistory.resize(m_asmHistoryAt + 1);
+        if (m_asmHistory.isEmpty() || m_asmHistory.last() != here) m_asmHistory.append(here);
+        m_asmHistory.append(line);
+        m_asmHistoryAt = static_cast<int>(m_asmHistory.size()) - 1;
+    }
     // A block per line, as renderAssembly writes them.
-    QTextCursor cursor(m_asm->document()->findBlockByNumber(found));
+    QTextCursor cursor(m_asm->document()->findBlockByNumber(line));
     m_asm->setTextCursor(cursor);
     m_asm->centerCursor();
+    m_asmBack->setEnabled(m_asmHistoryAt > 0);
+    m_asmForward->setEnabled(m_asmHistoryAt + 1 < m_asmHistory.size());
+}
+
+void MainWindow::stepAssemblyHistory(int step) {
+    const int to = m_asmHistoryAt + step;
+    if (to < 0 || to >= m_asmHistory.size()) return;
+    m_asmHistoryAt = to;
+    QTextCursor cursor(m_asm->document()->findBlockByNumber(m_asmHistory[to]));
+    m_asm->setTextCursor(cursor);
+    m_asm->centerCursor();
+    m_asmBack->setEnabled(m_asmHistoryAt > 0);
+    m_asmForward->setEnabled(m_asmHistoryAt + 1 < m_asmHistory.size());
+}
+
+bool MainWindow::goToAssemblyName(const QString &name) {
+    const QString wanted = name.trimmed();
+    if (wanted.isEmpty()) return false;
+    const int view = m_asmShow ? m_asmShow->currentData().toInt() : -1;
+    if (view >= 0) {
+        // From another view: the listing first, then the name in it.
+        m_asmPendingName = wanted;
+        m_asmShow->setCurrentIndex(m_asmShow->findData(-1));
+        const bool found = m_asmPendingName.isEmpty();
+        m_asmPendingName.clear();
+        return found;
+    }
+    const std::optional<quint64> at = m_asmShown.locate(wanted);
+    if (!at) return false;
+    showAssemblyOffset(*at);
+    return true;
+}
+
+void MainWindow::followAssemblyLine(int line) {
+    if (line < 0 || line >= m_asmShown.lines.size()) return;
+    const QVector<quint64> &targets = m_asmShown.lines[line].targets;
+    if (targets.isEmpty()) return;
+    if (targets.size() == 1) {
+        showAssemblyOffset(targets.first());
+        return;
+    }
+    // Several: say which, by the line each lands on.
+    QMenu menu(this);
+    for (quint64 target : targets) {
+        QString shown = QStringLiteral("$%1").arg(target, 0, 16);
+        for (const ade::AsmLine &l : m_asmShown.lines) {
+            if (l.hasOffset && l.offset == target) {
+                shown = l.text.simplified().left(60);
+                break;
+            }
+        }
+        QAction *go = menu.addAction(shown);
+        connect(go, &QAction::triggered, this, [this, target] { showAssemblyOffset(target); });
+    }
+    menu.exec(m_asm->viewport()->mapToGlobal(m_asm->cursorRect().bottomLeft()));
+}
+
+void MainWindow::showAssemblyReferrers() {
+    if (!m_asmRefs) return;
+    const int line = m_asm->textCursor().blockNumber();
+    const int view = m_asmShow ? m_asmShow->currentData().toInt() : -1;
+    // A label line refers to the line below it.
+    int at = line;
+    while (at >= 0 && at < m_asmShown.lines.size() && !m_asmShown.lines[at].hasOffset &&
+           m_asmShown.lines[at].kind == ADE_ASM_LABEL) {
+        ++at;
+    }
+    if (view >= 0 || at < 0 || at >= m_asmShown.lines.size() || !m_asmShown.lines[at].hasOffset) {
+        m_asmRefs->hide();
+        return;
+    }
+    const QVector<int> from = m_asmReferrers.value(m_asmShown.lines[at].offset);
+    if (from.isEmpty()) {
+        m_asmRefs->hide();
+        return;
+    }
+    QStringList links;
+    for (int i : from.mid(0, 24)) {
+        const QString text = m_asmShown.lines[i].text;
+        // The line's address and its instruction: enough to tell them apart.
+        const QString shown =
+            (text.left(8) + QLatin1Char(' ') + text.mid(36).section(QLatin1Char(' '), 0, 0))
+                .toHtmlEscaped();
+        links << QStringLiteral("<a href='%1'>%2</a>").arg(i).arg(shown);
+    }
+    if (from.size() > 24) links << QStringLiteral("and %1 more").arg(from.size() - 24);
+    m_asmRefs->setText(QStringLiteral("Referred to from: %1").arg(links.join(QStringLiteral(", "))));
+    m_asmRefs->show();
+}
+
+void MainWindow::findInAssembly() {
+    if (m_asmFind.isEmpty()) return;
+    if (!m_asm->find(m_asmFind)) {
+        // From the top again, once.
+        m_asm->moveCursor(QTextCursor::Start);
+        if (!m_asm->find(m_asmFind)) {
+            statusBar()->showMessage(QStringLiteral("%1 is not in the listing").arg(m_asmFind));
+        }
+    }
+}
+
+bool MainWindow::eventFilter(QObject *watched, QEvent *event) {
+    if (m_asm && (watched == m_asm->viewport() || watched == m_asm)) {
+        // The name under the cursor, as names are written: letters, digits,
+        // `_` and `.`.
+        const auto token = [this](const QTextCursor &at) {
+            const QString text = at.block().text();
+            int from = at.positionInBlock();
+            int to = from;
+            const auto part = [](QChar c) {
+                return c.isLetterOrNumber() || c == QLatin1Char('_') || c == QLatin1Char('.');
+            };
+            while (from > 0 && part(text[from - 1])) --from;
+            while (to < text.size() && part(text[to])) ++to;
+            return text.mid(from, to - from);
+        };
+        const auto follow = [&](const QTextCursor &at) {
+            // A name under the cursor first; else where the line goes.
+            const QString name = token(at);
+            if (!name.isEmpty() && goToAssemblyName(name)) return;
+            followAssemblyLine(at.blockNumber());
+        };
+        if (watched == m_asm->viewport() && event->type() == QEvent::MouseButtonDblClick) {
+            const auto *click = static_cast<QMouseEvent *>(event);
+            follow(m_asm->cursorForPosition(click->position().toPoint()));
+            return true;
+        }
+        if (watched == m_asm && event->type() == QEvent::KeyPress) {
+            const auto *key = static_cast<QKeyEvent *>(event);
+            if (key->key() == Qt::Key_Return || key->key() == Qt::Key_Enter) {
+                follow(m_asm->textCursor());
+                return true;
+            }
+            if ((key->modifiers() & Qt::AltModifier) && key->key() == Qt::Key_Left) {
+                stepAssemblyHistory(-1);
+                return true;
+            }
+            if ((key->modifiers() & Qt::AltModifier) && key->key() == Qt::Key_Right) {
+                stepAssemblyHistory(1);
+                return true;
+            }
+            if (key->key() == Qt::Key_Backspace) {
+                stepAssemblyHistory(-1);
+                return true;
+            }
+            if (key->key() == Qt::Key_G && key->modifiers() == Qt::NoModifier) {
+                drawAssemblyGraph(m_asm->textCursor().blockNumber(), false);
+                return true;
+            }
+        }
+    }
+    return QMainWindow::eventFilter(watched, event);
 }
 
 void MainWindow::saveAssembly() {

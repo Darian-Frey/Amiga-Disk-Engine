@@ -1838,6 +1838,277 @@ pub extern "C" fn ade_region_name(region: u32) -> *const c_char {
     region_text(region, &REGION_NAMES)
 }
 
+/// What a block on the map is wrong with (F-027). The order is the
+/// engine's: worst first.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdeDamageKind {
+    /// Claimed by two files.
+    CrossLinked = 0,
+    /// A checksum that does not match.
+    Checksum = 1,
+    /// Another error the health report names the block for.
+    Structure = 2,
+    /// In use by a file but marked free.
+    AtRisk = 3,
+    /// Marked in use, and nothing reaches it.
+    Orphaned = 4,
+    /// Marked free on a volume with no files, and holding data.
+    HoldsData = 5,
+}
+
+const DAMAGES: [ade_core::Damage; 6] = [
+    ade_core::Damage::CrossLinked,
+    ade_core::Damage::Checksum,
+    ade_core::Damage::Structure,
+    ade_core::Damage::AtRisk,
+    ade_core::Damage::Orphaned,
+    ade_core::Damage::HoldsData,
+];
+
+/// One damaged block.
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct AdeDamagedBlock {
+    /// The block.
+    pub block: u32,
+    /// The worst thing wrong with it.
+    pub kind: AdeDamageKind,
+}
+
+/// The counts a map's legend gives beside it.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct AdeBlockCounts {
+    /// Blocks the bitmap covers.
+    pub blocks: u64,
+    /// Of those, marked in use.
+    pub used: u64,
+    /// Of those, marked free.
+    pub free: u64,
+    /// Files on the volume.
+    pub files: u64,
+    /// Files whose blocks are in more than one run.
+    pub in_pieces: u64,
+    /// Whether the counts mean anything: false with no mounted volume.
+    pub known: bool,
+}
+
+/// A disk's damaged blocks and its counts, for its map.
+pub struct AdeDamage {
+    blocks: Vec<AdeDamagedBlock>,
+    counts: AdeBlockCounts,
+}
+
+/// The blocks of the image the health report finds wrong, each by the worst
+/// thing wrong with it, and the counts of used, free and fragmented. Read
+/// from the disk as it now stands, edits included. Only
+/// `ADE_WHOLE_IMAGE`, as the map itself; null for a partition, or null.
+///
+/// # Safety
+/// `image` must be a live handle or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ade_image_damage(
+    image: *const AdeImage,
+    partition: u32,
+) -> *mut AdeDamage {
+    with_image(image, std::ptr::null_mut(), |image| {
+        if partition != ADE_WHOLE_IMAGE {
+            return std::ptr::null_mut();
+        }
+        let Some(handle) = image.image.as_ref() else {
+            return std::ptr::null_mut();
+        };
+        let report = examine(handle.read_range(0, image.inspection.size));
+        let blocks = ade_core::damaged_blocks(&report)
+            .into_iter()
+            .map(|(block, damage)| AdeDamagedBlock {
+                block,
+                kind: match damage {
+                    ade_core::Damage::CrossLinked => AdeDamageKind::CrossLinked,
+                    ade_core::Damage::Checksum => AdeDamageKind::Checksum,
+                    ade_core::Damage::Structure => AdeDamageKind::Structure,
+                    ade_core::Damage::AtRisk => AdeDamageKind::AtRisk,
+                    ade_core::Damage::Orphaned => AdeDamageKind::Orphaned,
+                    ade_core::Damage::HoldsData => AdeDamageKind::HoldsData,
+                },
+            })
+            .collect();
+        let counts = report
+            .bitmap
+            .as_ref()
+            .map_or_else(AdeBlockCounts::default, |b| {
+                let (files, in_pieces) = ade_core::layout::Layout::of(handle).files();
+                let covered = u64::from(b.covered);
+                let used = b.marked_used as u64;
+                AdeBlockCounts {
+                    blocks: covered,
+                    used,
+                    free: covered.saturating_sub(used),
+                    files: files as u64,
+                    in_pieces: in_pieces as u64,
+                    known: true,
+                }
+            });
+        Box::into_raw(Box::new(AdeDamage { blocks, counts }))
+    })
+}
+
+/// How many damaged blocks.
+///
+/// # Safety
+/// `damage` must be a live handle or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ade_damage_count(damage: *const AdeDamage) -> usize {
+    if damage.is_null() {
+        return 0;
+    }
+    // SAFETY: checked non-null; the caller promises a live handle.
+    guard(0, || unsafe { &*damage }.blocks.len())
+}
+
+/// Copy damaged block `index` into `*out`. [`AdeResult::NotFound`] past the
+/// end.
+///
+/// # Safety
+/// `damage` must be a live handle or null; `out` writable or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ade_damage_get(
+    damage: *const AdeDamage,
+    index: usize,
+    out: *mut AdeDamagedBlock,
+) -> AdeResult {
+    if damage.is_null() || out.is_null() {
+        return AdeResult::NullArgument;
+    }
+    guard(AdeResult::Internal, || {
+        // SAFETY: checked non-null; the caller promises a live handle.
+        let Some(found) = unsafe { &*damage }.blocks.get(index) else {
+            return AdeResult::NotFound;
+        };
+        // SAFETY: checked non-null; the caller promises it is writable.
+        unsafe { *out = *found };
+        AdeResult::Ok
+    })
+}
+
+/// The disk's counts, beside its map.
+///
+/// # Safety
+/// `damage` must be a live handle or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ade_damage_counts(damage: *const AdeDamage) -> AdeBlockCounts {
+    if damage.is_null() {
+        return AdeBlockCounts::default();
+    }
+    // SAFETY: checked non-null; the caller promises a live handle.
+    guard(AdeBlockCounts::default(), || unsafe { &*damage }.counts)
+}
+
+/// Release the damage.
+///
+/// # Safety
+/// `damage` must come from `ade_image_damage` and not have been freed, or be
+/// null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ade_damage_free(damage: *mut AdeDamage) {
+    if damage.is_null() {
+        return;
+    }
+    guard((), || {
+        // SAFETY: checked non-null; the caller's contract.
+        drop(unsafe { Box::from_raw(damage) });
+    });
+}
+
+/// The words for each kind of damage, made once from the engine's.
+fn damage_texts() -> &'static [(CString, CString); 6] {
+    static TEXTS: std::sync::OnceLock<[(CString, CString); 6]> = std::sync::OnceLock::new();
+    TEXTS.get_or_init(|| {
+        DAMAGES.map(|d| {
+            (
+                CString::new(d.name()).unwrap_or_default(),
+                CString::new(d.describes()).unwrap_or_default(),
+            )
+        })
+    })
+}
+
+/// A kind of damage's short name, for a legend. Static; never freed; empty
+/// for a code this build does not know.
+#[unsafe(no_mangle)]
+pub extern "C" fn ade_damage_name(kind: u32) -> *const c_char {
+    guard(c"".as_ptr(), || {
+        usize::try_from(kind)
+            .ok()
+            .and_then(|i| damage_texts().get(i))
+            .map_or(c"".as_ptr(), |(name, _)| name.as_ptr())
+    })
+}
+
+/// What a kind of damage means, in a line. Static; never freed.
+#[unsafe(no_mangle)]
+pub extern "C" fn ade_damage_describes(kind: u32) -> *const c_char {
+    guard(c"".as_ptr(), || {
+        usize::try_from(kind)
+            .ok()
+            .and_then(|i| damage_texts().get(i))
+            .map_or(c"".as_ptr(), |(_, text)| text.as_ptr())
+    })
+}
+
+/// What the file at `block` is, as a code for an icon (`AdeFileKind`): read
+/// from its contents, and its name for a library. `ADE_FILE_DATA` for one
+/// that cannot be read; `ADE_FILE_EMPTY` for no bytes.
+///
+/// # Safety
+/// `image` must be a live handle or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ade_file_kind(image: *const AdeImage, partition: u32, block: u32) -> u32 {
+    use ade_core::decode::FileKind;
+    let data = FileKind::ALL
+        .iter()
+        .position(|k| *k == FileKind::Data)
+        .unwrap_or(0);
+    with_image(image, u32::try_from(data).unwrap_or(0), |image| {
+        let kind = with_volume(image, partition, |volume| {
+            let entry = volume.entry_at(block).ok()?;
+            // Read to be named, so bounded: a file of many megabytes on a
+            // hard disk is data, not worth reading whole for an icon.
+            if entry.byte_size > 8 << 20 {
+                return Some(FileKind::Data);
+            }
+            let bytes = volume.read_file(&entry).ok()?.into_bytes();
+            Some(ade_core::decode::kind(&entry.name, &bytes))
+        })
+        .unwrap_or(FileKind::Data);
+        let at = FileKind::ALL
+            .iter()
+            .position(|k| *k == kind)
+            .unwrap_or(data);
+        u32::try_from(at).unwrap_or(0)
+    })
+}
+
+/// A file kind's words, for a tooltip: "a program", "an IFF picture".
+/// Static; never freed; empty for a code this build does not know.
+#[unsafe(no_mangle)]
+pub extern "C" fn ade_file_kind_name(kind: u32) -> *const c_char {
+    static NAMES: std::sync::OnceLock<Vec<CString>> = std::sync::OnceLock::new();
+    guard(c"".as_ptr(), || {
+        let names = NAMES.get_or_init(|| {
+            ade_core::decode::FileKind::ALL
+                .iter()
+                .map(|k| CString::new(k.name()).unwrap_or_default())
+                .collect()
+        });
+        usize::try_from(kind)
+            .ok()
+            .and_then(|i| names.get(i))
+            .map_or(c"".as_ptr(), |n| n.as_ptr())
+    })
+}
+
 /// A region's one-line description, for a legend. Static; never freed.
 ///
 /// # Safety
@@ -2730,6 +3001,7 @@ pub struct AdeAsmLine {
 /// A disassembly, or the reason there is none.
 pub struct AdeDisasm {
     lines: Vec<ade_core::disasm::Line>,
+    names: std::collections::BTreeMap<String, u64>,
     refusal: Vec<u8>,
 }
 
@@ -2738,10 +3010,12 @@ impl AdeDisasm {
         let handle = match result {
             Ok(listing) => Self {
                 lines: listing.lines,
+                names: listing.names,
                 refusal: Vec::new(),
             },
             Err(why) => Self {
                 lines: Vec::new(),
+                names: std::collections::BTreeMap::new(),
                 refusal: why.0.into_bytes(),
             },
         };
@@ -2850,9 +3124,12 @@ impl AdeDisasm {
                     length: 0,
                     text,
                     comment: None,
+                    flow: ade_core::disasm::Flow::None,
+                    targets: Vec::new(),
                 })
                 .collect(),
             truncated: false,
+            names: std::collections::BTreeMap::new(),
         });
         Self::from(listing)
     }
@@ -3214,6 +3491,294 @@ pub unsafe extern "C" fn ade_project_set_comment(
     )
 }
 
+/// One node of a drawn graph. `label` borrows from the graph.
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct AdeGraphNode {
+    /// Whether `offset` and `end` mean anything: false for a library
+    /// function, which has no bytes in the program.
+    pub has_offset: bool,
+    /// Its first byte, as listing lines carry offsets.
+    pub offset: u64,
+    /// Past its last byte; for a function, its first.
+    pub end: u64,
+    /// What it is: an `AdeGraphNodeKind`.
+    pub kind: u32,
+    /// Its layer, from 0 at the top.
+    pub layer: u32,
+    /// Its place in the layer, from 0 at the left.
+    pub order: u32,
+    /// What to call it.
+    pub label: AdeBytes,
+}
+
+/// One edge of a drawn graph.
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct AdeGraphEdge {
+    /// The node it leaves.
+    pub from: u32,
+    /// The node it reaches.
+    pub to: u32,
+    /// How: an `AdeGraphEdgeKind`.
+    pub kind: u32,
+    /// Whether it closes a loop, going back up the drawing.
+    pub back: bool,
+}
+
+/// A graph laid out to draw, or why there is none.
+pub struct AdeGraph {
+    /// The label bytes each node's [`AdeBytes`] points into: never read,
+    /// and must not be removed, as [`AdeListing::names`] explains.
+    #[allow(dead_code, reason = "keeps the label buffers alive for `nodes`")]
+    labels: Vec<Vec<u8>>,
+    nodes: Vec<AdeGraphNode>,
+    edges: Vec<AdeGraphEdge>,
+    refusal: Vec<u8>,
+}
+
+impl AdeGraph {
+    fn from(result: Result<ade_core::disasm::Drawn, ade_core::disasm::NotCode>) -> *mut Self {
+        use ade_core::disasm::{EdgeKind, NodeKind};
+        let handle = match result {
+            Ok(drawn) => {
+                let labels: Vec<Vec<u8>> = drawn
+                    .graph
+                    .nodes
+                    .iter()
+                    .map(|n| n.label.clone().into_bytes())
+                    .collect();
+                let nodes = drawn
+                    .graph
+                    .nodes
+                    .iter()
+                    .zip(&drawn.offsets)
+                    .zip(&labels)
+                    .map(|((n, at), label)| AdeGraphNode {
+                        has_offset: at.is_some(),
+                        offset: at.map_or(0, |(o, _)| o),
+                        end: at.map_or(0, |(_, e)| e),
+                        kind: match n.kind {
+                            NodeKind::Block => 0,
+                            NodeKind::Entry => 1,
+                            NodeKind::Exit => 2,
+                            NodeKind::Function => 3,
+                            NodeKind::Library => 4,
+                        },
+                        layer: n.layer,
+                        order: n.order,
+                        label: AdeBytes::of(label),
+                    })
+                    .collect();
+                let edges = drawn
+                    .graph
+                    .edges
+                    .iter()
+                    .map(|e| AdeGraphEdge {
+                        from: u32::try_from(e.from).unwrap_or(u32::MAX),
+                        to: u32::try_from(e.to).unwrap_or(u32::MAX),
+                        kind: match e.kind {
+                            EdgeKind::Taken => 0,
+                            EdgeKind::NotTaken => 1,
+                            EdgeKind::Jump => 2,
+                            EdgeKind::Next => 3,
+                            EdgeKind::Call => 4,
+                        },
+                        back: e.back,
+                    })
+                    .collect();
+                Self {
+                    labels,
+                    nodes,
+                    edges,
+                    refusal: Vec::new(),
+                }
+            }
+            Err(why) => Self {
+                labels: Vec::new(),
+                nodes: Vec::new(),
+                edges: Vec::new(),
+                refusal: why.0.into_bytes(),
+            },
+        };
+        Box::into_raw(Box::new(handle))
+    }
+}
+
+/// The program a graph is drawn from — the file at `block`, or the boot
+/// code for block 0 — and a way to draw it.
+fn graph_of(
+    image: *const AdeImage,
+    partition: u32,
+    block: u32,
+    draw: impl Fn(Result<&[u8], &Image>) -> Result<ade_core::disasm::Drawn, ade_core::disasm::NotCode>,
+) -> *mut AdeGraph {
+    with_image(image, std::ptr::null_mut(), |image| {
+        if block == 0 {
+            let Some(handle) = image.image.as_ref() else {
+                return AdeGraph::from(Err(ade_core::disasm::NotCode(
+                    "ADE could not read this image's blocks".to_owned(),
+                )));
+            };
+            return AdeGraph::from(draw(Err(handle)));
+        }
+        let bytes = with_volume(image, partition, |volume| {
+            let entry = volume.entry_at(block).ok()?;
+            Some(volume.read_file(&entry).ok()?.into_bytes())
+        });
+        let Some(bytes) = bytes else {
+            return std::ptr::null_mut();
+        };
+        AdeGraph::from(draw(Ok(&bytes)))
+    })
+}
+
+/// The control flow of the function the listing line at `offset` is in, laid
+/// out to draw: of the file at `block`, or of the boot code for block 0. A
+/// handle with no nodes and a reason for what is not code.
+///
+/// # Safety
+/// `image` must be a live handle or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ade_disasm_flow_graph(
+    image: *const AdeImage,
+    partition: u32,
+    block: u32,
+    offset: u64,
+) -> *mut AdeGraph {
+    graph_of(image, partition, block, |program| match program {
+        Ok(bytes) => ade_core::disasm::file_flow_graph(bytes, offset),
+        Err(handle) => ade_core::disasm::bootblock_flow_graph(handle, offset),
+    })
+}
+
+/// Who calls whom, laid out to draw, as [`ade_disasm_flow_graph`] chooses
+/// the program.
+///
+/// # Safety
+/// `image` must be a live handle or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ade_disasm_call_graph(
+    image: *const AdeImage,
+    partition: u32,
+    block: u32,
+) -> *mut AdeGraph {
+    graph_of(image, partition, block, |program| match program {
+        Ok(bytes) => ade_core::disasm::file_call_graph(bytes),
+        Err(handle) => ade_core::disasm::bootblock_call_graph(handle),
+    })
+}
+
+/// Nodes in the graph.
+///
+/// # Safety
+/// `graph` must be a live handle or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ade_graph_node_count(graph: *const AdeGraph) -> usize {
+    if graph.is_null() {
+        return 0;
+    }
+    // SAFETY: checked non-null; the caller promises a live handle.
+    guard(0, || unsafe { &*graph }.nodes.len())
+}
+
+/// Copy node `index` into `*out`. [`AdeResult::NotFound`] past the end.
+///
+/// # Safety
+/// `graph` must be a live handle or null; `out` writable or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ade_graph_node(
+    graph: *const AdeGraph,
+    index: usize,
+    out: *mut AdeGraphNode,
+) -> AdeResult {
+    if graph.is_null() || out.is_null() {
+        return AdeResult::NullArgument;
+    }
+    guard(AdeResult::Internal, || {
+        // SAFETY: checked non-null; the caller promises a live handle.
+        let Some(node) = unsafe { &*graph }.nodes.get(index) else {
+            return AdeResult::NotFound;
+        };
+        // SAFETY: checked non-null; the caller promises it is writable.
+        unsafe { *out = *node };
+        AdeResult::Ok
+    })
+}
+
+/// Edges in the graph.
+///
+/// # Safety
+/// `graph` must be a live handle or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ade_graph_edge_count(graph: *const AdeGraph) -> usize {
+    if graph.is_null() {
+        return 0;
+    }
+    // SAFETY: checked non-null; the caller promises a live handle.
+    guard(0, || unsafe { &*graph }.edges.len())
+}
+
+/// Copy edge `index` into `*out`. [`AdeResult::NotFound`] past the end.
+///
+/// # Safety
+/// `graph` must be a live handle or null; `out` writable or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ade_graph_edge(
+    graph: *const AdeGraph,
+    index: usize,
+    out: *mut AdeGraphEdge,
+) -> AdeResult {
+    if graph.is_null() || out.is_null() {
+        return AdeResult::NullArgument;
+    }
+    guard(AdeResult::Internal, || {
+        // SAFETY: checked non-null; the caller promises a live handle.
+        let Some(edge) = unsafe { &*graph }.edges.get(index) else {
+            return AdeResult::NotFound;
+        };
+        // SAFETY: checked non-null; the caller promises it is writable.
+        unsafe { *out = *edge };
+        AdeResult::Ok
+    })
+}
+
+/// Why there is no graph, UTF-8, borrowed; empty when there is one.
+///
+/// # Safety
+/// `graph` must be a live handle or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ade_graph_refusal(graph: *const AdeGraph) -> AdeBytes {
+    if graph.is_null() {
+        return AdeBytes::empty();
+    }
+    guard(AdeBytes::empty(), || {
+        // SAFETY: checked non-null; the caller promises a live handle.
+        let graph = unsafe { &*graph };
+        if graph.refusal.is_empty() {
+            AdeBytes::empty()
+        } else {
+            AdeBytes::of(&graph.refusal)
+        }
+    })
+}
+
+/// Release a graph.
+///
+/// # Safety
+/// `graph` must come from `ade_disasm_flow_graph` or
+/// `ade_disasm_call_graph` and not have been freed, or be null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ade_graph_free(graph: *mut AdeGraph) {
+    if graph.is_null() {
+        return;
+    }
+    guard((), || {
+        // SAFETY: checked non-null; the caller's contract.
+        drop(unsafe { Box::from_raw(graph) });
+    });
+}
+
 /// Lines in the listing; zero when there is a reason instead.
 ///
 /// # Safety
@@ -3268,6 +3833,125 @@ pub unsafe extern "C" fn ade_disasm_line(
             };
         }
         AdeResult::Ok
+    })
+}
+
+/// Where control goes from a listing line, so a view can colour it.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdeAsmFlow {
+    /// On to the next line, or not an instruction.
+    None = 0,
+    /// A call into the program, or through a register.
+    Call = 1,
+    /// A return.
+    Return = 2,
+    /// `bra`, `jmp`: on, and not back.
+    Jump = 3,
+    /// A conditional branch, or `dbcc`.
+    Branch = 4,
+    /// Into the system's handlers: `trap`.
+    Trap = 5,
+    /// A call through a library base the walks proved.
+    Library = 6,
+}
+
+/// Where control goes from line `index`; [`AdeAsmFlow::None`] past the end.
+///
+/// # Safety
+/// `listing` must be a live handle or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ade_disasm_line_flow(
+    listing: *const AdeDisasm,
+    index: usize,
+) -> AdeAsmFlow {
+    use ade_core::disasm::Flow;
+    if listing.is_null() {
+        return AdeAsmFlow::None;
+    }
+    guard(AdeAsmFlow::None, || {
+        // SAFETY: checked non-null; the caller promises a live handle.
+        let listing = unsafe { &*listing };
+        match listing.lines.get(index).map(|l| l.flow) {
+            Some(Flow::Call) => AdeAsmFlow::Call,
+            Some(Flow::Return) => AdeAsmFlow::Return,
+            Some(Flow::Jump) => AdeAsmFlow::Jump,
+            Some(Flow::Branch) => AdeAsmFlow::Branch,
+            Some(Flow::Trap) => AdeAsmFlow::Trap,
+            Some(Flow::Library) => AdeAsmFlow::Library,
+            Some(Flow::None) | None => AdeAsmFlow::None,
+        }
+    })
+}
+
+/// The offsets line `index` refers to — a branch's target, an address it
+/// reads, a pointer it holds — as listing lines carry them. Writes up to
+/// `capacity` into `out` and returns how many there are, so a caller can
+/// ask again with room for all; 0 past the end.
+///
+/// # Safety
+/// `listing` must be a live handle or null; `out` must have room for
+/// `capacity` offsets, or be null with `capacity` 0.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ade_disasm_line_targets(
+    listing: *const AdeDisasm,
+    index: usize,
+    out: *mut u64,
+    capacity: usize,
+) -> usize {
+    if listing.is_null() {
+        return 0;
+    }
+    guard(0, || {
+        // SAFETY: checked non-null; the caller promises a live handle.
+        let listing = unsafe { &*listing };
+        let Some(line) = listing.lines.get(index) else {
+            return 0;
+        };
+        if !out.is_null() {
+            for (n, t) in line.targets.iter().take(capacity).enumerate() {
+                // SAFETY: n < capacity, which the caller promises fits.
+                unsafe { *out.add(n) = *t };
+            }
+        }
+        line.targets.len()
+    })
+}
+
+/// The offset of the place `name` names in the listing — a label, a
+/// place written `h1_0042`, a symbol or the user's name — into
+/// `*out_offset`. [`AdeResult::NotFound`] for a name it does not know.
+///
+/// # Safety
+/// `listing` must be a live handle or null; `name` must describe readable
+/// bytes; `out_offset` writable or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ade_disasm_locate(
+    listing: *const AdeDisasm,
+    name: AdeBytes,
+    out_offset: *mut u64,
+) -> AdeResult {
+    if listing.is_null() || out_offset.is_null() {
+        return AdeResult::NullArgument;
+    }
+    // SAFETY: the caller's contract.
+    let Some(name) = (unsafe { borrowed(name) }) else {
+        return AdeResult::NullArgument;
+    };
+    guard(AdeResult::Internal, || {
+        // SAFETY: checked non-null; the caller promises a live handle.
+        let listing = unsafe { &*listing };
+        let Ok(name) = std::str::from_utf8(name) else {
+            return AdeResult::BadEncoding;
+        };
+        match listing.names.get(name.trim()) {
+            Some(&at) => {
+                // SAFETY: checked non-null; the caller promises it is writable.
+                unsafe { *out_offset = at };
+                AdeResult::Ok
+            }
+            None => AdeResult::NotFound,
+        }
     })
 }
 

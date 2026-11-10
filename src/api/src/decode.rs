@@ -711,3 +711,172 @@ mod tests {
         assert_eq!(lines[art + 1], "  1...............");
     }
 }
+
+/// What a file is, in a word, for an icon beside its name: the window's tree
+/// shows at a glance which files the Assembly and Decoded tabs will read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FileKind {
+    /// No bytes.
+    Empty,
+    /// An AmigaDOS executable.
+    Program,
+    /// An executable named as a library, device or resource.
+    Library,
+    /// A bitmap font, or its contents file.
+    Font,
+    /// A keymap.
+    Keymap,
+    /// A printer driver.
+    Printer,
+    /// A Workbench icon.
+    Icon,
+    /// An IFF picture.
+    Picture,
+    /// An IFF animation.
+    Animation,
+    /// An IFF 8SVX sound.
+    Sound,
+    /// A ProTracker module or an SMUS score.
+    Music,
+    /// Text, plain or IFF FTXT.
+    Text,
+    /// A locale catalog.
+    Catalog,
+    /// Preferences, Intuition's or IFF.
+    Preferences,
+    /// A datatype descriptor.
+    Datatype,
+    /// A cruncher's or packer's output.
+    Packed,
+    /// An archive of other files.
+    Archive,
+    /// A disk image inside the disk.
+    DiskImage,
+    /// None of these.
+    Data,
+}
+
+impl FileKind {
+    /// Every kind, in the order of their codes.
+    pub const ALL: [Self; 19] = [
+        Self::Empty,
+        Self::Program,
+        Self::Library,
+        Self::Font,
+        Self::Keymap,
+        Self::Printer,
+        Self::Icon,
+        Self::Picture,
+        Self::Animation,
+        Self::Sound,
+        Self::Music,
+        Self::Text,
+        Self::Catalog,
+        Self::Preferences,
+        Self::Datatype,
+        Self::Packed,
+        Self::Archive,
+        Self::DiskImage,
+        Self::Data,
+    ];
+
+    /// The kind in a few words.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Empty => "empty",
+            Self::Program => "a program",
+            Self::Library => "a library or device",
+            Self::Font => "a font",
+            Self::Keymap => "a keymap",
+            Self::Printer => "a printer driver",
+            Self::Icon => "a Workbench icon",
+            Self::Picture => "an IFF picture",
+            Self::Animation => "an IFF animation",
+            Self::Sound => "an IFF sound",
+            Self::Music => "music",
+            Self::Text => "text",
+            Self::Catalog => "a locale catalog",
+            Self::Preferences => "preferences",
+            Self::Datatype => "a datatype descriptor",
+            Self::Packed => "packed",
+            Self::Archive => "an archive",
+            Self::DiskImage => "a disk image",
+            Self::Data => "data",
+        }
+    }
+}
+
+/// What a file is, by its contents and, for a library, its name.
+#[must_use]
+pub fn kind(name: &[u8], bytes: &[u8]) -> FileKind {
+    use ade_object::signature::{Category, SIGNATURES};
+    if bytes.is_empty() {
+        return FileKind::Empty;
+    }
+    if icon::is_icon(bytes) {
+        return FileKind::Icon;
+    }
+    if anim::is_anim(bytes) {
+        return FileKind::Animation;
+    }
+    if ilbm::is_ilbm(bytes) {
+        return FileKind::Picture;
+    }
+    if svx::is_svx(bytes) {
+        return FileKind::Sound;
+    }
+    if smus::is_score(bytes) || tracker::is_module(bytes) {
+        return FileKind::Music;
+    }
+    if ftxt::parse(bytes).is_some() {
+        return FileKind::Text;
+    }
+    if catalog::is_catalog(bytes) {
+        return FileKind::Catalog;
+    }
+    if iffprefs::is_preferences(bytes) || prefs::is_preferences(name, bytes.len()) {
+        return FileKind::Preferences;
+    }
+    if datatype::is_descriptor(bytes) {
+        return FileKind::Datatype;
+    }
+    if font::is_contents(name, bytes) || font::is_font(bytes) {
+        return FileKind::Font;
+    }
+    if keymap::is_keymap(bytes) {
+        return FileKind::Keymap;
+    }
+    if printer::is_driver(bytes) {
+        return FileKind::Printer;
+    }
+    if ade_object::hunk::is_executable(bytes) {
+        let lower = name.to_ascii_lowercase();
+        let library = [&b".library"[..], b".device", b".resource"]
+            .iter()
+            .any(|s| lower.ends_with(s));
+        return if library {
+            FileKind::Library
+        } else {
+            FileKind::Program
+        };
+    }
+    for s in SIGNATURES.iter().filter(|s| bytes.starts_with(s.magic)) {
+        match s.category {
+            Category::Compressed => return FileKind::Packed,
+            Category::Archive => return FileKind::Archive,
+            Category::DiskImage => return FileKind::DiskImage,
+            _ => {}
+        }
+    }
+    // Text: nine in ten of its first 4 KB printable, no NULs.
+    let head = bytes.get(..bytes.len().min(4096)).unwrap_or(bytes);
+    let printable = head
+        .iter()
+        .filter(|&&b| matches!(b, 0x20..=0x7E | 0xA0..=0xFF | b'\t' | b'\n' | b'\r' | 0x1B | 0x9B))
+        .count();
+    if !head.contains(&0) && printable.saturating_mul(10) >= head.len().saturating_mul(9) {
+        return FileKind::Text;
+    }
+    FileKind::Data
+}

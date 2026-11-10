@@ -733,6 +733,14 @@ comment <place> <text>
 
 A place is written as the export labels it, `h<hunk>_<hex offset>`; boot code is hunk 0, its places the bootblock's offsets 12–1023. Blank lines, `#` lines and the `program` line are not read for content. **A name** matches `[A-Za-z_.][A-Za-z0-9_.]*`, at most 64 characters, is not a register (`d0`–`d7`, `a0`–`a7`, `sp`, `pc`, `sr`, `ccr`, `usp`, `ssp`, in any case), not of ADE's own forms (`h<n>_<hex>`, `lab_<hex>`, `_LVO…`), and not another place's name ignoring case. **A comment** is at most 200 characters with no control characters. A file over 1 MB, or a line over 4 KB, is not read. Writing goes to `<file>.<pid>.tmp` in the same folder and is renamed over the file; notes with nothing in them remove it.
 
+### Drawn graphs (F-036)
+
+**A function's control flow:** from its start, every instruction reached by following `Bcc`/`DBcc` (both ways), `bra`/`jmp` (to a target in the hunk, stated by a displacement, a PC-relative operand, or a relocated absolute address into the same hunk) and falling through; `rts`, `rte`, `rtr`, `illegal` and a jump to anywhere else end a path, and a call is not an edge. Blocks begin at the start, at every branch or jump target, and after every conditional branch. Edges: taken, not taken, jump, and *next* where a block falls into one that begins because something else branches there. **The call graph:** F-036's functions, an edge for each call or jump into another function, and one leaf per library function a proved call reaches, named as `exec Forbid`. **Layout**, as Sugiyama's method and Graphviz's `dot`: back edges are those reaching a node still on a depth-first stack from the start; a node's layer is its longest forward path from a node with nothing above it; the order in a layer starts as program order and takes four sweeps to the mean order of each node's neighbours. At most 2,000 nodes. **Over every 10th corpus program:** every forward edge goes down a layer or more, every back edge up or level; 56,458 of 56,631 functions' blocks hold exactly the instructions the walk reached.
+
+### What a file is (F-004)
+
+By content, in this order: empty; a Workbench icon (`$E310`); the IFF forms ADE reads — animation, picture, 8SVX sound, SMUS or a ProTracker module (music), FTXT (text), catalog, preferences, datatype; Intuition's preferences by name and size; a font or its contents file, a keymap, a printer driver; an executable, a library if named `.library`, `.device` or `.resource`; packed, an archive or a disk image by a signature at byte 0 (SPEC §Content signatures); text if nine in ten of the first 4 KB are printable and none is NUL; data. Files over 8 MB are data, unread. The older `$F34C` `.info` — Workbench 1.x's record of a drawer, listing its files' names — is data.
+
 ## Links
 
 Hard links are FFS-only and chain through `next_link`. Soft links were broken and support was removed in AmigaDOS 3.0. [FAQ §4.6]

@@ -280,6 +280,75 @@ void       ade_layout_free(AdeLayout *layout);
 const char *ade_region_name(AdeRegion region);
 const char *ade_region_describes(AdeRegion region);
 
+/* What the health report finds wrong with each block, for the map (F-027):
+ * each block once, by the worst thing wrong with it, and the counts a legend
+ * gives beside the map. Read from the disk as it now stands, edits included.
+ * Only ADE_WHOLE_IMAGE, as the map; NULL for a partition. Free with
+ * ade_damage_free. */
+typedef enum {
+    ADE_DAMAGE_CROSS_LINKED = 0, /* two files claim the block            */
+    ADE_DAMAGE_CHECKSUM     = 1, /* its checksum does not match          */
+    ADE_DAMAGE_STRUCTURE    = 2, /* another error names the block        */
+    ADE_DAMAGE_AT_RISK      = 3, /* in use, but the bitmap says free     */
+    ADE_DAMAGE_ORPHANED     = 4, /* marked in use, nothing reaches it    */
+    ADE_DAMAGE_HOLDS_DATA   = 5  /* free, on an empty volume, with data  */
+} AdeDamageKind;
+
+typedef struct {
+    uint32_t      block;
+    AdeDamageKind kind;
+} AdeDamagedBlock;
+
+typedef struct {
+    uint64_t blocks;    /* the bitmap covers                      */
+    uint64_t used;      /* of those, marked in use                */
+    uint64_t free;      /* of those, marked free                  */
+    uint64_t files;
+    uint64_t in_pieces; /* files whose blocks are not one run     */
+    bool     known;     /* false with no mounted volume           */
+} AdeBlockCounts;
+
+typedef struct AdeDamage AdeDamage;
+
+AdeDamage     *ade_image_damage(const AdeImage *image, uint32_t partition);
+size_t         ade_damage_count(const AdeDamage *damage);
+/* ADE_NOT_FOUND past the end. */
+AdeResult      ade_damage_get(const AdeDamage *damage, size_t index, AdeDamagedBlock *out);
+AdeBlockCounts ade_damage_counts(const AdeDamage *damage);
+void           ade_damage_free(AdeDamage *damage);
+/* A kind's short name and one-line meaning, for a legend. Static; never
+ * freed; empty for a code this build does not know. */
+const char    *ade_damage_name(AdeDamageKind kind);
+const char    *ade_damage_describes(AdeDamageKind kind);
+
+/* What a file is, by its contents (and its name, for a library), for an icon
+ * beside it in a tree. ADE_FILE_DATA for a file that cannot be read. */
+typedef enum {
+    ADE_FILE_EMPTY       = 0,
+    ADE_FILE_PROGRAM     = 1,
+    ADE_FILE_LIBRARY     = 2,  /* an executable named .library/.device/.resource */
+    ADE_FILE_FONT        = 3,
+    ADE_FILE_KEYMAP      = 4,
+    ADE_FILE_PRINTER     = 5,
+    ADE_FILE_ICON        = 6,
+    ADE_FILE_PICTURE     = 7,
+    ADE_FILE_ANIMATION   = 8,
+    ADE_FILE_SOUND       = 9,
+    ADE_FILE_MUSIC       = 10, /* a module or an SMUS score */
+    ADE_FILE_TEXT        = 11,
+    ADE_FILE_CATALOG     = 12,
+    ADE_FILE_PREFERENCES = 13,
+    ADE_FILE_DATATYPE    = 14,
+    ADE_FILE_PACKED      = 15,
+    ADE_FILE_ARCHIVE     = 16,
+    ADE_FILE_DISK_IMAGE  = 17,
+    ADE_FILE_DATA        = 18
+} AdeFileKind;
+
+uint32_t    ade_file_kind(const AdeImage *image, uint32_t partition, uint32_t block);
+/* "a program", "an IFF picture": static, never freed. */
+const char *ade_file_kind_name(uint32_t kind);
+
 /* What came off one track of the medium (F-029). */
 typedef struct {
     uint32_t track;    /* 0-159: cylinder * 2 + head        */
@@ -559,6 +628,25 @@ AdeDisasm *ade_disasm_bootblock(const AdeImage *image);
 size_t     ade_disasm_count(const AdeDisasm *listing);
 /* ADE_NOT_FOUND past the end. */
 AdeResult  ade_disasm_line(const AdeDisasm *listing, size_t index, AdeAsmLine *out);
+/* Where control goes from line `index`, for colouring it; ADE_FLOW_NONE past
+ * the end. */
+typedef enum {
+    ADE_FLOW_NONE    = 0, /* on to the next line, or not an instruction */
+    ADE_FLOW_CALL    = 1, /* bsr, jsr                                   */
+    ADE_FLOW_RETURN  = 2, /* rts, rte, rtr                              */
+    ADE_FLOW_JUMP    = 3, /* bra, jmp                                   */
+    ADE_FLOW_BRANCH  = 4, /* a conditional branch, dbcc                 */
+    ADE_FLOW_TRAP    = 5, /* trap, trapv, illegal                       */
+    ADE_FLOW_LIBRARY = 6  /* a call through a proved library base       */
+} AdeAsmFlow;
+AdeAsmFlow ade_disasm_line_flow(const AdeDisasm *listing, size_t index);
+/* The offsets line `index` refers to, as lines carry them: up to `capacity`
+ * written to `out`; returns how many there are. */
+size_t     ade_disasm_line_targets(const AdeDisasm *listing, size_t index, uint64_t *out,
+                                   size_t capacity);
+/* The offset of the place `name` names — a label, `h1_0042`, a symbol or the
+ * user's name. ADE_NOT_FOUND for a name the listing does not know. */
+AdeResult  ade_disasm_locate(const AdeDisasm *listing, AdeBytes name, uint64_t *out_offset);
 /* Why there is no listing, UTF-8, borrowed; empty when there is one. */
 AdeBytes   ade_disasm_refusal(const AdeDisasm *listing);
 void       ade_disasm_free(AdeDisasm *listing);
@@ -615,6 +703,62 @@ AdeResult    ade_segments_get(const AdeSegments *segments, size_t index, AdeSegm
 /* Why there are no runs, UTF-8, borrowed; empty when there are. */
 AdeBytes     ade_segments_refusal(const AdeSegments *segments);
 void         ade_segments_free(AdeSegments *segments);
+
+/* --- Drawn graphs (F-036) ----------------------------------------------
+ *
+ * A function's control flow — its basic blocks, and the branches, jumps and
+ * fall-throughs between them — or the program's call graph, laid out by the
+ * engine in layers to draw: a front end scales `layer` and `order` to
+ * pixels. Of the file at `block`, or of the boot code for block 0; for a
+ * flow graph, of the function the listing line at `offset` is in. A handle
+ * with no nodes and a reason for what is not code. Free with
+ * ade_graph_free. */
+typedef enum {
+    ADE_NODE_BLOCK    = 0, /* a basic block                         */
+    ADE_NODE_ENTRY    = 1, /* the block a function starts with      */
+    ADE_NODE_EXIT     = 2, /* a block that returns or jumps out     */
+    ADE_NODE_FUNCTION = 3, /* a function, in a call graph           */
+    ADE_NODE_LIBRARY  = 4  /* a library function a call reaches     */
+} AdeGraphNodeKind;
+
+typedef enum {
+    ADE_EDGE_TAKEN     = 0, /* a conditional branch taken          */
+    ADE_EDGE_NOT_TAKEN = 1, /* a conditional branch not taken      */
+    ADE_EDGE_JUMP      = 2, /* bra, jmp                            */
+    ADE_EDGE_NEXT      = 3, /* falling through into the next block */
+    ADE_EDGE_CALL      = 4  /* a call, in a call graph             */
+} AdeGraphEdgeKind;
+
+/* `label` borrows from the graph. `offset` and `end` are as listing lines
+ * carry offsets, meaningful when `has_offset`. */
+typedef struct {
+    bool     has_offset;
+    uint64_t offset;
+    uint64_t end;
+    uint32_t kind;  /* AdeGraphNodeKind */
+    uint32_t layer;
+    uint32_t order;
+    AdeBytes label;
+} AdeGraphNode;
+
+typedef struct {
+    uint32_t from;
+    uint32_t to;
+    uint32_t kind;  /* AdeGraphEdgeKind */
+    bool     back;  /* closes a loop: goes back up the drawing */
+} AdeGraphEdge;
+
+typedef struct AdeGraph AdeGraph;
+
+AdeGraph *ade_disasm_flow_graph(const AdeImage *image, uint32_t partition, uint32_t block,
+                                uint64_t offset);
+AdeGraph *ade_disasm_call_graph(const AdeImage *image, uint32_t partition, uint32_t block);
+size_t    ade_graph_node_count(const AdeGraph *graph);
+AdeResult ade_graph_node(const AdeGraph *graph, size_t index, AdeGraphNode *out);
+size_t    ade_graph_edge_count(const AdeGraph *graph);
+AdeResult ade_graph_edge(const AdeGraph *graph, size_t index, AdeGraphEdge *out);
+AdeBytes  ade_graph_refusal(const AdeGraph *graph);
+void      ade_graph_free(AdeGraph *graph);
 
 /* --- Names and comments (D-022) -----------------------------------------
  *

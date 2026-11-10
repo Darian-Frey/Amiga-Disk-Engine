@@ -195,6 +195,8 @@ int main(int argc, char **argv) {
             check(ade_disasm_line(guess, ade_disasm_count(guess), &line) == ADE_NOT_FOUND,
                   "past the end is NOT_FOUND");
             ade_disasm_free(guess);
+            check(ade_file_kind(image, ADE_WHOLE_IMAGE, file_block) == ADE_FILE_TEXT,
+                  "a text file's kind is text");
             /* The views beside the listing (D-021) refuse what is not code. */
             AdeDisasm *view = ade_disasm_view(image, ADE_WHOLE_IMAGE, file_block, ADE_ASM_FUNCTIONS);
             check(view && ade_disasm_count(view) == 0 && ade_disasm_refusal(view).len > 0,
@@ -266,6 +268,30 @@ int main(int argc, char **argv) {
         check(ade_project_set_name(image, ADE_WHOLE_IMAGE, 0, 12, none, NULL) == ADE_OK,
               "and an empty name clears it");
         rmdir(projects);
+        /* The visual features: the boot code's listing lines, its graphs,
+           the disk's damage, and a file's kind. */
+        AdeDisasm *lines = ade_disasm_bootblock(image);
+        uint64_t targets[4];
+        check(ade_disasm_line_flow(lines, 0) <= ADE_FLOW_LIBRARY &&
+                  ade_disasm_line_targets(lines, 0, targets, 4) <= 1000,
+              "a listing line has a flow and targets");
+        uint64_t somewhere = 0;
+        const AdeBytes nowhere = {(const uint8_t *)"nowhere", 7};
+        check(ade_disasm_locate(lines, nowhere, &somewhere) == ADE_NOT_FOUND,
+              "an unknown name is not found");
+        ade_disasm_free(lines);
+        AdeGraph *calls = ade_disasm_call_graph(image, ADE_WHOLE_IMAGE, 0);
+        AdeGraphNode gnode;
+        check(calls && (ade_graph_node_count(calls) == 0 ||
+                        ade_graph_node(calls, 0, &gnode) == ADE_OK),
+              "the boot code's call graph reads");
+        ade_graph_free(calls);
+        AdeDamage *damage = ade_image_damage(image, ADE_WHOLE_IMAGE);
+        const AdeBlockCounts counts = ade_damage_counts(damage);
+        check(damage && counts.used + counts.free == counts.blocks,
+              "the disk's counts add up");
+        check(ade_damage_name(ADE_DAMAGE_ORPHANED)[0] != '\0', "damage has names");
+        ade_damage_free(damage);
         AdeSegments *runs = ade_disasm_bootblock_segments(image);
         AdeSegment run;
         check(runs && (ade_segments_count(runs) == 0 ||

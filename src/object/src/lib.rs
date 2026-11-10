@@ -28,6 +28,7 @@ pub mod find;
 pub mod flow;
 pub mod font;
 pub mod ftxt;
+pub mod graph;
 pub mod hardware;
 pub mod hunk;
 pub mod icon;

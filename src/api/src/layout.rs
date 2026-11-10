@@ -123,6 +123,24 @@ pub struct Layout {
 }
 
 impl Layout {
+    /// How many files the map holds, and how many of them are in more than
+    /// one piece — their blocks not one run, as the Atari engine's map
+    /// counted fragmented files. A file's header counts as one of its blocks.
+    #[must_use]
+    pub fn files(&self) -> (usize, usize) {
+        let mut runs: std::collections::BTreeMap<u32, usize> = std::collections::BTreeMap::new();
+        for span in &self.spans {
+            if span.region == Region::File
+                && let Some(owner) = span.owner_block
+            {
+                let n = runs.entry(owner).or_default();
+                *n = n.saturating_add(1);
+            }
+        }
+        let pieces = runs.values().filter(|&&n| n > 1).count();
+        (runs.len(), pieces)
+    }
+
     /// Map an open image.
     #[must_use]
     pub fn of(image: &crate::Image) -> Self {

@@ -68,6 +68,7 @@ void MapView::setMap(const QVector<HexRegion> &spans, quint64 blocks, quint32 bl
     m_highlight = 0;
     const int count = static_cast<int>(qMin<quint64>(blocks, 4'000'000));
     m_region.fill(5, count);  // unclaimed until a span says otherwise
+    m_damage.fill(-1, count);
     m_owner.fill(0, count);
     m_paths.fill(QString(), count);
 
@@ -84,7 +85,32 @@ void MapView::setMap(const QVector<HexRegion> &spans, quint64 blocks, quint32 bl
     update();
 }
 
+void MapView::setDamage(const QVector<QPair<quint32, int>> &blocks) {
+    m_damage.fill(-1, m_region.size());
+    for (const auto &[block, kind] : blocks) {
+        if (block < static_cast<quint32>(m_damage.size())) {
+            m_damage[static_cast<int>(block)] = static_cast<qint8>(kind);
+        }
+    }
+    update();
+}
+
+QColor MapView::damageColourFor(const QPalette &palette, int kind) {
+    // Full strength, where the regions are washed, and hatched when drawn:
+    // damage must never read as a region.
+    Q_UNUSED(palette);
+    switch (kind) {
+        case ADE_DAMAGE_CROSS_LINKED: return QColor(230, 60, 170);
+        case ADE_DAMAGE_CHECKSUM:     return QColor(230, 50, 50);
+        case ADE_DAMAGE_STRUCTURE:    return QColor(210, 110, 40);
+        case ADE_DAMAGE_AT_RISK:      return QColor(245, 160, 30);
+        case ADE_DAMAGE_ORPHANED:     return QColor(150, 90, 220);
+        default:                      return QColor(50, 185, 200);  // free, holding data
+    }
+}
+
 void MapView::clear() {
+    m_damage.clear();
     m_region.clear();
     m_owner.clear();
     m_paths.clear();
@@ -147,15 +173,25 @@ void MapView::paintEvent(QPaintEvent *event) {
             // it belongs to the highlighted entry.
             int best = m_region[static_cast<int>(first)];
             bool owned = false;
+            int damage = -1;  // the worst in the cell: the lowest kind
             const quint64 last = qMin(first + g.blocksPerCell, blocks);
             for (quint64 b = first; b < last; ++b) {
                 const int at = static_cast<int>(b);
                 if (rank(m_region[at]) > rank(best)) best = m_region[at];
                 if (m_highlight != 0 && m_owner[at] == m_highlight) owned = true;
+                const int d = at < m_damage.size() ? m_damage[at] : -1;
+                if (d >= 0 && (damage < 0 || d < damage)) damage = d;
             }
 
             const QRect cell(column * g.cell, row * g.cell, g.cell - 1, g.cell - 1);
-            painter.fillRect(cell, owned ? highlight : colourFor(palette(), best));
+            if (owned) {
+                painter.fillRect(cell, highlight);
+            } else if (damage >= 0) {
+                painter.fillRect(cell, damageColourFor(palette(), damage));
+                painter.fillRect(cell, QBrush(palette().color(QPalette::Base), Qt::BDiagPattern));
+            } else {
+                painter.fillRect(cell, colourFor(palette(), best));
+            }
         }
     }
 }
@@ -192,6 +228,12 @@ QString MapView::describe(quint64 block) const {
                  .arg(block * m_blockSize)
                  .arg(region);
     if (!m_paths[at].isEmpty()) where += QStringLiteral("  ·  %1").arg(m_paths[at]);
+    if (at < m_damage.size() && m_damage[at] >= 0) {
+        const auto kind = static_cast<AdeDamageKind>(m_damage[at]);
+        where += QStringLiteral("  ·  %1: %2")
+                     .arg(QString::fromUtf8(ade_damage_name(kind)),
+                          QString::fromUtf8(ade_damage_describes(kind)));
+    }
     return where;
 }
 
