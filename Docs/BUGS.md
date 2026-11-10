@@ -14,6 +14,18 @@ _None._
 
 ## Fixed
 
+### BUG-021 The map's unclaimed blocks read as empty page in a dark theme, and its legend's outlines were never drawn
+**Severity:** low
+**Status:** fixed
+**Found:** 2026-11-10, from a screenshot of the Map tab on *Zzzep*. **Fixed** 2026-11-10.
+**Where:** [gui/src/MapView.cpp](../gui/src/MapView.cpp) `colourFor`, and the map's legend in [gui/src/MainWindow.cpp](../gui/src/MainWindow.cpp) `showMapLegend`.
+
+**What is wrong.** Two things. Unclaimed blocks were a 72% wash towards the page in both themes: contrast 1.39 against a dark page, chosen by number and, on screen, the same grey as the page beneath it (60,60,63 on 36,36,36). And each legend swatch was given an outline — `border:1px solid` on a `<span>` — with a comment saying it kept `unclaimed` visible on the window background. Qt's rich text draws no border on a span, so no outline was ever shown, and the unclaimed swatch (60,60,63) sat invisible on the window (62,62,62).
+
+**Correct behaviour.** Unclaimed space is recessive but visibly cells, in both themes, and every swatch in the legend can be seen.
+
+**The fix.** On a dark page unclaimed is a 45% wash: 2.00 against the page and 1.96 from files, midway between them. The light theme keeps 72%: its files are only 2.27 against the page, and 45% there would leave unclaimed and file 1.10 apart. The legend is a one-row table whose swatches are cells with a border, which Qt does draw, in a colour midway between the window and its text — checked by rendering it offscreen in the screenshot's palette.
+
 ### BUG-020 The export dropped relocations that its own round trip could not see
 **Severity:** medium
 **Status:** fixed

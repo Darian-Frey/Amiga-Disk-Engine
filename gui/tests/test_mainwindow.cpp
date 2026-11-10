@@ -1664,8 +1664,17 @@ double contrast(const QColor &a, const QColor &b) {
 
 void TestMainWindow::theMapColoursFilesAndKeepsEmptySpaceVisible() {
     // Two properties, both deliberate and both easy to get wrong.
-    for (const auto &[label, page] : {std::pair{"dark", QColor(36, 36, 36)},
-                                      std::pair{"light", QColor(255, 255, 255)}}) {
+    // Empty space's floor against the page differs by theme: on a dark page
+    // 1.39 still looked like the page itself on screen (BUG-021).
+    struct Theme {
+        const char *label;
+        QColor page;
+        double emptyFloor;
+    };
+    for (const Theme &theme : {Theme{"dark", QColor(36, 36, 36), 1.8},
+                               Theme{"light", QColor(255, 255, 255), 1.3}}) {
+        const char *label = theme.label;
+        const QColor page = theme.page;
         QPalette palette;
         palette.setColor(QPalette::Base, page);
 
@@ -1682,7 +1691,7 @@ void TestMainWindow::theMapColoursFilesAndKeepsEmptySpaceVisible() {
         // sat at 1.16 against the page, which made "empty" and "off the end of
         // the disk" the same picture.
         const QColor empty = MapView::colourFor(palette, ADE_REGION_UNCLAIMED);
-        QVERIFY2(contrast(empty, page) > 1.3,
+        QVERIFY2(contrast(empty, page) > theme.emptyFloor,
                  qPrintable(QStringLiteral("%1: unclaimed is invisible at %2")
                                 .arg(label)
                                 .arg(contrast(empty, page))));

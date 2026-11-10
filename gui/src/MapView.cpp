@@ -51,12 +51,15 @@ QColor MapView::colourFor(const QPalette &palette, int region) {
         // File and unclaimed carry most of the map between them, so their
         // percentages were solved rather than chosen. At the first values
         // unclaimed sat at 1.16 contrast against the page — invisible, which
-        // made "empty" and "off the end of the disk" the same picture. These
-        // hold up in both themes: on dark, file 3.93 and unclaimed 1.39
-        // against the page with 2.82 between them; on light, 2.27 and 1.41
-        // with 1.61 between.
+        // made "empty" and "off the end of the disk" the same picture.
+        // File is 3.93 against a dark page and 2.27 against a light one.
+        // On light, unclaimed at 72% is 1.41 against the page and 1.61 from
+        // file. On dark, 72% gave 1.39, which on screen still read as the
+        // page itself; 45% puts it midway, 2.00 against the page and 1.96
+        // from file. A light page has no such room — 45% there would leave
+        // unclaimed and file 1.10 apart — so each theme keeps its own.
         case 4:  return wash(150, 150, 165, 20);  // file — the bulk
-        default: return wash(120, 120, 130, 72);  // unclaimed — recessive, not absent
+        default: return wash(120, 120, 130, base.lightness() < 128 ? 45 : 72);  // unclaimed
     }
 }
 

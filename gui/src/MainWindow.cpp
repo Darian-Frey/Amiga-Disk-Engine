@@ -1723,7 +1723,18 @@ void MainWindow::showMapLegend(const QVector<HexRegion> &regions) {
     }
     std::sort(present.begin(), present.end());
 
-    QStringList parts;
+    // Each swatch outlined, because the legend sits on the window background
+    // while the swatches are mixed against the map's page, and `unclaimed`
+    // is kept close to that page. The outline is a table cell's border: Qt's
+    // rich text draws none on a span, which is how the first outline was
+    // written and why it never showed.
+    const QPalette legend = m_mapLegend->palette();
+    const QColor text = legend.color(QPalette::WindowText);
+    const QColor window = legend.color(QPalette::Window);
+    const QColor frame = QColor::fromRgbF((text.redF() + window.redF()) / 2,
+                                          (text.greenF() + window.greenF()) / 2,
+                                          (text.blueF() + window.blueF()) / 2);
+    QString row;
     QStringList tips;
     for (int region : present) {
         const QString name =
@@ -1731,18 +1742,16 @@ void MainWindow::showMapLegend(const QVector<HexRegion> &regions) {
         const QString describes =
             QString::fromUtf8(ade_region_describes(static_cast<AdeRegion>(region)))
                 .toHtmlEscaped();
-        // Outlined, because the legend sits on the window background while
-        // the swatches are mixed against the map's page — and `unclaimed` is
-        // deliberately close to that page, so unoutlined it vanished here
-        // while being perfectly visible three inches above.
-        parts << QStringLiteral(
-                     "<span style='background:%1; border:1px solid %2'>"
-                     "&nbsp;&nbsp;&nbsp;</span>&nbsp;%3")
-                     .arg(MapView::colourFor(m_map->palette(), region).name(),
-                          m_mapLegend->palette().color(QPalette::Mid).name(), name);
+        row += QStringLiteral(
+                   "<td><table border=1 cellspacing=0 cellpadding=0 "
+                   "style='border-color:%1; border-style:solid'><tr>"
+                   "<td bgcolor='%2' width=12 height=12></td></tr></table></td>"
+                   "<td>&nbsp;%3&nbsp;&nbsp;&nbsp;&nbsp;</td>")
+                   .arg(frame.name(), MapView::colourFor(m_map->palette(), region).name(), name);
         tips << QStringLiteral("<b>%1</b> — %2").arg(name, describes);
     }
-    m_mapLegend->setText(parts.join(QStringLiteral("&nbsp;&nbsp;&nbsp;&nbsp;")));
+    m_mapLegend->setText(
+        QStringLiteral("<table cellspacing=0 cellpadding=0><tr>%1</tr></table>").arg(row));
     m_mapLegend->setToolTip(tips.join(QStringLiteral("<br>")));
     m_mapLegend->show();
 }
