@@ -306,6 +306,31 @@ fn every_written_dostype_reads_back_as_itself() {
 }
 
 #[test]
+fn a_blank_disk_is_not_bootable_its_bootblock_is_the_dostype_alone() {
+    // BUG-023. A valid boot checksum is what makes Kickstart run a disk's
+    // boot code, and over zeros that resets the machine forever. Workbench
+    // 3.1's `Format`, run in FS-UAE, writes the dostype and nothing else —
+    // no checksum, no rootblock pointer — so every geometry and type here
+    // must match it byte for byte.
+    for geometry in [Geometry::DD_FLOPPY, Geometry::HD_FLOPPY] {
+        for (name, flags) in TYPES {
+            let image = format::blank(geometry, dostype(flags), "Boot", WHEN).unwrap();
+            let mut expected = vec![0u8; 1024];
+            expected[..4].copy_from_slice(&[b'D', b'O', b'S', flags]);
+            assert_eq!(
+                image[..1024],
+                expected[..],
+                "{name}: blocks 0–1 are `DOS` and zeros"
+            );
+            assert!(
+                !ade_core::layers::block::checksum::boot_valid(&image[..1024]),
+                "{name}: a blank disk must not checksum as bootable"
+            );
+        }
+    }
+}
+
+#[test]
 fn a_blank_dircache_volume_needs_no_cache_block() {
     // SPEC records the rootblock's `extension` as "first dircache block, else
     // 0", and a fresh volume has no entries to cache. Left unchecked this

@@ -14,6 +14,22 @@ _None._
 
 ## Fixed
 
+### BUG-023 Every disk ADE formats carries a valid boot checksum over zeroed code, so an Amiga that boots with it in the drive runs the zeros and resets forever
+**Severity:** high
+**Status:** fixed
+**Found:** 2026-11-11, proving that FS-UAE can be driven from a script: a blank disk from `ade create` in DF0 sent Kickstart 3.1 into a reset loop, the log reading `Illegal instruction: 49fe` straight after boot and then `Reset at 00F80DC8`, 82 times in 90 seconds. The same machine with no disk in the drive booted once and ran its script. **Fixed** 2026-11-11.
+**Where:** [src/filesystem/src/format.rs](../src/filesystem/src/format.rs), `write_bootblock`, which serves `ade create`, `ade format`, `ade_edit_format` and the window's new-disk and format commands. `c-ofs`, `c-ffs` and `c-hd` from `create`, and `format` in place, all write `DOS\x`, a valid checksum and a rootblock pointer.
+
+**What is wrong.** A valid bootblock checksum is what *makes* a disk bootable: Kickstart checks the dostype and the checksum, and then jumps to offset 12. Over zeros, that is `ori.b #0,d0` repeated until the code runs into something illegal, and the machine resets and boots the same disk again. The comment above the checksum says the disk "is not bootable and does not pretend to be (AV-002)" — the checksum is exactly the pretence. ROADMAP repeats the claim, saying `ade create` leaves boot code zeroed "exactly as AmigaDOS's own `format` does without `install`". It does not.
+
+**What AmigaDOS writes.** Measured the same day, by having Workbench 3.1's own `Format DRIVE DF0: NAME Real FFS NOICONS` initialise a zeroed image in FS-UAE: `444f5301` and then zeros — **checksum 0 and rootblock pointer 0**. Not bootable, so Kickstart moves on to the next device.
+
+**Correct behaviour.** Write the dostype and leave the rest of both boot blocks zero, as `Format` does. Whether to keep the rootblock pointer is a separate question (C-007 says readers must not trust it, and `Format` does not write it); it does not make the disk bootable either way. `ade repair` does not reseal boot checksums (F-034), so it neither causes nor fixes this. Disks already written by ADE stay bootable-and-broken until formatted again.
+
+**How it was missed.** Every test of `create` reads its output with ADE or ADFlib, and neither boots anything; AV-002 rightly keeps ADE from executing code, so nothing in the suite could see what a disk does when it boots. Only a machine that runs the bootblock finds this.
+
+**The fix.** `write_bootblock` writes the dostype and nothing else: no checksum, and no rootblock pointer, since `Format` writes none and C-007 already says readers must not trust it. Formatting in place goes through the same function and overwrites both boot blocks, so it is covered too. `a_blank_disk_is_not_bootable_its_bootblock_is_the_dostype_alone` requires blocks 0–1 to be `DOS\x` and zeros for all six types at DD and HD, and that the checksum does not validate; putting the old sealing back fails it. In FS-UAE, a disk from the fixed `ade create` in DF0 at the default boot priority now starts the machine once, with no illegal instruction, and Kickstart passes over it to the next device, which then reads its file.
+
 ### BUG-022 The map was empty until the disk's own row had been selected, and could show another disk's
 **Severity:** low
 **Status:** fixed

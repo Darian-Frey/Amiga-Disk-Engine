@@ -31,8 +31,15 @@
 //!
 //! It is not bootable. AmigaDOS's own `format` leaves the boot code zeroed
 //! unless `install` is run afterwards, and ADE will not write boot code it
-//! would then refuse to execute or interpret (AV-002). The dostype and the
-//! checksum are written; the 1,012 bytes after them are zeros.
+//! would then refuse to execute or interpret (AV-002). Only the dostype is
+//! written; the 1,020 bytes after it are zeros.
+//!
+//! **No checksum, because a checksum is what makes a disk bootable** (BUG-023).
+//! Kickstart boots any disk whose dostype and boot checksum agree, and jumps
+//! to offset 12; over zeros, that runs until it meets an illegal instruction
+//! and resets, then boots the same disk again. Workbench 3.1's `Format`,
+//! run in FS-UAE, writes `DOS\1` and nothing else — checksum 0, rootblock
+//! pointer 0 — and so does this.
 
 use ade_block::{Geometry, checksum};
 use ade_endian::put_u32;
@@ -191,7 +198,7 @@ pub fn blank_named(
     let blocks: Vec<u64> = (0..pages).map(|i| bitmap.saturating_add(i)).collect();
 
     let mut image = vec![0u8; usize::try_from(geometry.total_bytes()).unwrap_or(0)];
-    write_bootblock(&mut image, dostype, root);
+    write_bootblock(&mut image, dostype);
     write_rootblock(&mut image, geometry, name, created, root, &blocks);
     write_bitmap(&mut image, geometry, root, &blocks);
     let _ = block_size;
@@ -228,20 +235,12 @@ fn check_name(name: &[u8]) -> Result<(), FormatError> {
     Ok(())
 }
 
-/// Blocks 0–1: the dostype and its checksum, and nothing else.
-fn write_bootblock(image: &mut [u8], dostype: Dostype, root: u64) {
-    let raw = dostype.raw();
-    let _ = put_u32(image, 0, raw);
-    // The stored rootblock pointer. C-007: readers must not trust it — ADE
-    // computes the location instead — but a disk that omits it is unusual, and
-    // writing the truth costs nothing.
-    let _ = put_u32(image, 8, u32::try_from(root).unwrap_or(880));
-    // The checksum covers both boot blocks. Written last, over the zeros that
-    // stand in for boot code: this disk is not bootable and does not pretend
-    // to be (AV-002).
-    if let Some(sum) = image.get(..1024).and_then(checksum::boot) {
-        let _ = put_u32(image, 4, sum);
-    }
+/// Blocks 0–1: the dostype, and nothing else — as AmigaDOS's `Format` writes
+/// them. Not the checksum, which would make the disk bootable (BUG-023), and
+/// not the rootblock pointer, which `Format` leaves zero and readers must not
+/// trust anyway (C-007).
+fn write_bootblock(image: &mut [u8], dostype: Dostype) {
+    let _ = put_u32(image, 0, dostype.raw());
 }
 
 /// The rootblock, per SPEC §Rootblock.
