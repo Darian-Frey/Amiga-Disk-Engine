@@ -1440,7 +1440,10 @@ fn free_holding_data(
         }
         let Some(raw) = read(b) else { continue };
         let word = raw.get(..4).unwrap_or_default();
-        if raw.chunks(4).all(|w| w == word) {
+        // One long repeated — zeros, or a filler — is not data, and neither
+        // is what a full `Format` writes into every block (BUG-024): a
+        // freshly formatted disk is blank, not a game behind an empty root.
+        if raw.chunks(4).all(|w| w == word) || ade_filesystem::format::is_format_fill(&raw) {
             continue;
         }
         holding.push(b);

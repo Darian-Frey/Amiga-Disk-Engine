@@ -236,6 +236,41 @@ fn check_name(name: &[u8]) -> Result<(), FormatError> {
     Ok(())
 }
 
+/// Whether a block holds exactly the fill a full AmigaDOS `Format` writes into
+/// every block before laying the filesystem over it (BUG-024).
+///
+/// Such a block has never been written since the disk was formatted, so it
+/// is empty in the sense that matters — nothing a loader or a person put
+/// there — although it is not zeros. Read off Workbench 3.1's `Format` in
+/// FS-UAE (D-023) and agreeing with every corpus disk that carries it (SPEC
+/// §What a full format leaves): 64 pairs of equal longs, each `D`, `O` with
+/// 0, `0x10`, `0x20` or `0x30` added, `S` with 0, 4 or 8 added, and a counter
+/// that starts at 1 or 129 and rises by two from one pair to the next. Every
+/// byte is constrained, so a block of real data does not match by accident.
+#[must_use]
+pub fn is_format_fill(block: &[u8]) -> bool {
+    // Measured on 512-byte blocks only; a larger block's fill is unknown.
+    if block.len() != 512 {
+        return false;
+    }
+    let Some(&[d, o, s, start]) = block.first_chunk::<4>() else {
+        return false;
+    };
+    if d != b'D'
+        || o & 0xCF != b'O'
+        || !matches!(s, 0x53 | 0x57 | 0x5B)
+        || !matches!(start, 1 | 129)
+    {
+        return false;
+    }
+    let mut counter = start;
+    block.chunks_exact(8).all(|pair| {
+        let ok = pair == [d, o, s, counter, d, o, s, counter];
+        counter = counter.wrapping_add(2);
+        ok
+    })
+}
+
 /// Blocks 0–1: the dostype, and nothing else — as AmigaDOS's `Format` writes
 /// them. Not the checksum, which would make the disk bootable (BUG-023), and
 /// not the rootblock pointer, which `Format` leaves zero and readers must not
@@ -354,5 +389,71 @@ fn write_bitmap(image: &mut [u8], geometry: Geometry, root: u64, bitmap: &[u64])
         if let Some(sum) = checksum::normal_at(block, 0x00) {
             let _ = put_u32(block, 0x00, sum);
         }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::indexing_slicing, reason = "tests build their own buffers")]
+mod tests {
+    use super::is_format_fill;
+
+    /// The fill as `Format` writes it, from its parts.
+    fn fill(prefix: [u8; 3], start: u8) -> Vec<u8> {
+        let mut block = Vec::with_capacity(512);
+        let mut counter = start;
+        for _ in 0..64 {
+            for _ in 0..2 {
+                block.extend_from_slice(&prefix);
+                block.push(counter);
+            }
+            counter = counter.wrapping_add(2);
+        }
+        block
+    }
+
+    #[test]
+    fn every_prefix_a_format_writes_is_fill() {
+        // The twelve prefixes Workbench 3.1's `Format` wrote across one DD
+        // disk in FS-UAE, at both starting counts.
+        for o in [0x4F, 0x5F, 0x6F, 0x7F] {
+            for s in [0x53, 0x57, 0x5B] {
+                for start in [1, 129] {
+                    assert!(
+                        is_format_fill(&fill([b'D', o, s,], start)),
+                        "{o:x} {s:x} {start}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_block_that_only_resembles_the_fill_is_not_fill() {
+        let good = fill(*b"DOS", 1);
+        assert!(is_format_fill(&good));
+
+        // One counter wrong, one long unpaired, one prefix byte changed.
+        let mut off = good.clone();
+        off[300] ^= 2;
+        assert!(!is_format_fill(&off), "a counter out of step");
+        let mut unpaired = good.clone();
+        unpaired[4..8].copy_from_slice(b"DOS\x03");
+        assert!(!is_format_fill(&unpaired), "a long without its twin");
+        let mut prefix = good.clone();
+        prefix[100] = b'X';
+        assert!(!is_format_fill(&prefix), "a prefix that changes mid-block");
+
+        // Prefixes and starts the format never writes.
+        assert!(!is_format_fill(&fill(*b"DOT", 1)));
+        assert!(!is_format_fill(&fill(*b"DAS", 1)));
+        assert!(!is_format_fill(&fill(*b"DOS", 3)));
+        assert!(!is_format_fill(&fill([b'D', 0x8F, b'S'], 1)));
+
+        // Neither zeros, nor a block of the wrong size.
+        assert!(!is_format_fill(&[0u8; 512]));
+        assert!(!is_format_fill(&good[..256]));
+        let mut longer = good;
+        longer.extend_from_slice(&fill(*b"DOS", 129));
+        assert!(!is_format_fill(&longer));
     }
 }

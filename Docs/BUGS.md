@@ -10,10 +10,14 @@ Severity vocabulary: low | medium | high.
 
 ## Open
 
+_None._
+
+## Fixed
+
 ### BUG-024 A blank disk formatted by AmigaDOS reads as a game behind an empty volume, and writes to it are held back
 **Severity:** medium
-**Status:** open
-**Found:** 2026-11-11, by the first AmigaDOS oracle tests (D-023): `a_disk_amigados_has_only_formatted_reads_as_blank` has Workbench 3.1's `Format` initialise a zeroed image and nothing else, and `ade check` then says *free-blocks-hold-data: the volume holds no files, but 1756 blocks the bitmap marks free hold data … usually a game its own loader reads, and writing to the volume would overwrite it*.
+**Status:** fixed
+**Found:** 2026-11-11, by the first AmigaDOS oracle tests (D-023): `a_disk_amigados_has_only_formatted_reads_as_blank` has Workbench 3.1's `Format` initialise a zeroed image and nothing else, and `ade check` then says *free-blocks-hold-data: the volume holds no files, but 1756 blocks the bitmap marks free hold data … usually a game its own loader reads, and writing to the volume would overwrite it*. **Fixed** 2026-11-11.
 **Where:** the free-data finding in the health report (IMP-019), and through it F-035's disk kind and F-031's edit guard.
 
 **What is wrong.** A full format does not leave free blocks empty. It writes a fill into every block on the disk — each long `DO` or `Do`, a byte, and a counter, each long twice, the counter rising by two — and then the rootblock and bitmap over it. ADE reads that fill as data a loader might need, so the one disk a person most obviously means to write to is called a game, and adding a file or a folder waits for `--overwrite-free-data`. A quick format, or a disk made by ADE, is zeros and is not affected. Neither is a disk with files on it, since the finding only speaks about empty volumes.
@@ -22,10 +26,7 @@ Severity vocabulary: low | medium | high.
 
 **Correct behaviour.** Blocks holding exactly the format fill have never been written since formatting, and count as empty, as zeros do. The fill is self-describing, so it can be recognised rather than guessed at — but its rule should be read off real formats first (the third byte varies by track: `S`, `W`, `[` in the samples so far), and tested against blocks that only resemble it.
 
-**Not yet fixed.** The test is marked ignored with this entry's number until it is.
-
-
-## Fixed
+**The fix.** `ade_filesystem::format::is_format_fill` recognises the fill by its exact rule — 64 pairs of equal longs, `D`, `O` plus 0–`0x30`, `S` plus 0, 4 or 8, and a counter from 1 or 129 rising by two — read off the whole formatted disk, where every block but the rootblock and bitmap matched it with twelve prefixes, and agreeing with all 71 corpus disks carrying it (SPEC §What a full format leaves). The free-data check skips a block of fill as it skips zeros. Unit tests take every prefix and start, and refuse blocks that only resemble it — a counter out of step, a long without its twin, a prefix changing mid-block, prefixes and starts the format never writes. `a_disk_amigados_has_only_formatted_reads_as_blank` runs unignored and passes: the disk is *blank*, with no warning. **Nothing else moved:** over the whole corpus no image's findings change, and none of the 87 volumes the check warns about counts a block fewer.
 
 ### BUG-023 Every disk ADE formats carries a valid boot checksum over zeroed code, so an Amiga that boots with it in the drive runs the zeros and resets forever
 **Severity:** high

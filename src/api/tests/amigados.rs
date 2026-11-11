@@ -372,7 +372,6 @@ fn ade_reads_what_amigados_formats_and_writes() {
 }
 
 #[test]
-#[ignore = "BUG-024: a full format's fill reads as data"]
 fn a_disk_amigados_has_only_formatted_reads_as_blank() {
     // A full `Format` writes a fill — `DOS` and a counter — into every block
     // on the disk, then the rootblock and bitmap over it. Nothing has been
