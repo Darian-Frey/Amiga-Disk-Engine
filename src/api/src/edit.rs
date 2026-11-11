@@ -515,8 +515,9 @@ impl Session {
         let blank = ade_filesystem::format::blank_named(self.geometry, dostype, &name, self.now())
             .map_err(|e| EditError::NotEditable(e.to_string()))?;
         // The blocks a quick format writes: the reserved ones, the rootblock,
-        // and the bitmap. Read off the blank volume rather than computed, so
-        // they cannot disagree with what `blank_named` laid out.
+        // the bitmap, and on a dircache volume the root's empty cache
+        // (BUG-025). Read off the blank volume rather than computed, so they
+        // cannot disagree with what `blank_named` laid out.
         let mut blocks: Vec<u32> = (0..self.geometry.reserved()).collect();
         {
             let fresh = crate::Image::from_bytes(blank.clone())
@@ -524,6 +525,9 @@ impl Session {
             let fresh = fresh.volume().map_err(EditError::Lookup)?;
             blocks.push(fresh.root());
             blocks.extend(fresh.rootblock().bitmap_pages.iter().filter(|&&b| b != 0));
+            if fresh.rootblock().dircache != 0 {
+                blocks.push(fresh.rootblock().dircache);
+            }
         }
         let bsize = self.geometry.block_size() as usize;
         let mut next = self.bytes.clone();

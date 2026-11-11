@@ -190,9 +190,15 @@ pub fn blank_named(
         return Err(FormatError::TooLarge { blocks: total });
     }
 
-    // The bitmap goes immediately after the rootblock, which is where every
-    // real disk puts it and where a reader looking for it will find it first.
-    let bitmap = root.saturating_add(1);
+    // On a dircache volume the root has a cache chain from the start, empty
+    // but present, at the block after it — where AmigaDOS's `Format
+    // DIRCACHE` puts it, and AmigaDOS's filesystem crashes writing into a
+    // directory that has none (BUG-025). The bitmap follows, which is where
+    // every real disk puts it and where a reader looking will find it first.
+    let cache = dostype.has_dircache().then(|| root.saturating_add(1));
+    let bitmap = root
+        .saturating_add(1)
+        .saturating_add(u64::from(cache.is_some()));
     if total <= bitmap.saturating_add(pages) {
         return Err(FormatError::TooSmall { blocks: total });
     }
@@ -200,8 +206,11 @@ pub fn blank_named(
 
     let mut image = vec![0u8; usize::try_from(geometry.total_bytes()).unwrap_or(0)];
     write_bootblock(&mut image, dostype);
-    write_rootblock(&mut image, geometry, name, created, root, &blocks);
-    write_bitmap(&mut image, geometry, root, &blocks);
+    write_rootblock(&mut image, geometry, name, created, root, &blocks, cache);
+    if let Some(cache) = cache {
+        write_empty_cache(&mut image, geometry, cache, root);
+    }
+    write_bitmap(&mut image, geometry, root, &blocks, cache);
     let _ = block_size;
     Ok(image)
 }
@@ -287,6 +296,7 @@ fn write_rootblock(
     created: Stamp,
     root: u64,
     bitmap: &[u64],
+    cache: Option<u64>,
 ) {
     let bsize = geometry.block_size() as usize;
     let at = usize::try_from(root).unwrap_or(0).saturating_mul(bsize);
@@ -335,9 +345,34 @@ fn write_rootblock(
         }
     }
 
+    // `extension`: the root's cache chain, on a dircache volume.
+    if let Some(cache) = cache {
+        let _ = put_u32(
+            block,
+            end.saturating_sub(8),
+            u32::try_from(cache).unwrap_or(0),
+        );
+    }
     let _ = put_u32(block, end.saturating_sub(4), 1); // ST_ROOT
     if let Some(sum) = checksum::normal_at(block, 0x14) {
         let _ = put_u32(block, 0x14, sum);
+    }
+}
+
+/// An empty dircache block for the directory at `owner`, as `Format
+/// DIRCACHE` writes the root's: type 33, its own number, its parent, no
+/// records, no next block, sealed (SPEC §Directory cache blocks).
+fn write_empty_cache(image: &mut [u8], geometry: Geometry, block: u64, owner: u64) {
+    let bsize = geometry.block_size() as usize;
+    let at = usize::try_from(block).unwrap_or(0).saturating_mul(bsize);
+    let Some(raw) = image.get_mut(at..at.saturating_add(bsize)) else {
+        return;
+    };
+    let _ = put_u32(raw, 0x00, crate::dircache::T_DIRCACHE);
+    let _ = put_u32(raw, 0x04, u32::try_from(block).unwrap_or(0));
+    let _ = put_u32(raw, 0x08, u32::try_from(owner).unwrap_or(0));
+    if let Some(sum) = checksum::normal_at(raw, 0x14) {
+        let _ = put_u32(raw, 0x14, sum);
     }
 }
 
@@ -347,7 +382,13 @@ fn write_rootblock(
 /// convention and the single easiest thing to get backwards here: inverted, a
 /// fresh disk would report itself completely full and every write to it would
 /// fail for want of space.
-fn write_bitmap(image: &mut [u8], geometry: Geometry, root: u64, bitmap: &[u64]) {
+fn write_bitmap(
+    image: &mut [u8],
+    geometry: Geometry,
+    root: u64,
+    bitmap: &[u64],
+    cache: Option<u64>,
+) {
     let bsize = geometry.block_size() as usize;
     let reserved = u64::from(geometry.reserved());
     let mapped = geometry.total_blocks().saturating_sub(reserved);
@@ -373,7 +414,7 @@ fn write_bitmap(image: &mut [u8], geometry: Geometry, root: u64, bitmap: &[u64])
             let block_index = index.saturating_add(reserved);
             // Everything is free except the blocks this filesystem occupies:
             // the rootblock, and every one of its bitmap blocks.
-            if block_index == root || bitmap.contains(&block_index) {
+            if block_index == root || bitmap.contains(&block_index) || cache == Some(block_index) {
                 continue;
             }
             let long = usize::try_from(bit / 32).unwrap_or(0);

@@ -43,7 +43,12 @@ const WHEN: Stamp = Stamp {
     ticks: 0,
 };
 const ROOT: usize = 880 * 512;
-const BITMAP: usize = 881 * 512;
+
+/// Where the first bitmap block is, from the rootblock's `bm_pages[0]`: 881,
+/// or 882 on a dircache disk, whose root's empty cache comes first (BUG-025).
+fn bitmap(bytes: &[u8]) -> usize {
+    u32_at(bytes, ROOT + 512 - 196).unwrap() as usize * 512
+}
 
 /// A disk holding a directory and two files, made by ADE's writer.
 fn disk(flags: u8) -> Vec<u8> {
@@ -71,15 +76,16 @@ fn reseal_root(bytes: &mut [u8]) {
 }
 
 fn reseal_bitmap(bytes: &mut [u8]) {
-    put_u32(bytes, BITMAP, 0).unwrap();
-    let sum = normal_at(&bytes[BITMAP..BITMAP + 512], 0).unwrap();
-    put_u32(bytes, BITMAP, sum).unwrap();
+    let at = bitmap(bytes);
+    put_u32(bytes, at, 0).unwrap();
+    let sum = normal_at(&bytes[at..at + 512], 0).unwrap();
+    put_u32(bytes, at, sum).unwrap();
 }
 
 /// Flip the bitmap bit for `block`; set means free.
 fn flip(bytes: &mut [u8], block: u32) {
     let index = (block - 2) as usize;
-    let at = BITMAP + 4 + (index / 32) * 4;
+    let at = bitmap(bytes) + 4 + (index / 32) * 4;
     let word = u32_at(bytes, at).unwrap() ^ (1 << (index % 32));
     put_u32(bytes, at, word).unwrap();
 }
@@ -158,7 +164,7 @@ fn a_live_block_marked_free_in_a_bitmap_that_fails_its_checksum_comes_back() {
         let done = s.repair(false).unwrap();
         let b = done.bitmap.as_ref().unwrap();
         assert_eq!(b.now_used, vec![block]);
-        assert_eq!(b.rewritten, vec![881]);
+        assert_eq!(b.rewritten, vec![(bitmap(&original) / 512) as u32]);
         assert!(!b.flag_set);
         assert!(
             s.bytes() == original.as_slice(),
@@ -205,7 +211,8 @@ fn an_orphan_stays_used_unless_asked_and_then_is_freed() {
 fn a_bitmap_block_that_only_fails_its_checksum_is_resealed() {
     let original = disk(0);
     let mut bytes = original.clone();
-    bytes[BITMAP + 1] ^= 0x40;
+    let at = bitmap(&bytes);
+    bytes[at + 1] ^= 0x40;
     assert_eq!(codes(&bytes), vec!["bitmap-checksum"]);
     let mut s = session(bytes);
     let done = s.repair(false).unwrap();

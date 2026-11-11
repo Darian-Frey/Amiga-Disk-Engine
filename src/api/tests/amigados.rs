@@ -397,3 +397,127 @@ fn a_disk_amigados_has_only_formatted_reads_as_blank() {
         .collect();
     assert!(faults.is_empty(), "{faults:?}");
 }
+
+#[test]
+fn amigados_writes_into_every_directory_ade_makes_on_a_dircache_disk() {
+    // BUG-025. AmigaDOS's filesystem crashed writing into a directory with
+    // no cache chain — the root of a blank `DOS\5` disk, and a directory
+    // `ade mkdir` made. Every directory ADE makes now has one, and one
+    // emptied by deleting keeps an empty block rather than none.
+    let Some(setup) = setup() else { return };
+    let blank = format::blank(Geometry::DD_FLOPPY, dostype(5), "Cached", WHEN).unwrap();
+    let mut s = Session::from_bytes(blank).unwrap();
+    s.set_clock(Some(WHEN));
+    let root = s.root();
+    s.make_dir(root, b"Made").unwrap();
+    let emptied = s.make_dir(root, b"Emptied").unwrap();
+    let file = s.add_file(emptied, b"gone", b"soon deleted").unwrap();
+    s.delete(file).unwrap();
+    let disk = floppy(&scratch("cached"), "cached.adf", s.bytes());
+
+    let data = pattern(5_000, 3);
+    let commands = "C:Copy SYS:in/data.bin Cached:top.bin\n\
+                    C:Copy SYS:in/data.bin Cached:Made/inner.bin\n\
+                    C:Copy SYS:in/data.bin Cached:Emptied/again.bin\n\
+                    C:MakeDir Cached:Made/Deeper\n\
+                    C:Copy SYS:in/data.bin Cached:Made/Deeper/deep.bin\n";
+    let outcome = run(
+        &setup,
+        "cached",
+        &[&disk],
+        &[("data.bin", &data)],
+        commands,
+        Duration::from_secs(60),
+    );
+    outcome.unwrap();
+
+    let bytes = fs::read(&disk).unwrap();
+    let health = ade_core::health::examine(bytes.clone());
+    let faults: Vec<String> = health
+        .findings
+        .iter()
+        .filter(|f| f.severity >= ade_core::Severity::Warning)
+        .map(|f| format!("{}: {}", f.code, f.message))
+        .collect();
+    assert!(faults.is_empty(), "{faults:?}");
+    let image = Image::from_bytes(bytes).unwrap();
+    let volume = image.volume().unwrap();
+    for path in [
+        "top.bin",
+        "Made/inner.bin",
+        "Emptied/again.bin",
+        "Made/Deeper/deep.bin",
+    ] {
+        let entry = volume
+            .lookup(path)
+            .unwrap_or_else(|e| panic!("{path}: AmigaDOS did not write it: {e}"));
+        assert!(volume.read_file(&entry).unwrap().bytes == data, "{path}");
+    }
+}
+
+#[test]
+fn a_blank_dircache_disk_is_laid_out_as_format_lays_it_out() {
+    // `Format … FFS DIRCACHE QUICK` on a zeroed image writes block 0, the
+    // rootblock at 880, the root's empty cache at 881 and the bitmap at 882,
+    // and nothing else. ADE's blank `DOS\5` must use the same blocks, with
+    // the cache and bitmap identical; the rootblock differs only in its
+    // datestamps, so those are compared field by field instead.
+    let Some(setup) = setup() else { return };
+    let disk = floppy(&scratch("dcformat"), "zeros.adf", &vec![0u8; 901_120]);
+    run(
+        &setup,
+        "dcformat",
+        &[&disk],
+        &[],
+        "SYS:System/Format DRIVE DF0: NAME Same FFS DIRCACHE NOICONS QUICK <S:cr >NIL:\n",
+        Duration::from_secs(60),
+    )
+    .unwrap();
+    let theirs = fs::read(&disk).unwrap();
+    let ours = format::blank(Geometry::DD_FLOPPY, dostype(5), "Same", WHEN).unwrap();
+
+    let used = |image: &[u8]| -> Vec<usize> {
+        (0..1760)
+            .filter(|b| image[b * 512..(b + 1) * 512].iter().any(|&x| x != 0))
+            .collect()
+    };
+    assert_eq!(used(&theirs), used(&ours), "the blocks a blank disk uses");
+    for block in [0usize, 881] {
+        assert_eq!(
+            theirs[block * 512..(block + 1) * 512],
+            ours[block * 512..(block + 1) * 512],
+            "block {block}"
+        );
+    }
+    // The bitmap by its map bits for blocks 2–1759, set meaning free. Not
+    // byte for byte: AmigaDOS sets the bits past the volume's end, which
+    // ADE's formatter clears (SPEC §Repairing a volume), and leaves whatever
+    // was in memory in the block's unused tail — code and colour tables, on
+    // the run that measured it.
+    let free = |image: &[u8], block: usize| {
+        let index = block - 2;
+        let at = 882 * 512 + 4 + (index / 32) * 4;
+        let word = u32::from(image[at]) << 24
+            | u32::from(image[at + 1]) << 16
+            | u32::from(image[at + 2]) << 8
+            | u32::from(image[at + 3]);
+        word & (1 << (index % 32)) != 0
+    };
+    for block in 2..1760 {
+        assert_eq!(
+            free(&theirs, block),
+            free(&ours, block),
+            "bitmap bit for block {block}"
+        );
+    }
+    // The rootblock, but for its checksum and its three datestamps.
+    let mut a = theirs[880 * 512..881 * 512].to_vec();
+    let mut b = ours[880 * 512..881 * 512].to_vec();
+    for raw in [&mut a, &mut b] {
+        raw[20..24].fill(0);
+        for back in [92usize, 40, 28] {
+            raw[512 - back..512 - back + 12].fill(0);
+        }
+    }
+    assert_eq!(a, b, "the rootblock, datestamps aside");
+}

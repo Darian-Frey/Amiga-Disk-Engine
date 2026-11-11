@@ -14,6 +14,29 @@ _None._
 
 ## Fixed
 
+### BUG-025 On a dircache disk ADE leaves directories without a cache block, and AmigaDOS's filesystem crashes writing into them
+**Severity:** high
+**Status:** fixed
+**Found:** 2026-11-11, measuring what AmigaDOS's `Delete` leaves for F-012 in FS-UAE (D-023). Copying a file onto a blank `ade create --type=ffs-dc` disk stopped the machine with *DF1 — Program failed (error #80000006)*, an address error inside the disk's filesystem; the same copy onto `--type=ffs` succeeded. **Fixed** 2026-11-11.
+**Where:** [src/filesystem/src/format.rs](../src/filesystem/src/format.rs), which writes a `DOS\4`/`DOS\5` root with no cache; and [src/filesystem/src/edit.rs](../src/filesystem/src/edit.rs), whose `make_dir` gives a new directory none and whose cache rewrite frees a directory's cache when its last record goes ("No records means no cache at all, as a new directory has").
+
+**What is wrong.** On a dircache volume AmigaDOS gives **every** directory a cache chain, empty or not, and its filesystem relies on it being there. Measured in FS-UAE under Kickstart 3.1:
+
+| | Root's `extension` (cache) | Bitmap |
+|---|---|---|
+| `Format … FFS DIRCACHE` | 881, a cache block | 882 |
+| `ade create --type=ffs-dc` | 0 | 881 |
+
+and `MakeDir` on a `Format`ted dircache disk made a directory at 883 whose `extension` is 884, a block of type 33 (`T_DIRCACHE`); `ade mkdir` makes one whose `extension` is 0. Writing into a directory with no cache crashed the filesystem both times it was tried — the blank root, and a directory `ade mkdir` made on a disk AmigaDOS had formatted (where `ade mkdir` *did* give the root a cache, because it had a record to put in it). Reading such disks works; it is writing into them that fails, so the disks look sound until somebody uses them on an Amiga.
+
+**How it was missed.** `a_blank_dircache_volume_needs_no_cache_block` and the project notes rest on ADFlib mounting a blank `DOS\5` with a zero pointer, and on `unadf -c` listing ADE's caches. ADFlib is a reader and is lenient here; nothing checked what AmigaDOS's own filesystem expects of a directory it will write into.
+
+**Correct behaviour.** Every directory on a `DOS\4`/`DOS\5` volume has a cache chain of at least one block, as AmigaDOS makes it: the root from formatting (in-place formatting too), every directory from `mkdir`, and a directory whose last entry is deleted keeps an empty block rather than none. Disks ADE has already written are read correctly as they are; `ade repair` could give a directory its missing block, a separate question.
+
+**The fix.** The formatter gives a `DOS\4`/`DOS\5` root an empty cache block at the block after it and moves the bitmap one on — 881 and 882 on a DD floppy, as `Format` has them — and formatting in place writes that block too. `make_dir` allocates an empty cache block for each new directory and points its `extension` at it. Rewriting a cache always leaves at least one block, so a directory whose last entry is deleted keeps an empty one; deleting the directory itself still frees its chain.
+
+**How it is tested.** Against AmigaDOS in FS-UAE (D-023): `amigados_writes_into_every_directory_ade_makes_on_a_dircache_disk` has AmigaDOS copy files into the root of a blank ADE `DOS\5` disk, a directory `ade mkdir` made, one ADE emptied by deleting, and a directory AmigaDOS makes inside ADE's, and ADE reads every file back with no fault; undoing either half of the edit fix — no cache from `make_dir`, or none kept when emptied — leaves AmigaDOS hung with no marker. `a_blank_dircache_disk_is_laid_out_as_format_lays_it_out` requires ADE's blank `DOS\5` to use the same blocks as `Format … DIRCACHE QUICK`, with block 0 and the cache identical, the rootblock identical but for its datestamps and checksum, and every bitmap bit for a block on the volume the same (AmigaDOS sets the bits past the end, and leaves stale memory in the block's unused tail). Where CI can see them: `a_blank_dircache_volume_has_an_empty_cache_for_its_root` (which replaces `a_blank_dircache_volume_needs_no_cache_block`) and `every_directory_ade_makes_has_a_cache_and_keeps_it_when_emptied`. Tests that assumed the bitmap is always at 881 read it from the rootblock instead.
+
 ### BUG-024 A blank disk formatted by AmigaDOS reads as a game behind an empty volume, and writes to it are held back
 **Severity:** medium
 **Status:** fixed

@@ -331,16 +331,49 @@ fn a_blank_disk_is_not_bootable_its_bootblock_is_the_dostype_alone() {
 }
 
 #[test]
-fn a_blank_dircache_volume_needs_no_cache_block() {
-    // SPEC records the rootblock's `extension` as "first dircache block, else
-    // 0", and a fresh volume has no entries to cache. Left unchecked this
-    // would be an assumption; ADFlib mounting the result is what settles it,
-    // and that is asserted in `adflib_mounts_every_type_it_knows` below.
-    let image = format::blank(Geometry::DD_FLOPPY, dostype(5), "Cache", WHEN).unwrap();
-    let health = ade_core::health::examine(image);
-    assert!(health.is_sound(), "{:?}", health.findings);
-    assert_eq!(health.files, 0);
-    assert_eq!(health.directories, 0);
+fn a_blank_dircache_volume_has_an_empty_cache_for_its_root() {
+    // BUG-025. AmigaDOS gives every directory on a dircache volume a cache
+    // chain, empty or not, and its filesystem crashes writing into one that
+    // has none. `Format … FFS DIRCACHE`, run in FS-UAE, puts the root's at
+    // 881 — type 33, itself, its parent, no records — and the bitmap at 882.
+    // ADFlib mounted the old zero pointer, which is why it was not seen.
+    for (geometry, root) in [(Geometry::DD_FLOPPY, 880usize), (Geometry::HD_FLOPPY, 1760)] {
+        for flags in [4u8, 5] {
+            let image = format::blank(geometry, dostype(flags), "Cache", WHEN).unwrap();
+            let long = |block: usize, offset: usize| {
+                ade_core::layers::endian::u32_at(&image, block * 512 + offset).unwrap()
+            };
+            let cache = root + 1;
+            assert_eq!(
+                long(root, 512 - 8),
+                cache as u32,
+                "DOS\\{flags}: the root names its cache"
+            );
+            assert_eq!(
+                long(root, 512 - 196),
+                cache as u32 + 1,
+                "the bitmap follows it"
+            );
+            assert_eq!(
+                [
+                    long(cache, 0),
+                    long(cache, 4),
+                    long(cache, 8),
+                    long(cache, 12),
+                    long(cache, 16)
+                ],
+                [33, cache as u32, root as u32, 0, 0],
+                "DOS\\{flags}: an empty cache block for the root"
+            );
+            let health = ade_core::health::examine(image.clone());
+            assert!(health.is_sound(), "{:?}", health.findings);
+            assert_eq!(health.files, 0);
+            assert_eq!(health.directories, 0);
+        }
+    }
+    // Without the dircache bit there is no cache, and the bitmap is at 881.
+    let image = format::blank(Geometry::DD_FLOPPY, dostype(1), "Plain", WHEN).unwrap();
+    assert_eq!(image[880 * 512 + 504..880 * 512 + 508], [0, 0, 0, 0]);
 }
 
 #[test]
@@ -435,10 +468,10 @@ fn a_volume_needing_a_bitmap_extension_chain_is_refused_not_half_written() {
 
 #[test]
 fn adflib_mounts_every_type_and_size_it_knows() {
-    // The oracle across the whole matrix, not just FFS DD. This is what
-    // settles the dircache question that `a_blank_dircache_volume_needs_no_
-    // cache_block` leaves open: `DOS\4` and `DOS\5` are written with a zero
-    // dircache pointer, and an implementation nobody here wrote mounts them.
+    // The oracle across the whole matrix, not just FFS DD. ADFlib mounting
+    // a volume is necessary, not sufficient: it mounted `DOS\4` and `DOS\5`
+    // with no root cache, which AmigaDOS's own filesystem cannot write into
+    // (BUG-025) — that is asserted against AmigaDOS in `amigados.rs`.
     //
     // 5.25" is deliberately absent. ADFlib refuses that size outright —
     // "adfMountDev : unknown device type", before it looks at any filesystem —

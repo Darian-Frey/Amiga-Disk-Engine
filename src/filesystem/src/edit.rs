@@ -215,9 +215,21 @@ pub fn make_dir(
     let plan = {
         let source = Slice { image, geometry };
         let mut plan = Plan::new(&source, parent, name)?;
-        plan.reserve(1)?;
+        // On a dircache volume a directory has a cache chain from the moment
+        // it exists — empty, but there — as AmigaDOS's `MakeDir` makes it;
+        // its filesystem crashes writing into a directory without one
+        // (BUG-025).
+        let cached = plan.volume.has_dircache();
+        plan.reserve(if cached { 2 } else { 1 })?;
         let block = plan.allocate()?;
-        let header = plan.entry_block(block, name, ST_USERDIR, 0, when);
+        let mut header = plan.entry_block(block, name, ST_USERDIR, 0, when);
+        if cached {
+            let cache = plan.allocate()?;
+            let _ = put_back(&mut header, 8, cache);
+            seal(&mut header);
+            let empty = plan.cache_block(cache, block, &[], 0);
+            plan.put(cache, empty);
+        }
         plan.put(block, header);
         plan.link(block, name, 0, ST_USERDIR, when)?;
         (plan.finish(), block)
@@ -1163,13 +1175,11 @@ impl<'a> Plan<'a> {
 
         // Pack records into blocks. A record never spans two (SPEC §Directory
         // cache blocks), so a block ends early when the next will not fit. No
-        // records means no cache at all, as a new directory has.
+        // records still means one block: AmigaDOS keeps an empty cache for an
+        // empty directory, and its filesystem crashes writing into a
+        // directory that has none (BUG-025).
         let room = (self.geometry.block_size() as usize).saturating_sub(DIRCACHE_HEADER);
-        let mut packed: Vec<Vec<Vec<u8>>> = if records.is_empty() {
-            Vec::new()
-        } else {
-            vec![Vec::new()]
-        };
+        let mut packed: Vec<Vec<Vec<u8>>> = vec![Vec::new()];
         let mut used = 0usize;
         for r in &records {
             let bytes = encode_record(r);
@@ -1195,21 +1205,7 @@ impl<'a> Plan<'a> {
 
         for (i, (block, contents)) in blocks.iter().zip(&packed).enumerate() {
             let next = blocks.get(i.saturating_add(1)).copied().unwrap_or(0);
-            let mut raw = vec![0u8; self.geometry.block_size() as usize];
-            let _ = put_u32(&mut raw, 0x00, T_DIRCACHE);
-            let _ = put_u32(&mut raw, 0x04, *block);
-            let _ = put_u32(&mut raw, 0x08, self.parent);
-            let _ = put_u32(&mut raw, 0x0c, u32::try_from(contents.len()).unwrap_or(0));
-            let _ = put_u32(&mut raw, 0x10, next);
-            let mut at = DIRCACHE_HEADER;
-            for bytes in contents {
-                let end = at.saturating_add(bytes.len());
-                if let Some(dst) = raw.get_mut(at..end) {
-                    dst.copy_from_slice(bytes);
-                }
-                at = end;
-            }
-            seal(&mut raw);
+            let raw = self.cache_block(*block, self.parent, contents, next);
             self.put(*block, raw);
         }
 
@@ -1222,6 +1218,27 @@ impl<'a> Plan<'a> {
             self.put(self.parent, raw);
         }
         Ok(())
+    }
+
+    /// A dircache block for the directory at `owner`, holding `records`
+    /// (each already encoded) and naming `next`, sealed.
+    fn cache_block(&self, block: u32, owner: u32, records: &[Vec<u8>], next: u32) -> Vec<u8> {
+        let mut raw = vec![0u8; self.geometry.block_size() as usize];
+        let _ = put_u32(&mut raw, 0x00, T_DIRCACHE);
+        let _ = put_u32(&mut raw, 0x04, block);
+        let _ = put_u32(&mut raw, 0x08, owner);
+        let _ = put_u32(&mut raw, 0x0c, u32::try_from(records.len()).unwrap_or(0));
+        let _ = put_u32(&mut raw, 0x10, next);
+        let mut at = DIRCACHE_HEADER;
+        for bytes in records {
+            let end = at.saturating_add(bytes.len());
+            if let Some(dst) = raw.get_mut(at..end) {
+                dst.copy_from_slice(bytes);
+            }
+            at = end;
+        }
+        seal(&mut raw);
+        raw
     }
 
     /// The finished plan: every block to write, the bitmap's changes included.

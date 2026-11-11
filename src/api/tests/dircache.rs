@@ -355,3 +355,57 @@ fn record_named(bytes: &[u8], block: u32, name: &[u8]) -> usize {
         .position(|r| r.name == name)
         .expect("record present")
 }
+
+#[test]
+fn every_directory_ade_makes_has_a_cache_and_keeps_it_when_emptied() {
+    // BUG-025. AmigaDOS gives every directory on a dircache volume a cache
+    // chain, empty or not, and its filesystem crashed writing into one ADE
+    // had made without. Checked against AmigaDOS itself in `amigados.rs`;
+    // pinned here too, where CI can see it.
+    use ade_core::edit::Session;
+    use ade_core::layers::block::Geometry;
+    use ade_core::layers::filesystem::dostype::Dostype;
+    use ade_core::layers::filesystem::format::{self, Stamp};
+    let when = Stamp {
+        days: 17_000,
+        mins: 1,
+        ticks: 0,
+    };
+    for flags in [4u8, 5] {
+        let dostype = Dostype::from_raw(0x444F_5300 | u32::from(flags)).unwrap();
+        let blank = format::blank(Geometry::DD_FLOPPY, dostype, "Caches", when).unwrap();
+        let mut s = Session::from_bytes(blank).unwrap();
+        s.set_clock(Some(when));
+        let root = s.root();
+        let dir = s.make_dir(root, b"Dir").unwrap();
+        let chains = |bytes: &[u8]| {
+            let image = Image::from_bytes(bytes.to_vec()).unwrap();
+            let volume = image.volume().unwrap();
+            [root, dir].map(|d| {
+                let chain = volume.dircache(d).unwrap();
+                (chain.block_numbers().len(), chain.records().len())
+            })
+        };
+        assert_eq!(
+            chains(s.bytes()),
+            [(1, 1), (1, 0)],
+            "DOS\\{flags}: a new directory's cache"
+        );
+
+        let file = s.add_file(dir, b"only", b"one entry").unwrap();
+        assert_eq!(chains(s.bytes()), [(1, 1), (1, 1)]);
+        s.delete(file).unwrap();
+        assert_eq!(
+            chains(s.bytes()),
+            [(1, 1), (1, 0)],
+            "DOS\\{flags}: emptied, still a block"
+        );
+        s.delete(dir).unwrap();
+        assert_eq!(
+            chains(s.bytes())[0],
+            (1, 0),
+            "DOS\\{flags}: the root keeps its own when its last entry goes"
+        );
+        assert!(examine(s.bytes().to_vec()).is_sound());
+    }
+}

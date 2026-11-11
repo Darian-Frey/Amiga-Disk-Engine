@@ -510,6 +510,8 @@ Note this block has **no checksum**.
 
 Chained from the `extension` field of a root or directory block. [FAQ §4.7]
 
+**Every directory has a chain, even an empty one (BUG-025, measured 2026-11-11).** "First dircache block, else 0" reads as if a directory with nothing in it could have none, and ADFlib mounts such a volume. AmigaDOS does not make one and cannot use one: in FS-UAE under Kickstart 3.1, `Format … FFS DIRCACHE` gives the root an empty cache block at 881 (type 33, itself, parent 880, no records) and puts the bitmap at 882; `MakeDir` gives each new directory an empty block of its own; and its filesystem crashed — *Program failed (error #80000006)* — writing into a directory whose `extension` was 0. A directory emptied by `Delete` keeps its block. A reader can still meet a zero pointer on a disk some other tool wrote, and treats it as an empty cache.
+
 | offset | type | name | meaning |
 |---|---|---|---|
 | 0x00 | ulong | type | `DIRCACHE` = 33 (0x21) |
