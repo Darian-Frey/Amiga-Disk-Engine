@@ -10,7 +10,20 @@ Severity vocabulary: low | medium | high.
 
 ## Open
 
-_None._
+### BUG-024 A blank disk formatted by AmigaDOS reads as a game behind an empty volume, and writes to it are held back
+**Severity:** medium
+**Status:** open
+**Found:** 2026-11-11, by the first AmigaDOS oracle tests (D-023): `a_disk_amigados_has_only_formatted_reads_as_blank` has Workbench 3.1's `Format` initialise a zeroed image and nothing else, and `ade check` then says *free-blocks-hold-data: the volume holds no files, but 1756 blocks the bitmap marks free hold data … usually a game its own loader reads, and writing to the volume would overwrite it*.
+**Where:** the free-data finding in the health report (IMP-019), and through it F-035's disk kind and F-031's edit guard.
+
+**What is wrong.** A full format does not leave free blocks empty. It writes a fill into every block on the disk — each long `DO` or `Do`, a byte, and a counter, each long twice, the counter rising by two — and then the rootblock and bitmap over it. ADE reads that fill as data a loader might need, so the one disk a person most obviously means to write to is called a game, and adding a file or a folder waits for `--overwrite-free-data`. A quick format, or a disk made by ADE, is zeros and is not affected. Neither is a disk with files on it, since the finding only speaks about empty volumes.
+
+**How much of the corpus.** 83 of 4,638 DD ADFs carry some of the fill, 6 of them in 100 blocks or more — mastered disks are mostly written over zeros, which is why IMP-019's measurements never met it. A person's own disks, formatted on an Amiga, carry it everywhere they have not been written.
+
+**Correct behaviour.** Blocks holding exactly the format fill have never been written since formatting, and count as empty, as zeros do. The fill is self-describing, so it can be recognised rather than guessed at — but its rule should be read off real formats first (the third byte varies by track: `S`, `W`, `[` in the samples so far), and tested against blocks that only resemble it.
+
+**Not yet fixed.** The test is marked ignored with this entry's number until it is.
+
 
 ## Fixed
 
@@ -22,9 +35,9 @@ _None._
 
 **What is wrong.** A valid bootblock checksum is what *makes* a disk bootable: Kickstart checks the dostype and the checksum, and then jumps to offset 12. Over zeros, that is `ori.b #0,d0` repeated until the code runs into something illegal, and the machine resets and boots the same disk again. The comment above the checksum says the disk "is not bootable and does not pretend to be (AV-002)" — the checksum is exactly the pretence. ROADMAP repeats the claim, saying `ade create` leaves boot code zeroed "exactly as AmigaDOS's own `format` does without `install`". It does not.
 
-**What AmigaDOS writes.** Measured the same day, by having Workbench 3.1's own `Format DRIVE DF0: NAME Real FFS NOICONS` initialise a zeroed image in FS-UAE: `444f5301` and then zeros — **checksum 0 and rootblock pointer 0**. Not bootable, so Kickstart moves on to the next device.
+**What AmigaDOS writes.** Measured the same day, by having Workbench 3.1's own `Format DRIVE DF0: NAME Real FFS NOICONS` initialise a zeroed image in FS-UAE: block 0 is `444f5301` and then zeros — **checksum 0 and rootblock pointer 0**. Not bootable, so Kickstart moves on to the next device. *Corrected the same day:* only the first 16 bytes were looked at then. Block 1 is not zeros — a full format fills every block on the disk with `DOS` and a counter (BUG-024), and block 1 keeps that fill. It is not boot code either way: the checksum is 0, so nothing runs.
 
-**Correct behaviour.** Write the dostype and leave the rest of both boot blocks zero, as `Format` does. Whether to keep the rootblock pointer is a separate question (C-007 says readers must not trust it, and `Format` does not write it); it does not make the disk bootable either way. `ade repair` does not reseal boot checksums (F-034), so it neither causes nor fixes this. Disks already written by ADE stay bootable-and-broken until formatted again.
+**Correct behaviour.** Write the dostype and leave the rest of both boot blocks zero — block 0 as `Format` writes it, and block 1 zeroed rather than filled, which a blank image already is. Whether to keep the rootblock pointer is a separate question (C-007 says readers must not trust it, and `Format` does not write it); it does not make the disk bootable either way. `ade repair` does not reseal boot checksums (F-034), so it neither causes nor fixes this. Disks already written by ADE stay bootable-and-broken until formatted again.
 
 **How it was missed.** Every test of `create` reads its output with ADE or ADFlib, and neither boots anything; AV-002 rightly keeps ADE from executing code, so nothing in the suite could see what a disk does when it boots. Only a machine that runs the bootblock finds this.
 

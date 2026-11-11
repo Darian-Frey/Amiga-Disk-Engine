@@ -697,3 +697,31 @@ Unchanged: Save As always makes a new file and still refuses the opened one and 
 **Consequences.** `ade_object::annotations` (the format and its rules) and `ade_core::project` (where, and the hash); the listing, the views and the export take a program's annotations; `ade annotate`; `ade_project_set_name` and `ade_project_set_comment` in the ABI; in the Assembly tab, a line's context menu names its place or comments on it.
 
 **Reversal conditions.** Part 1's storage gains a sidecar or explicit files if notes need to travel with an image rather than with a program — added beside the per-user store, not instead of it. Overrides of code and data need their own entry. Part 5 does not loosen: the day a user's name could make ADE claim something about the code, the user's words and the disk's would be indistinguishable.
+
+---
+
+### D-023 AmigaDOS itself, run in FS-UAE, is a test oracle — local only, driven from outside, never shipped
+**Decided:** 2026-11-11
+**Recorded:** 2026-11-11
+**Status:** Accepted
+**Authors:** Darian-Frey (decision); Claude (analysis)
+**Related:** D-002, D-019, D-010, AV-002, BUG-023, F-012, F-031, C-005, D-013
+
+**Context.** Every check on what ADE writes has been a reader: ADE's own health report and ADFlib (D-002). Neither boots a disk, and neither is AmigaDOS. On 2026-11-11 this machine turned out to hold FS-UAE 3.1.66 and the Amiga Forever Kickstart ROMs and Workbench disks — ROADMAP had recorded "an emulator with Kickstart ROMs, which this machine lacks" — and a scripted run was proven the same day: ADE extracts Workbench 3.1 into a folder, FS-UAE mounts it as the boot drive, a startup-sequence runs the commands and writes their output there, and a marker file tells the host to stop the emulator. A run takes 6–20 seconds. The first run found BUG-023, a disk ADE formats crashing the machine that boots it, which no reader could have seen.
+
+**Options.**
+- **A. Keep to readers.** Rejected: BUG-023 is the proof of what that misses, and several blocked items need material only a real filesystem makes — deleted headers (F-012), hard links, larger blocks (C-005).
+- **B. Ship an emulator launch in ADE.** Not this decision. "Run the disk in an emulator" stays a separate GUI candidate on the Atari map.
+- **C. AmigaDOS as a test-only oracle.** **Chosen.**
+
+**Decision.**
+1. **Test-only and driven from outside**, as ADFlib and objdump are: FS-UAE is a separate process given a configuration file; nothing links it, and no shipping path starts it. AV-002 is untouched — ADE still executes nothing; a program the user installed runs Amiga code the user owns.
+2. **Configured, never found.** `ADE_KICKSTART` names a Kickstart 3.1 ROM and `ADE_WORKBENCH` a Workbench 3.1 disk; `fs-uae` must be on the path (or named by `ADE_FSUAE`). Without all three the tests print why and skip, so CI and a fresh clone are unaffected. ROMs and Workbench are copyrighted and never enter the repository, any more than a corpus disk does (D-010).
+3. **Every run is bounded.** A requester on the Amiga side waits for a click forever, so a run that has not left its marker by its limit is killed and fails, with the emulator's log. A script that writes to a floppy locks it (`Lock DF0: ON`) and waits before the marker, because AmigaDOS writes lazily and a run stopped at the marker leaves a half-written disk — measured, not assumed.
+4. **Scripts are Latin-1**, as AmigaDOS reads them; an accented name written in UTF-8 is a different name.
+5. **One run at a time.** Runs are serialised within a test binary; each has its own folder and FS-UAE base directory, so nothing in the user's own FS-UAE setup is read or written.
+6. **Headless where possible.** Under `xvfb-run`, when it is installed, the emulator draws to no screen; otherwise its window appears for the length of the run.
+
+**Consequences.** `src/api/tests/amigados.rs` holds the harness and its first tests: an ADE-formatted disk does not boot (BUG-023's regression), AmigaDOS reads what ADE writes — accented names found by its own hash lookup — and ADE reads what AmigaDOS writes. F-012, hard links and C-005 gain a route to real material; each uses it as its own piece of work.
+
+**Reversal conditions.** If FS-UAE's scripted boot proves flaky over time — runs that pass and fail with no change — the tests become opt-in behind a further variable rather than running whenever configured. Part 1 does not loosen: the day ADE starts an emulator in a shipping path is the GUI candidate's own decision.

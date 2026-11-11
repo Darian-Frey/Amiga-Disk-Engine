@@ -320,7 +320,7 @@ fn a_blank_disk_is_not_bootable_its_bootblock_is_the_dostype_alone() {
             assert_eq!(
                 image[..1024],
                 expected[..],
-                "{name}: blocks 0–1 are `DOS` and zeros"
+                "{name}: blocks 0–1 are `DOS` and zeros, block 0 as `Format` writes it"
             );
             assert!(
                 !ade_core::layers::block::checksum::boot_valid(&image[..1024]),

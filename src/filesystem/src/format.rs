@@ -38,8 +38,9 @@
 //! Kickstart boots any disk whose dostype and boot checksum agree, and jumps
 //! to offset 12; over zeros, that runs until it meets an illegal instruction
 //! and resets, then boots the same disk again. Workbench 3.1's `Format`,
-//! run in FS-UAE, writes `DOS\1` and nothing else — checksum 0, rootblock
-//! pointer 0 — and so does this.
+//! run in FS-UAE, writes `DOS\1` and nothing else into block 0 — checksum 0,
+//! rootblock pointer 0 — and so does this. (Block 1 it leaves holding the
+//! fill a full format writes into every block, BUG-024; here it is zeros.)
 
 use ade_block::{Geometry, checksum};
 use ade_endian::put_u32;
