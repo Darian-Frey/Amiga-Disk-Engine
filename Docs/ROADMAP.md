@@ -173,6 +173,38 @@ Neither run is the F-001 bar, which requires a fuzz corpus rather than well-form
   It needed the conversion logic to leave the CLI first (IMP-007): `encode_raw_mfm` was sixty lines of track encoding living in a front end, which F-002 forbids and the layering check cannot see.
 **Acceptance:** A cold user images a real disk, sees it auto-identified and catalogued, and batch-verifies a multi-thousand-image corpus in one run.
 
+## Phase 6 — Hard disks as first-class images
+**Goal:** Everything ADE does for a floppy, it does for a hard disk image — unpartitioned hardfiles of any size AmigaDOS supports, and RDB-partitioned disks whose partition tables ADE can create and edit — so a hard disk is never the image ADE "only reads".
+**Status:** Not started — asked for 2026-11-12. Nothing here is committed to a design yet; parts need decision entries first, noted where.
+**Features in scope:** F-038 (new), F-018 *(its editing half, deferred by D-004 since 2026-08-28)*, C-005, C-002
+
+**Where it stands (surveyed 2026-11-12):**
+- *Reading* is broad: unpartitioned hardfiles mount, list, extract and health-check; RDB devices are browsed partition by partition in the window and through `--partition=` on `check`, `ls`, `extract` and `disasm`; HDZ unpacks transparently.
+- *Creating* stops at an **unpartitioned** hardfile of **at most 49 MB** (`ade create --size=N`): past that the bitmap needs a `bm_ext` chain, which ADE does not write. Checked 2026-11-12: an 8 MB one mounts in FS-UAE under Workbench 3.1 as `DH1:`, takes a file and a folder from AmigaDOS, and reads back clean.
+- *Editing* works on unpartitioned hardfiles as on floppies, and is **refused on every RDB disk** ("convert this one to ADF first"). No command creates or changes a partition table.
+- *Memory:* an edit works on a copy of the whole image and Undo keeps whole-image snapshots (D-018). Right at 880 KB; untenable at gigabytes.
+
+**Deliverables:**
+- [ ] **Larger unpartitioned hardfiles.** Write and maintain the `bm_ext` chain, so `create`, `format`, every edit and `repair` handle a bitmap of any length; then sizes up to FFS's 4 GB addressing limit. Readers already follow the chain; the writer is what is missing.
+- [ ] **Partition-aware everything.** Every command, ABI call and window action that works on a floppy works on a partition: the edits (`mkdir`, `put`, `rm`, `undelete`, `link`, `rename`, `mv`, `repair`, `format`, `wipe`), `carve`, `find`, `scan`, `layout`, `specs`, `annotate`, `decode`, and the window's Map, Hex, Text, Assembly and Decoded views and Recover lost files. `--partition=` everywhere it means something; the ABI's edit calls take the partition selector its read calls already do. An audit first, command by command, of what already works on a partition and what does not.
+- [ ] **Saving an RDB disk.** D-018's terms unchanged — buffered, explicit, atomic, never silently over the opened file — for a device image whose edits land inside one partition.
+- [ ] **Creating a partitioned disk.** `ade create --rdb` (shape to be designed): an `RDSK` block, a `PART` per partition with its name (`DH0`), dostype, size, boot priority and bootable flag, and each partition formatted. Optionally a filesystem carried in the RDB (`FSHD` + `LSEG`), which ADFlib requires and FAQ §6.5 says is not needed (SPEC §The oracle is stricter than the format here).
+- [ ] **Editing the partition table.** Add, delete, rename and resize partitions; change boot priority, bootable flag and dostype; reformat one partition without touching the others. Resizing a partition that holds files is the hard case — moving its contents, or refusing with the reason, is a decision of its own.
+- [ ] **Converting between the shapes.** A partition out to a standalone hardfile, a hardfile into a partition of a new or existing RDB disk, and both through HDZ.
+- [ ] **Larger blocks (C-005)** — partitions formatted with 1, 2 or 4 KB blocks, read and written. Blocked on material until now; AmigaDOS in FS-UAE may make it (a mountlist with a larger `BlockSize`, or HDToolBox).
+- [ ] **Scale.** Edits and Undo that do not copy the whole image: per-block change sets rather than whole-disk snapshots, and reading large images without holding them whole (IMP-005's open question). Measured against a multi-gigabyte hardfile before it is called done.
+- [ ] **The window.** Partitions as editable as floppies — drop files onto a partition, its Map and Recover lost files — and a partition-table view to create and edit partitions, as HDToolBox does on an Amiga.
+
+**Decisions needed before code:**
+- **Writing an RDB** reverses part of D-004's deferral of F-018's editing half; a new entry should set its terms, as D-018 did for writing into a volume.
+- **Resizing a partition with data in it** — move, refuse, or only grow into free space after it.
+- **C-002** — whether sizes past 4 GB (TD64 / NSD) mean anything for an image file, before anything is built for them.
+- **Scale** — how Undo works when a whole-image snapshot is too large, without weakening D-018.
+
+**How it is checked:** the same way the floppy write suite is. ADE's health report must find nothing new after every edit; ADFlib reads RDB devices and unpartitioned hardfiles; and **AmigaDOS itself in FS-UAE (D-023)** mounts what ADE creates — partitions included — reads and writes it, and makes disks with HDToolBox and `Format` for ADE to read. Amiga Forever's three Workbench hardfiles (`disks/hardfiles`) are the real RDB material on hand.
+
+**Acceptance:** A hard disk image — unpartitioned or RDB, a few megabytes or a few gigabytes — can be created, partitioned, filled, edited, repaired, carved and undeleted from the CLI, the ABI and the window exactly as a floppy can; AmigaDOS in FS-UAE mounts every partition ADE writes and finds nothing wrong with it; and HDToolBox's own disks open and edit cleanly in ADE.
+
 ## Atari Disk Engine feature map
 
 *Surveyed 2026-08-30 against `/home/azathoth/Atari-Disk-Engine` at 23,220 lines. One-directional by request: this lists what the **Atari** engine does that ADE does not. It is not a plan — nothing here is scheduled, and several entries are recorded precisely so they are not raised again.*

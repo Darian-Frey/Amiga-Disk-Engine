@@ -220,7 +220,7 @@ Status vocabulary: **Not started** | **In progress** | **Partially delivered** (
 **Effort:** M · **Phase:** 2, 5
 **Acceptance:**
 - Parse an RDB partition table in an HDF and browse/edit each volume through the GUI.
-**Status:** Browsing delivered 2026-08-28; editing is deferred by D-004
+**Status:** Browsing delivered 2026-08-28; editing is deferred by D-004 — and taken up, with the rest of hard-disk support, by **F-038** (ROADMAP §Phase 6, 2026-11-12)
 **Notes:** rdbtool is CLI-only; friendly multi-partition HDF editing is essentially absent. Bounded by C-002.
 **Partitions are a level of the tree, not a menu.** A device holds no volume of its own — every volume is inside a partition — so the window shows each partition under the image, with its files under it. A picker would have made the disk look like one volume with a switch beside it, which is what a partition-blind reader assumes and is exactly the misunderstanding to avoid. A partition that holds no AmigaDOS volume says so on its row: `PFS\0` and `SFS\0` partitions are real partitions ADE cannot read, and an empty listing would read as an empty disk.
 **The ABI grew a partition selector rather than a second family of calls.** `ade_dir_open`, `ade_walk_open` and `ade_file_read` each take one, with `ADE_WHOLE_IMAGE` for an image that holds its own volume. A device is not a special case of an image; it is what an image is when it has an RDB.
@@ -545,6 +545,16 @@ The parser reads `RDSK`, the `PART` chain and a minimal `FSHD`/`LSEG`, and every
 **Shown everywhere, claimed nowhere.** A name replaces the place's label in the listing, its operands, the functions, cross-references, call graph, strings and variables; a comment stands above its line. The listing opens by saying the names are the user's and from which file. Nothing the user writes changes what the walks find, how libraries are named, or what the export is checked against.
 **Checked:** the export round trips name every place the code refers to and every function, and comment every function, in every other corpus program, and both assemblers still rebuild every one; the project reader is fuzzed, every name and comment it takes must pass the rules and survive writing out and reading back; a disk image is checked unchanged after annotating a program on it.
 **Notes:** overrides — marking bytes as code or as data against what the walks found — are left for their own decision (D-022). The window has no list of a program's notes yet; they are the file's, and the listing shows them.
+
+### F-038 Hard disk images handled as fully as floppies
+**Priority:** Should
+**Effort:** L · **Phase:** 6
+**Acceptance:**
+- Every feature that works on a floppy image works on an unpartitioned hardfile and on each partition of an RDB disk: creating, editing, saving, repairing, carving, undeleting, searching, decoding and every view in the window.
+- Unpartitioned hardfiles can be created and edited at any size FFS supports, not only up to 49 MB.
+- RDB partition tables can be created and edited — add, delete, rename and resize partitions; set boot priority, bootable flag and dostype — from the CLI, the ABI and the window.
+**Status:** Not started — asked for 2026-11-12; see ROADMAP §Phase 6
+**Notes:** Takes up F-018's editing half, deferred by D-004, and C-005's larger blocks; bounded by C-002. Needs decision entries for writing an RDB, for resizing a partition that holds data, and for Undo at sizes where whole-image snapshots stop being practical. Checked against ADFlib and against AmigaDOS in FS-UAE (D-023).
 
 ## Candidate features (uncommitted)
 
