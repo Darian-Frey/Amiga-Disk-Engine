@@ -200,6 +200,45 @@ fn run(
         }
         std::thread::sleep(Duration::from_millis(200));
     }
+    // A run that left no marker is stuck on something only the screen shows
+    // — every hang so far was a requester or a crash there (IMP-022) — so
+    // the screen is kept before the emulator goes.
+    let screen = if done.exists() || setup.xvfb {
+        None
+    } else {
+        screenshot(&dir)
+    };
+    stop(&mut child);
+
+    let log = fs::read_to_string(dir.join("base/Cache/Logs/fs-uae.log.txt")).unwrap_or_default();
+    let resets = log.matches("Reset at").count();
+    let illegal = log.matches("Illegal instruction").count();
+    if !done.exists() {
+        let tail: Vec<&str> = log.lines().rev().take(25).collect();
+        let seen = screen.map_or_else(
+            || {
+                "no screenshot (needs xwininfo and ImageMagick's import, and a visible \
+                display)"
+                    .to_owned()
+            },
+            |p| format!("the screen is in {}", p.display()),
+        );
+        return Err(format!(
+            "{name}: no marker after {:?}: {resets} resets, {illegal} illegal instructions; \
+             {seen}; the log ends\n{}",
+            start.elapsed(),
+            tail.into_iter().rev().collect::<Vec<_>>().join("\n")
+        ));
+    }
+    Ok(Outcome {
+        out,
+        resets,
+        illegal,
+    })
+}
+
+/// Stop the emulator and everything it started.
+fn stop(child: &mut std::process::Child) {
     // Asked to quit first, and given time to: FS-UAE keeps written floppy
     // tracks in memory and writes them back to the image when it quits. A
     // KILL straight after the marker intermittently left disks half-written
@@ -220,24 +259,35 @@ fn run(
     // harness that waits on a live emulator never returns.
     let _ = child.kill();
     let _ = child.wait();
+}
 
-    let log = fs::read_to_string(dir.join("base/Cache/Logs/fs-uae.log.txt")).unwrap_or_default();
-    let resets = log.matches("Reset at").count();
-    let illegal = log.matches("Illegal instruction").count();
-    if !done.exists() {
-        let tail: Vec<&str> = log.lines().rev().take(25).collect();
-        return Err(format!(
-            "{name}: no marker after {:?}: {resets} resets, {illegal} illegal instructions; \
-             the log ends\n{}",
-            start.elapsed(),
-            tail.into_iter().rev().collect::<Vec<_>>().join("\n")
-        ));
-    }
-    Ok(Outcome {
-        out,
-        resets,
-        illegal,
-    })
+/// The FS-UAE window, saved as `timeout.png` in `dir`, if the tools to take
+/// it are installed (IMP-022). Only the emulator's window, found by its
+/// title — never the whole screen, which is somebody's desktop. A window
+/// partly covered by another may show what covers it.
+fn screenshot(dir: &Path) -> Option<PathBuf> {
+    let tree = Command::new("xwininfo")
+        .args(["-root", "-tree"])
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    let listing = String::from_utf8_lossy(&tree.stdout);
+    let id = listing
+        .lines()
+        .find(|l| l.contains("\"FS-UAE"))?
+        .split_whitespace()
+        .next()?
+        .to_owned();
+    let path = dir.join("timeout.png");
+    let taken = Command::new("import")
+        .args(["-window", &id])
+        .arg(&path)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .ok()?
+        .success();
+    (taken && path.is_file()).then_some(path)
 }
 
 /// AmigaDOS reads a script as Latin-1; every character here must be one.
@@ -802,5 +852,43 @@ fn hard_links_amigados_makes_are_ones_ade_deletes_as_amigados_would() {
             "{v}: the promoted file reads different bytes"
         );
         assert!(faults_on(disk).is_empty(), "{v}: {:?}", faults_on(disk));
+    }
+}
+
+#[test]
+fn a_run_that_times_out_keeps_a_screenshot_of_the_amiga() {
+    // IMP-022: a script that never leaves its marker, bounded tightly. The
+    // failure must name a screenshot of the emulator's window when the tools
+    // to take one are there, and say why not when they are not.
+    let Some(setup) = setup() else { return };
+    let failed = run(
+        &setup,
+        "timeout",
+        &[],
+        &[],
+        "C:Wait 600\n",
+        Duration::from_secs(25),
+    )
+    .err()
+    .expect("a script that waits ten minutes cannot finish in 25 seconds");
+    assert!(failed.contains("no marker"), "{failed}");
+    let tools = ["xwininfo", "import"].iter().all(|t| {
+        Command::new(t)
+            .arg("-version")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_ok()
+    });
+    if tools && !setup.xvfb {
+        let path = failed
+            .split("the screen is in ")
+            .nth(1)
+            .and_then(|rest| rest.split(';').next())
+            .unwrap_or_else(|| panic!("no screenshot named: {failed}"));
+        let png = fs::read(path).unwrap();
+        assert!(png.starts_with(b"\x89PNG"), "{path} is not a PNG");
+    } else {
+        assert!(failed.contains("no screenshot"), "{failed}");
     }
 }

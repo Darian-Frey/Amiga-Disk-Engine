@@ -11,8 +11,12 @@ Effort vocabulary: trivial | small | medium | large.
 
 ## Suggested
 
+_None._
+
+## Applied
+
 ### IMP-022 An AmigaDOS run that times out says only that it did; the screen that would say why is gone
-**Status:** suggested
+**Status:** applied
 **Effort:** small
 **Found:** 2026-11-12. `what_amigados_deletes_ade_puts_back_and_amigados_reads_again` hung in its first run — AmigaDOS writing files onto three floppies — twice in about eight runs, and passed every other time, including twice straight after with screenshots being taken, so the screen at the moment of the hang has never been seen. The other emulator tests have not hung since FS-UAE was stopped with TERM rather than KILL.
 
@@ -24,8 +28,7 @@ Effort vocabulary: trivial | small | medium | large.
 
 **Trade-offs.** One more optional tool, used only on a failure and skipped without it. **Not a retry**: a hang is how BUG-023 and BUG-025 showed themselves, and retrying a timed-out run would hide the next one. D-023's reversal condition — flaky runs make the tests opt-in — stays the remedy if the hangs turn out to be FS-UAE's and not ADE's.
 
-
-## Applied
+**Applied 2026-11-12.** On a timeout, before the emulator is stopped, `run` finds the FS-UAE window by its title with `xwininfo` and saves it with ImageMagick's `import` as `timeout.png` in the run's folder; the failure names the file, or says why there is none — the tools missing, or `xvfb-run` drawing to a display nothing can see. Only the emulator's window is taken, never the screen. `a_run_that_times_out_keeps_a_screenshot_of_the_amiga` runs a script that waits ten minutes under a 25-second limit and requires a PNG named in the failure; the one it took showed the Amiga's shell mid-`Wait`, and a harmless *Can't find SYS:Locale* from the harness's assigns, which the Workbench disk has no folder for. The undelete test that had hung then passed five runs in five, so the screen of that hang is still unseen — the next one will leave it.
 
 ### IMP-021 `ade extract <image> <path> -` writes a file called `-` rather than to standard output
 **Status:** applied
