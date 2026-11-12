@@ -2555,6 +2555,24 @@ pub unsafe extern "C" fn ade_edit_delete(
     })
 }
 
+/// Put back the deleted file or directory whose header is at `block` (F-012),
+/// as `ade_image_carve` lists them — the inverse of [`ade_edit_delete`] and of
+/// AmigaDOS's own `Delete`. One undo step.
+///
+/// # Safety
+/// `image` must be a live handle or null; `out_message` as for
+/// [`ade_edit_mkdir`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ade_edit_undelete(
+    image: *mut AdeImage,
+    block: u32,
+    out_message: *mut *mut c_char,
+) -> AdeResult {
+    edit(image, std::ptr::null_mut(), out_message, |s| {
+        s.undelete(block).map(|()| block)
+    })
+}
+
 /// Rename the entry at `block` to `name`, in the directory it is in.
 ///
 /// # Safety

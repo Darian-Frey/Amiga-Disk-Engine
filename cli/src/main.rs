@@ -383,9 +383,10 @@ fn main() -> ExitCode {
         ("extract", 2 | 3) => extract(&args),
         ("convert", 2) => convert(Path::new(p(0)), Path::new(p(1)), args.raw, args.format),
         ("create", 1) => create(&args),
-        ("mkdir" | "put" | "rm" | "rename" | "repair" | "mv" | "format" | "wipe", _) => {
-            edit_command(&args)
-        }
+        (
+            "mkdir" | "put" | "rm" | "undelete" | "rename" | "repair" | "mv" | "format" | "wipe",
+            _,
+        ) => edit_command(&args),
         ("disasm", 1 | 2) => disasm(&args),
         ("annotate", 2 | 3) => annotate(&args),
         ("decode", 2) => decode(&args),
@@ -454,6 +455,9 @@ fn usage() {
             .to_owned(),
         "    ade rm <image> <path> [--all] --output=<new>  delete a file or empty folder; --all \
          a whole folder"
+            .to_owned(),
+        "    ade undelete <image> <block|name> --output=<new>  put a deleted file or folder back \
+         (F-012); `ade carve` lists them"
             .to_owned(),
         "    ade rename <image> <path> <name> --output=<new> rename an entry in its folder"
             .to_owned(),
@@ -620,6 +624,7 @@ fn edit_command(args: &Args) -> ExitCode {
     match (args.command.as_str(), args.positional.len()) {
         ("mkdir", 2) => make_dir(Path::new(p(0)), p(1), args.overwrite_free_data, output),
         ("rm", 2) => remove(Path::new(p(0)), p(1), args.all, output),
+        ("undelete", 2) => undelete(Path::new(p(0)), p(1), output),
         ("rename", 3) => rename(Path::new(p(0)), p(1), p(2), output),
         ("repair", 1) => repair(Path::new(p(0)), args.free_orphans, output),
         ("mv", 3) => move_entry(Path::new(p(0)), p(1), p(2), output),
@@ -662,6 +667,63 @@ fn remove(image: &Path, path: &str, all: bool, output: Option<&Path>) -> ExitCod
             session.delete(block)?;
             Ok(format!("deleted {what}"))
         }
+    })
+}
+
+/// `ade undelete`: put a deleted entry back (F-012), named by its header's
+/// block as `ade carve` lists it, or by its name when only one deleted entry
+/// has it.
+fn undelete(image: &Path, which: &str, output: Option<&Path>) -> ExitCode {
+    use ade_core::edit::EditError;
+    use ade_core::layers::filesystem::edit::EditError as FsEditError;
+    let refuse = |why: String| EditError::Refused(FsEditError::NotRestorable(why));
+    edit_and_save(image, output, |session| {
+        let found = ade_core::Image::from_bytes(session.bytes().to_vec())
+            .map(|i| ade_core::carve::carve(&i))
+            .unwrap_or_default();
+        let carved = if let Ok(block) = which.parse::<u32>() {
+            found
+                .into_iter()
+                .find(|c| c.block == block)
+                .ok_or_else(|| {
+                    refuse(format!(
+                        "block {block} holds no deleted entry; `ade carve` lists the ones there are"
+                    ))
+                })?
+        } else {
+            let mut named: Vec<_> = found
+                .into_iter()
+                .filter(|c| c.name.eq_ignore_ascii_case(which))
+                .collect();
+            match named.len() {
+                1 => named.remove(0),
+                0 => {
+                    return Err(refuse(format!(
+                        "no deleted entry is called {which}; `ade carve` lists the ones there are"
+                    )));
+                }
+                n => {
+                    let blocks: Vec<String> = named.iter().map(|c| c.block.to_string()).collect();
+                    return Err(refuse(format!(
+                        "{n} deleted entries are called {which}, at blocks {}; name one by its \
+                         block",
+                        blocks.join(", ")
+                    )));
+                }
+            }
+        };
+        session.undelete(carved.block)?;
+        let trust = match carved.evidence {
+            ade_core::carve::Evidence::SelfEvident => "every data block names it and checksums",
+            _ if carved.kind == ade_core::layers::filesystem::entry::EntryKind::Directory => {
+                "a directory, empty"
+            }
+            _ => "its contents are unconfirmed: FFS data blocks carry nothing to check them by",
+        };
+        Ok(format!(
+            "put back {} (block {}) — {trust}",
+            carved.name, carved.block
+        ))
     })
 }
 

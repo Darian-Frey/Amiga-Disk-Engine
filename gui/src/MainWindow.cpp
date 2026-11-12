@@ -1669,7 +1669,7 @@ void MainWindow::showSurface() {
 }
 
 void MainWindow::recoverLostFiles() {
-    const Open *open = imageFor(m_selected);
+    Open *open = imageFor(m_selected);
     if (!open) {
         emit errorOccurred(QStringLiteral("Select a disk first."));
         return;
@@ -1739,12 +1739,40 @@ void MainWindow::recoverLostFiles() {
         "back is short, and is saved with a <tt>.partial</tt> suffix.<br>"
         "<b>header only</b> — the name and size are sound and <b>nothing confirms the "
         "contents</b>. FFS data blocks carry no header, so an FFS file can never be "
-        "better than this. These are not written out."));
+        "better than this. These are not written out.<br>"
+        "<b>Put back on disk</b> undeletes into the folders they were in, as one step for "
+        "Undo. A header-only file goes back with its name and size, its contents no better "
+        "confirmed than here; anything whose blocks are in use again stays deleted, and "
+        "says so."));
 
     auto *buttons = new QDialogButtonBox(QDialogButtonBox::Close, &dialog);
     QPushButton *recover = buttons->addButton(QStringLiteral("Recover to folder..."),
                                               QDialogButtonBox::ActionRole);
     recover->setEnabled(recoverable > 0);
+    // F-012: back onto the disk itself, as an edit — where "Recover to
+    // folder" copies out. Every row can be tried; what cannot go back says
+    // why. A header-only file goes back with its name and size, and its
+    // contents are as unconfirmed on the disk as they would be in a folder.
+    QPushButton *putBack =
+        buttons->addButton(QStringLiteral("Put back on disk"), QDialogButtonBox::ActionRole);
+    putBack->setToolTip(QStringLiteral(
+        "Undelete the selected entries — or all of them — into the folders they were in. "
+        "One step for Undo; nothing is saved until you save the disk."));
+    connect(putBack, &QPushButton::clicked, &dialog, [this, &dialog, &carve, table, count] {
+        QVector<quint32> wanted;
+        const QList<QTreeWidgetItem *> chosen = table->selectedItems();
+        if (chosen.isEmpty()) {
+            for (size_t i = 0; i < count; ++i) wanted.append(carve.block(i));
+        } else {
+            for (const QTreeWidgetItem *row : chosen) {
+                wanted.append(carve.block(row->data(0, Qt::UserRole).toULongLong()));
+            }
+        }
+        putBackDeleted(m_selected, wanted);
+        // The list is the disk as it was: close it rather than show rows that
+        // are no longer lost.
+        dialog.accept();
+    });
     connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
 
     connect(recover, &QPushButton::clicked, &dialog, [this, &dialog, &carve, open, table, count] {
@@ -2450,6 +2478,60 @@ bool MainWindow::deleteItem(QTreeWidgetItem *item) {
     statusBar()->showMessage(
         QStringLiteral("Deleted %1 from %2 — not saved yet").arg(name, open->name));
     return true;
+}
+
+QString MainWindow::putBackDeleted(QTreeWidgetItem *item, const QVector<quint32> &blocks) {
+    Open *open = imageFor(item);
+    if (!open || blocks.isEmpty()) return QString();
+    QHash<quint32, QString> names;
+    {
+        const ade::Image::Carve carve = open->image.carve();
+        for (size_t i = 0; i < carve.count(); ++i) names.insert(carve.block(i), carve.name(i));
+    }
+    const auto nameOf = [&names](quint32 block) {
+        return names.value(block, QStringLiteral("block %1").arg(block));
+    };
+
+    // One Undo takes the lot off again. Retried until a pass puts nothing
+    // back: a file's folder may be later in the list than the file.
+    QVector<quint32> left = blocks;
+    QHash<quint32, QString> why;
+    QStringList back;
+    open->image.beginGroup();
+    for (bool progress = true; progress && !left.isEmpty();) {
+        progress = false;
+        for (int i = 0; i < left.size();) {
+            const ade::EditResult r = open->image.undeleteEntry(left.at(i));
+            if (r.ok()) {
+                back.append(nameOf(left.at(i)));
+                why.remove(left.at(i));
+                left.removeAt(i);
+                progress = true;
+            } else {
+                why.insert(left.at(i), r.message);
+                ++i;
+            }
+        }
+    }
+    open->image.endGroup();
+    m_lastEdited = open->index;
+    if (!back.isEmpty()) reloadImage(*open);
+
+    QString message = back.isEmpty()
+                          ? QStringLiteral("Nothing was put back on %1").arg(open->name)
+                          : QStringLiteral("Put back %1 on %2 — not saved yet")
+                                .arg(back.join(QStringLiteral(", ")), open->name);
+    // Each refusal with its reason: "3 stayed deleted" alone would leave
+    // somebody guessing which, and why.
+    for (quint32 block : std::as_const(left)) {
+        message += QStringLiteral("\n%1 stayed deleted: %2").arg(nameOf(block), why.value(block));
+    }
+    if (left.isEmpty()) {
+        statusBar()->showMessage(message);
+    } else {
+        emit errorOccurred(message);
+    }
+    return message;
 }
 
 bool MainWindow::renameItem(QTreeWidgetItem *item, const QString &name) {

@@ -122,6 +122,7 @@ private slots:
     void anIconIsDrawnTwiceAsTallAsWideInItsWorkbenchColours();
     void theVolumeListedInItsOwnTableIsMarkedAndCannotBeOpened();
     void entriesAreRenamedAndDeletedAndUndoBringsThemBack();
+    void deletedEntriesArePutBackInAnyOrder();
     void aDiskIsRepairedFromTheDiskMenuAndUndoneInOneStep();
     void rowsDroppedOnAFolderMoveAndAFormatAndWipesUndo();
     void aDiskWhoseFreeBlocksHoldAGameAsksBeforeWriting();
@@ -3281,3 +3282,55 @@ void TestMainWindow::aDiskMadeHereSavesWithoutAskingOrBackup() {
 
 QTEST_MAIN(TestMainWindow)
 #include "test_mainwindow.moc"
+
+void TestMainWindow::deletedEntriesArePutBackInAnyOrder() {
+    // F-012 in the window. A folder with a file in it, and a file beside it,
+    // are deleted; asked for in the wrong order — the file inside before its
+    // folder — all three still go back, as one step for Undo.
+    QTemporaryDir dir;
+    const QString disk = blankDisk(dir, QStringLiteral("putback.adf"));
+    const QString note = dir.filePath(QStringLiteral("note"));
+    writeFile(note, QByteArray("a note"));
+    const QString folder = dir.filePath(QStringLiteral("Box"));
+    QVERIFY(QDir().mkpath(folder));
+    writeFile(folder + QStringLiteral("/inside"), QByteArray("in the box"));
+
+    MainWindow window;
+    window.setDiscardConfirmation([](const QString &) { return true; });
+    window.setDeleteConfirmation([](const QString &) { return true; });
+    window.openImage(disk);
+    auto *tree = browser(window);
+    QCOMPARE(window.addFiles(tree->topLevelItem(0), {note, folder}), 3);
+    QTreeWidgetItem *root = tree->topLevelItem(0);
+    QTreeWidgetItem *box = childNamed(root, QStringLiteral("Box"));
+    QVERIFY(box);
+    tree->expandItem(box);
+    QTreeWidgetItem *inside = childNamed(box, QStringLiteral("inside"));
+    QVERIFY(inside);
+    const quint32 boxBlock = box->data(0, tree::RoleBlock).toUInt();
+    const quint32 insideBlock = inside->data(0, tree::RoleBlock).toUInt();
+    const quint32 noteBlock = childNamed(root, QStringLiteral("note"))->data(0, tree::RoleBlock).toUInt();
+
+    QVERIFY(window.deleteItem(childNamed(tree->topLevelItem(0), QStringLiteral("note"))));
+    QVERIFY(window.deleteItem(childNamed(tree->topLevelItem(0), QStringLiteral("Box"))));
+    root = tree->topLevelItem(0);
+    QCOMPARE(root->childCount(), 0);
+
+    const QString said = window.putBackDeleted(root, {insideBlock, noteBlock, boxBlock});
+    QVERIFY2(said.startsWith(QStringLiteral("Put back")) && !said.contains(QStringLiteral("stayed")),
+             qPrintable(said));
+    root = tree->topLevelItem(0);
+    QVERIFY(childNamed(root, QStringLiteral("note")));
+    box = childNamed(root, QStringLiteral("Box"));
+    QVERIFY(box);
+    tree->expandItem(box);
+    QVERIFY(childNamed(box, QStringLiteral("inside")));
+
+    // Putting back what is not deleted says why, and changes nothing.
+    const QString again = window.putBackDeleted(tree->topLevelItem(0), {noteBlock});
+    QVERIFY2(again.contains(QStringLiteral("stayed deleted")), qPrintable(again));
+
+    // One Undo takes all three off again.
+    QVERIFY(window.undoEdit());
+    QCOMPARE(tree->topLevelItem(0)->childCount(), 0);
+}

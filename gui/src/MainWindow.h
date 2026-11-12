@@ -119,6 +119,12 @@ public:
     bool deleteItem(QTreeWidgetItem *item);
     /// Rename the entry `item` is, in the folder it is in.
     bool renameItem(QTreeWidgetItem *item, const QString &name);
+    /// Put back the deleted entries whose headers are at `blocks`, on the
+    /// disk `item` belongs to (F-012), as one step for Undo. Tried until
+    /// nothing more goes back, so a folder is put back before what was in
+    /// it whatever the order. Returns what happened, refusals with their
+    /// reasons — also shown in the status bar.
+    QString putBackDeleted(QTreeWidgetItem *item, const QVector<quint32> &blocks);
     /// Repair the disk `item` belongs to (F-034): its bitmap, and entries
     /// filed under the wrong hash slot, as one step for Undo. Blocks nothing
     /// reaches stay marked used. Returns the report — also sent through

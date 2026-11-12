@@ -214,7 +214,7 @@ fn run(
     if !done.exists() {
         let tail: Vec<&str> = log.lines().rev().take(25).collect();
         return Err(format!(
-            "no marker after {:?}: {resets} resets, {illegal} illegal instructions; \
+            "{name}: no marker after {:?}: {resets} resets, {illegal} illegal instructions; \
              the log ends\n{}",
             start.elapsed(),
             tail.into_iter().rev().collect::<Vec<_>>().join("\n")
@@ -520,4 +520,114 @@ fn a_blank_dircache_disk_is_laid_out_as_format_lays_it_out() {
         }
     }
     assert_eq!(a, b, "the rootblock, datestamps aside");
+}
+
+#[test]
+fn what_amigados_deletes_ade_puts_back_and_amigados_reads_again() {
+    // F-012 against the filesystem that did the deleting. AmigaDOS writes
+    // files onto OFS, FFS and dircache disks and deletes them — a file, one
+    // big enough for an extension block, a file in a directory, and then the
+    // directory — and ADE puts each back, directory first. AmigaDOS must then
+    // find every file by name with its bytes, and write into the restored
+    // directory.
+    let Some(setup) = setup() else { return };
+    let dir = scratch("undelete");
+    let small = pattern(700, 1);
+    let big = pattern(40_000, 2);
+    let inner = pattern(1_500, 3);
+    let mut disks = Vec::new();
+    for (flags, label) in [(0u8, "OFS"), (1, "FFS"), (5, "DC")] {
+        let blank = format::blank(Geometry::DD_FLOPPY, dostype(flags), label, WHEN).unwrap();
+        disks.push(floppy(&dir, &format!("{label}.adf"), &blank));
+    }
+    let paths: Vec<&Path> = disks.iter().map(PathBuf::as_path).collect();
+    let inputs: [(&str, &[u8]); 3] = [("small", &small), ("big", &big), ("inner", &inner)];
+    // Written and deleted in separate runs, as a person does. Deleted in the
+    // same run, a dircache file's header reached the disk still saying 0
+    // bytes: AmigaDOS writes a header when the file is opened and its size
+    // when it is closed, into a buffer that a `Delete` straight after throws
+    // away (SPEC §Deletion).
+    let mut written = String::new();
+    let mut deleted = String::new();
+    for v in ["OFS", "FFS", "DC"] {
+        let _ = write!(
+            written,
+            "C:Copy SYS:in/small {v}:small.bin\nC:Copy SYS:in/big {v}:big.bin\n\
+             C:MakeDir {v}:Drawer\nC:Copy SYS:in/inner {v}:Drawer/inner.bin\n\
+             C:Copy SYS:in/small {v}:keep.bin\n"
+        );
+        let _ = write!(
+            deleted,
+            "C:Delete {v}:small.bin\nC:Delete {v}:big.bin\n\
+             C:Delete {v}:Drawer/inner.bin\nC:Delete {v}:Drawer\n"
+        );
+    }
+    for (step, commands) in [("undelete-1", &written), ("undelete-2", &deleted)] {
+        run(
+            &setup,
+            step,
+            &paths,
+            &inputs,
+            commands,
+            Duration::from_secs(90),
+        )
+        .unwrap();
+    }
+
+    for disk in &disks {
+        let mut s = Session::from_bytes(fs::read(disk).unwrap()).unwrap();
+        s.set_clock(Some(WHEN));
+        let found = ade_core::carve::carve(&Image::from_bytes(s.bytes().to_vec()).unwrap());
+        let block = |name: &str| found.iter().find(|c| c.name == name).unwrap().block;
+        let drawer = block("Drawer");
+        let inner_block = block("inner.bin");
+        // The file cannot come back before the directory it was in.
+        assert!(s.undelete(inner_block).is_err(), "{}", disk.display());
+        for b in [drawer, inner_block, block("big.bin"), block("small.bin")] {
+            s.undelete(b)
+                .unwrap_or_else(|e| panic!("{}: block {b}: {e}", disk.display()));
+        }
+        fs::write(disk, s.bytes()).unwrap();
+    }
+
+    let mut commands = String::new();
+    for v in ["OFS", "FFS", "DC"] {
+        let _ = write!(
+            commands,
+            "C:Copy {v}:small.bin SYS:out/{v}-small\nC:Copy {v}:big.bin SYS:out/{v}-big\n\
+             C:Copy {v}:Drawer/inner.bin SYS:out/{v}-inner\n\
+             C:Copy SYS:in/small {v}:Drawer/again.bin\n"
+        );
+    }
+    let outcome = run(
+        &setup,
+        "undelete-3",
+        &paths,
+        &inputs,
+        &commands,
+        Duration::from_secs(90),
+    )
+    .unwrap();
+    for v in ["OFS", "FFS", "DC"] {
+        for (name, data) in [("small", &small), ("big", &big), ("inner", &inner)] {
+            let got = fs::read(outcome.out.join(format!("{v}-{name}")))
+                .unwrap_or_else(|_| panic!("{v}: AmigaDOS did not find {name} after undelete"));
+            assert!(&got == data, "{v}: {name} came back with different bytes");
+        }
+    }
+    for (disk, v) in disks.iter().zip(["OFS", "FFS", "DC"]) {
+        let bytes = fs::read(disk).unwrap();
+        let health = ade_core::health::examine(bytes.clone());
+        let faults: Vec<String> = health
+            .findings
+            .iter()
+            .filter(|f| f.severity >= ade_core::Severity::Warning)
+            .map(|f| format!("{}: {}", f.code, f.message))
+            .collect();
+        assert!(faults.is_empty(), "{v}: {faults:?}");
+        let image = Image::from_bytes(bytes).unwrap();
+        let volume = image.volume().unwrap();
+        let again = volume.lookup("Drawer/again.bin").unwrap();
+        assert!(volume.read_file(&again).unwrap().bytes == small, "{v}");
+    }
 }

@@ -226,6 +226,10 @@ int main(int argc, char **argv) {
                           ADE_REFUSED &&
                       ade_edit_delete(NULL, 0, true, NULL) == ADE_NULL_ARGUMENT,
                   "the root cannot be deleted or renamed");
+            /* Undelete (F-012): the root was never deleted; NULL tolerated. */
+            check(ade_edit_undelete(image, ade_image_root_block(image), NULL) == ADE_REFUSED &&
+                      ade_edit_undelete(NULL, 0, NULL) == ADE_NULL_ARGUMENT,
+                  "the root is not something to undelete");
 
             /* Repairing (F-034): a report either way, and NULL tolerated. */
             char *report = NULL;

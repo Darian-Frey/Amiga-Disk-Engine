@@ -108,6 +108,8 @@ pub enum EditError {
     },
     /// The entry cannot be deleted or renamed, and why.
     NotRemovable(String),
+    /// The deleted entry cannot be put back, and why (F-012).
+    NotRestorable(String),
     /// Something in the parent already has that name.
     Exists {
         /// The name, as stored on the disk.
@@ -143,7 +145,8 @@ impl core::fmt::Display for EditError {
             | Self::BitmapUntrusted(why)
             | Self::Damaged(why)
             | Self::NotNeeded(why)
-            | Self::NotRemovable(why) => f.write_str(why),
+            | Self::NotRemovable(why)
+            | Self::NotRestorable(why) => f.write_str(why),
             Self::NotADirectory { block } => {
                 write!(f, "block {block} is not a directory ADE can write into")
             }
@@ -399,6 +402,157 @@ pub fn delete(
     };
     apply(image, geometry, &writes);
     Ok(())
+}
+
+/// Put back the deleted file or directory whose header is at `block` (F-012).
+///
+/// The exact inverse of AmigaDOS's `Delete`, which — measured in FS-UAE
+/// under Workbench 3.1 (D-023) — changes only the parent's hash table and
+/// datestamps, the bitmap, and the parent's cache, and leaves the deleted
+/// header, its extension blocks and its data blocks byte for byte as they
+/// were. So the header goes back into its parent's hash chain, every block it
+/// needs is marked used again, its cache record is rebuilt from the header,
+/// and the parent's datestamps move as for any edit. The header itself
+/// changes only in its hash-chain field — and a directory's in its cache
+/// pointer, when its old cache block has been reused.
+///
+/// Refused, with the reason, rather than guessed at: when a block it needs is
+/// in use again, when its directory is deleted too (put that back first),
+/// when its name has been taken in that directory, when a hard link is part
+/// of it, and when a directory still lists entries — `Delete` empties one
+/// before removing it, so a full table means some other tool, and putting it
+/// back would bring back entries nobody asked for.
+///
+/// # Errors
+/// [`EditError::NotRestorable`] for each refusal above; otherwise as
+/// [`make_dir`]. The image is unchanged whenever one is returned.
+pub fn undelete(
+    image: &mut [u8],
+    geometry: Geometry,
+    block: u32,
+    when: Stamp,
+) -> Result<(), EditError> {
+    let writes = {
+        let source = Slice { image, geometry };
+        let (entry, parent) = restorable(&source, block)?;
+        let mut plan = Plan::new(&source, parent, &entry.name)?;
+        let used = plan.blocks_used_elsewhere(block)?;
+        let mut blocks = vec![block];
+        if entry.kind == EntryKind::File {
+            blocks.extend(plan.volume.file_blocks(&entry)?);
+        }
+        let mut seen = HashSet::new();
+        blocks.retain(|b| seen.insert(*b));
+        for &b in &blocks {
+            if used.contains(&b) || !plan.is_free(b) {
+                return Err(EditError::NotRestorable(format!(
+                    "block {b}, which {} needs, is in use again; `ade carve` may still recover \
+                     what is left of it",
+                    entry.name_lossy()
+                )));
+            }
+        }
+        for &b in &blocks {
+            plan.claim(b);
+        }
+        if entry.kind == EntryKind::Directory && plan.volume.has_dircache() {
+            plan.restore_cache(&entry, &used)?;
+        }
+        plan.insert(block, &entry.name)?;
+        plan.touch(when)?;
+        if plan.volume.has_dircache() {
+            let header = plan.read(block)?;
+            let restored = crate::entry::Entry::parse(&header, block)
+                .map_err(|_| EditError::NotRestorable(format!("block {block} cannot be read")))?;
+            let record = Record {
+                header: block,
+                size: if restored.kind == EntryKind::File {
+                    restored.byte_size
+                } else {
+                    0
+                },
+                protection: restored.protection,
+                uid: restored.uid,
+                gid: restored.gid,
+                altered: restored.altered,
+                // The record holds the secondary type as one signed byte.
+                secondary_type: i8::from_ne_bytes([
+                    u8::try_from(restored.secondary_type & 0xFF).unwrap_or(0)
+                ]),
+                name: restored.name.clone(),
+                comment: restored.comment.clone(),
+            };
+            plan.rewrite_cache(|records| records.push(record))?;
+        }
+        plan.finish()
+    };
+    apply(image, geometry, &writes);
+    Ok(())
+}
+
+/// The deleted entry at `block` and the directory it goes back into, if it
+/// is one ADE will put back.
+fn restorable(
+    source: &dyn BlockSource,
+    block: u32,
+) -> Result<(crate::entry::Entry, u32), EditError> {
+    let volume = Volume::mount(source)?;
+    let refuse = |why: String| Err(EditError::NotRestorable(why));
+    let Ok(entry) = volume.entry_at(block) else {
+        return refuse(format!("block {block} is not a directory entry"));
+    };
+    if !entry.looks_like_an_entry() {
+        return refuse(format!("block {block} does not hold a sound entry header"));
+    }
+    let name = entry.name_lossy();
+    match entry.kind {
+        EntryKind::File | EntryKind::Directory => {}
+        EntryKind::HardLinkFile | EntryKind::HardLinkDir => {
+            return refuse(format!(
+                "{name} is a hard link; ADE does not rewrite link chains, so it will not put \
+                 one back"
+            ));
+        }
+        _ => return refuse(format!("{name} is not a file or a directory")),
+    }
+    if entry.next_link != 0 {
+        return refuse(format!(
+            "{name} had a hard link to it; ADE does not rewrite link chains, so it will not \
+             put it back"
+        ));
+    }
+    let root = volume.root();
+    let live: HashSet<u32> = volume
+        .walk(root)?
+        .entries
+        .iter()
+        .map(|(_, e)| e.block)
+        .chain([root])
+        .collect();
+    if live.contains(&block) {
+        return refuse(format!("{name} is not deleted"));
+    }
+    let parent = entry.parent;
+    if !live.contains(&parent) {
+        let deleted = volume
+            .entry_at(parent)
+            .is_ok_and(|p| p.looks_like_an_entry() && p.kind == EntryKind::Directory);
+        return refuse(if deleted {
+            format!("{name}'s directory, at block {parent}, is deleted too; put that back first")
+        } else {
+            format!("{name}'s header names block {parent} as its directory, which is not one")
+        });
+    }
+    if entry.kind == EntryKind::Directory {
+        let listed = volume.list(block).map_or(0, |l| l.entries.len());
+        if listed > 0 {
+            return refuse(format!(
+                "{name} still lists {listed} entries; AmigaDOS empties a directory before \
+                 deleting it, so ADE will not bring them back with it"
+            ));
+        }
+    }
+    Ok((entry, parent))
 }
 
 /// Rename the entry at `block` to `name`, in the same directory.
@@ -918,6 +1072,47 @@ impl<'a> Plan<'a> {
         self.taken_set.insert(block);
         self.cursor = u64::from(block).saturating_add(1);
         Ok(block)
+    }
+
+    /// Take a particular block, as putting a deleted entry back takes the
+    /// ones it already had. The caller has checked that it is free.
+    fn claim(&mut self, block: u32) {
+        if self.taken_set.insert(block) {
+            self.taken.push(block);
+        }
+    }
+
+    /// Give a directory being put back an empty cache block (BUG-025:
+    /// AmigaDOS's filesystem cannot write into a directory without one).
+    ///
+    /// Written fresh, not reused as found: the directory is empty — that was
+    /// checked — but its old cache need not say so. Measured in FS-UAE,
+    /// `Delete` of a file inside a directory and then of the directory left
+    /// the directory's cache block still listing the file. The old first
+    /// block is reused when it is free, so the header is untouched; otherwise
+    /// a new one is taken.
+    fn restore_cache(
+        &mut self,
+        entry: &crate::entry::Entry,
+        used: &HashSet<u32>,
+    ) -> Result<(), EditError> {
+        let dir = entry.block;
+        let old = entry.extension;
+        let cache = if old != 0 && !used.contains(&old) && self.is_free(old) {
+            self.claim(old);
+            old
+        } else {
+            self.allocate()?
+        };
+        let empty = self.cache_block(cache, dir, &[], 0);
+        self.put(cache, empty);
+        if cache != old {
+            let mut header = self.read(dir)?;
+            let _ = put_back(&mut header, 8, cache);
+            seal(&mut header);
+            self.put(dir, header);
+        }
+        Ok(())
     }
 
     /// A block as this plan currently has it: a pending write, or the disk.

@@ -2129,6 +2129,27 @@ fn an_entry_is_renamed_and_deleted_through_the_abi() {
         assert_eq!(ade::ade_edit_undo(image), AdeResult::Ok);
         assert_eq!(names(image), vec![b"final".to_vec()], "undo brings it back");
 
+        // Deleted again, and put back by undelete rather than undo (F-012);
+        // undeleting what is not deleted is refused.
+        assert_eq!(
+            ade::ade_edit_delete(image, block, false, std::ptr::null_mut()),
+            AdeResult::Ok
+        );
+        assert_eq!(names(image), Vec::<Vec<u8>>::new());
+        assert_eq!(
+            ade::ade_edit_undelete(image, block, std::ptr::null_mut()),
+            AdeResult::Ok
+        );
+        assert_eq!(
+            names(image),
+            vec![b"final".to_vec()],
+            "undelete brings it back"
+        );
+        assert_eq!(
+            ade::ade_edit_undelete(image, block, std::ptr::null_mut()),
+            AdeResult::Refused
+        );
+
         // Null is tolerated.
         assert_eq!(
             ade::ade_edit_delete(std::ptr::null_mut(), 0, false, std::ptr::null_mut()),

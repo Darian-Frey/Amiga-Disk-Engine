@@ -308,6 +308,41 @@ impl Session {
             .map(|_| ())
     }
 
+    /// Put back the deleted file or directory whose header is at `block`
+    /// (F-012) — the inverse of [`Self::delete`] and of AmigaDOS's `Delete`.
+    ///
+    /// Kept, like every edit, only if the health report finds nothing new.
+    /// Refused when the filesystem layer refuses (a block in use again, a
+    /// deleted directory, a name taken — see
+    /// [`ade_filesystem::edit::undelete`]), and when an OFS file is only
+    /// partly confirmed by its own data blocks: some of them name another
+    /// header or fail their checksums, so their contents are not this file's,
+    /// and putting it back would present them as if they were. An FFS file
+    /// cannot be confirmed either way and is put back; [`crate::carve`] says
+    /// how far its contents can be trusted.
+    ///
+    /// # Errors
+    /// See [`EditError`]. A refused edit leaves the session as it was.
+    pub fn undelete(&mut self, block: u32) -> Result<(), EditError> {
+        if let Ok(image) = crate::Image::from_bytes(self.bytes.clone()) {
+            let found = crate::carve::carve(&image);
+            if let Some(c) = found.iter().find(|c| c.block == block)
+                && let crate::carve::Evidence::Partial { good, bad } = c.evidence
+            {
+                return Err(EditError::Refused(FsEditError::NotRestorable(format!(
+                    "{}: {bad} of its data blocks no longer name it and {good} do, so part of \
+                     its contents is something else now; `ade carve` recovers the part that \
+                     is still its own",
+                    c.name
+                ))));
+            }
+        }
+        let geometry = self.geometry;
+        let when = self.now();
+        self.edit(|bytes| fs_edit::undelete(bytes, geometry, block, when).map(|()| block))
+            .map(|_| ())
+    }
+
     /// Delete the entry at `block` and, if it is a directory, everything in
     /// it — deepest first, as one step for undo (IMP-014). Returns how many
     /// entries went.

@@ -396,6 +396,40 @@ fn rm_and_rename_write_new_images_and_a_deleted_file_carves_back() {
         found.iter().any(|b| b == b"a file to lose and find\n"),
         "the deleted file carves back byte for byte"
     );
+
+    // And undelete puts it back on the disk itself (F-012), by name; asked
+    // again, there is nothing deleted by that name, and nothing is saved.
+    let back = dir.join("back.adf");
+    let (out, err, code) = run(&[
+        "undelete",
+        gone.to_str().unwrap(),
+        "Kept",
+        &format!("--output={}", back.display()),
+    ]);
+    assert_eq!(code, Some(0), "{err}");
+    assert!(
+        out.contains("put back Kept") && out.contains("names it"),
+        "{out}"
+    );
+    let copy = dir.join("kept.txt");
+    let (_, err, code) = run(&[
+        "extract",
+        back.to_str().unwrap(),
+        "Kept",
+        copy.to_str().unwrap(),
+    ]);
+    assert_eq!(code, Some(0), "{err}");
+    assert_eq!(fs::read(&copy).unwrap(), b"a file to lose and find\n");
+    let twice = dir.join("twice.adf");
+    let (_, err, code) = run(&[
+        "undelete",
+        back.to_str().unwrap(),
+        "Kept",
+        &format!("--output={}", twice.display()),
+    ]);
+    assert_eq!(code, Some(2), "{err}");
+    assert!(err.contains("no deleted entry is called Kept"), "{err}");
+    assert!(!twice.exists(), "a refused edit saves nothing");
     let _ = fs::remove_dir_all(&dir);
 }
 

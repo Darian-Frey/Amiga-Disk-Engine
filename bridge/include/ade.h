@@ -860,6 +860,17 @@ AdeResult ade_edit_add_file(AdeImage *image, uint32_t parent, AdeBytes name,
  * ADE_REFUSED for the root, a directory with entries when `all` is false, or
  * anything a hard link is part of (ADE does not rewrite link chains yet). */
 AdeResult ade_edit_delete(AdeImage *image, uint32_t block, bool all, char **out_message);
+/* Put back the deleted file or directory whose header is at `block`, as
+ * ade_image_carve lists them (F-012): back into its directory, its blocks
+ * marked used again, its cache record rebuilt. One undo step.
+ *
+ * ADE_REFUSED, with the reason, when a block it needs is in use again, its
+ * directory is deleted too (put that back first), an OFS file's data blocks
+ * no longer all name it, a hard link is part of it, or it is not deleted.
+ * ADE_ALREADY_EXISTS when its name has been taken in that directory. An FFS
+ * file is put back, but nothing confirms its contents: the carve's evidence
+ * says so. */
+AdeResult ade_edit_undelete(AdeImage *image, uint32_t block, char **out_message);
 /* Rename the entry at `block`, in the directory it is in. `name` as for
  * ade_edit_mkdir. ADE_ALREADY_EXISTS when another entry has the name; a change
  * of case alone is allowed. ADE_REFUSED for the root. */

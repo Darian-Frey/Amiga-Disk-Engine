@@ -666,6 +666,15 @@ public:
         r.block = block;
         return r;
     }
+    // F-012: put back a deleted entry, by its header's block as carve lists it.
+    EditResult undeleteEntry(quint32 block) {
+        EditResult r;
+        char *why = nullptr;
+        r.code = ade_edit_undelete(m_raw, block, &why);
+        r.message = take(why);
+        r.block = block;
+        return r;
+    }
     EditResult renameEntry(quint32 block, const QByteArray &name) {
         EditResult r;
         char *why = nullptr;
