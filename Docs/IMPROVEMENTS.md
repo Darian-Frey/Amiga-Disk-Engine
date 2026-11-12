@@ -11,7 +11,19 @@ Effort vocabulary: trivial | small | medium | large.
 
 ## Suggested
 
-_None._
+### IMP-021 `ade extract <image> <path> -` writes a file called `-` rather than to standard output
+**Status:** suggested
+**Effort:** trivial
+**Found:** 2026-11-12, writing F-012's CLI test: `ade extract back.adf Kept -` exited 0, printed nothing, and left a 24-byte file named `-` in the working directory — `cli/-`, which then went into commit 879d9e8 unnoticed and was removed the next commit.
+
+**Where:** [cli/src/main.rs](../cli/src/main.rs), `extract`, which takes the third positional argument as a destination path without looking at it.
+
+**What it does.** With no destination, `extract` already writes the file's bytes to standard output. Given `-`, the Unix spelling of "standard output" that `tar`, `gzip -c` and most tools a script writer knows accept, it treats it as a filename and creates `-` in the current directory, with exit 0. A script that expects the bytes on its pipe gets nothing, and a stray file appears wherever it ran.
+
+**What would be better.** Read `-` as standard output, the same as no destination — including refusing `--format=json` with it, as that case already is refused. The other commands that take an output path (`--output=`, `extract --all <dir>`, `carve --all <dir>`, `convert <out>`) should get the same look: either `-` means standard output where a single stream makes sense, or it is refused with the reason, never taken as a filename.
+
+**Trade-offs.** A file genuinely named `-` could no longer be written by passing `-`; it would need `./-`, which is the convention every tool that reads `-` already imposes. Commands whose output is an image (`--output=`) have no use for standard output, since D-018's atomic save renames a temporary file into place, so for those the honest answer is a refusal rather than a new meaning.
+
 
 ## Applied
 
