@@ -35,6 +35,15 @@ pub struct Bitmap {
     covered: u32,
     /// The bitmap blocks themselves, in order.
     pub blocks: Vec<u32>,
+    /// The `bm_ext` blocks the map's pointers past the rootblock's 25 were
+    /// read from, in chain order. Blocks the volume uses like the bitmap's
+    /// own, which nothing else reaches: a health report that left them out
+    /// would call every large hardfile's chain orphaned.
+    pub extensions: Vec<u32>,
+    /// [`Self::blocks`] and [`Self::extensions`] together, for
+    /// [`Self::is_own_block`]: asked once per block of the volume, which on a
+    /// large hardfile is millions of times over hundreds of bitmap blocks.
+    own: HashSet<u32>,
     /// Bitmap blocks whose checksum did not verify.
     pub bad_checksums: Vec<u32>,
     /// Pointers the rootblock or an extension block gives for the bitmap
@@ -83,6 +92,7 @@ impl Bitmap {
         let mut next_ext = root.bitmap_extension;
         let mut buf = vec![0u8; bsize];
         let mut bad_ext: Option<u32> = None;
+        let mut extensions: Vec<u32> = Vec::new();
         while next_ext != 0 && seen.insert(next_ext) {
             if geometry.validate(BlockIndex(u64::from(next_ext))).is_err() {
                 bad_ext = Some(next_ext);
@@ -91,6 +101,7 @@ impl Bitmap {
             if read_at(source, BlockIndex(u64::from(next_ext)), &mut buf).is_err() {
                 break;
             }
+            extensions.push(next_ext);
             let slots = bsize.saturating_div(4).saturating_sub(1);
             for i in 0..slots {
                 if let Ok(p) = u32_at(&buf, i.saturating_mul(4))
@@ -150,12 +161,21 @@ impl Bitmap {
         Ok(Self {
             allocated,
             covered,
+            own: pointers.iter().chain(&extensions).copied().collect(),
             blocks: pointers,
+            extensions,
             bad_checksums,
             out_of_range,
             flagged_valid: root.bitmap_flag_valid(),
             incomplete: bit_base < u64::from(covered),
         })
+    }
+
+    /// Whether `block` is one of the bitmap's own: a bitmap block, or a
+    /// `bm_ext` block of its chain.
+    #[must_use]
+    pub fn is_own_block(&self, block: u32) -> bool {
+        self.own.contains(&block)
     }
 
     /// Build the bitmap a volume *should* have, from the blocks its tree

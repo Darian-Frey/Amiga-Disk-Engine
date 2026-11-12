@@ -168,16 +168,13 @@ fn bitmap_layout<S: BuildHasher>(
              ADE does not choose where a bitmap goes"
         )));
     }
-    if volume.rootblock().bitmap_extension != 0 {
-        return Err(EditError::Unsupported(
-            "this volume's bitmap continues in an extension chain, which ADE does not write"
-                .to_owned(),
-        ));
-    }
     let root = volume.root();
     let reserved = geometry.reserved();
     let mut pages: HashSet<u32> = HashSet::new();
-    for &page in &bitmap.blocks {
+    // The `bm_ext` chain is the bitmap's own as much as its pages are: kept
+    // marked used, and held to the same checks. Its blocks are not rewritten
+    // — the chain is sound or this refuses — only the pages they list.
+    for &page in bitmap.blocks.iter().chain(&bitmap.extensions) {
         if page < reserved || page == root {
             return Err(EditError::Damaged(format!(
                 "the rootblock names block {page} as part of its bitmap, which is a boot \

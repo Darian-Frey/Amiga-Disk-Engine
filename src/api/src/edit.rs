@@ -555,11 +555,19 @@ impl Session {
         // cannot disagree with what `blank_named` laid out.
         let mut blocks: Vec<u32> = (0..self.geometry.reserved()).collect();
         {
-            let fresh = crate::Image::from_bytes(blank.clone())
+            let image = crate::Image::from_bytes(blank.clone())
                 .map_err(|e| EditError::NotEditable(e.to_string()))?;
-            let fresh = fresh.volume().map_err(EditError::Lookup)?;
+            let fresh = image.volume().map_err(EditError::Lookup)?;
             blocks.push(fresh.root());
-            blocks.extend(fresh.rootblock().bitmap_pages.iter().filter(|&&b| b != 0));
+            // Every bitmap block and the `bm_ext` chain listing those past
+            // the rootblock's 25 — a large hardfile's map is mostly there.
+            let map = ade_filesystem::bitmap::Bitmap::read(
+                image.source(),
+                fresh.geometry(),
+                fresh.rootblock(),
+            )
+            .map_err(|e| EditError::NotEditable(e.to_string()))?;
+            blocks.extend(map.blocks.iter().chain(&map.extensions));
             if fresh.rootblock().dircache != 0 {
                 blocks.push(fresh.rootblock().dircache);
             }

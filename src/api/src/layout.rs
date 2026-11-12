@@ -234,7 +234,7 @@ pub(crate) fn attribute(image: &crate::Image) -> (BTreeMap<u64, Owned>, bool) {
     if let Ok(bitmap) =
         ade_filesystem::bitmap::Bitmap::read(image.source(), volume.geometry(), volume.rootblock())
     {
-        for &block in &bitmap.blocks {
+        for &block in bitmap.blocks.iter().chain(&bitmap.extensions) {
             out.insert(u64::from(block), (Region::Bitmap, None, None));
         }
     }

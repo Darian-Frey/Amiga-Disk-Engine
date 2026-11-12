@@ -1297,7 +1297,7 @@ impl<'a> Plan<'a> {
     fn is_free(&self, block: u32) -> bool {
         block != self.volume.root()
             && !self.bitmap.is_allocated(block)
-            && !self.bitmap.blocks.contains(&block)
+            && !self.bitmap.is_own_block(block)
             && !self.taken_set.contains(&block)
     }
 

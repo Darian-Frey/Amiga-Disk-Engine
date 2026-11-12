@@ -1555,7 +1555,16 @@ void MainWindow::newDisk() {
     shape->addItem(QStringLiteral("Hard disk"), ADE_DISK_HARD);
 
     auto *megabytes = new QSpinBox(&dialog);
-    megabytes->setRange(1, 49);  // past 49 a bitmap extension chain is needed
+    // AmigaDOS addresses 4 GB, and `ade create` makes up to that; the window
+    // stops at 1 GB because it holds a disk whole in memory and an edit
+    // copies it, which at 4 GB is several times that in RAM (ROADMAP §Phase
+    // 6, Scale). Past 49 MB the bitmap continues in a bm_ext chain, which
+    // ADE writes as AmigaDOS's Format does.
+    megabytes->setRange(1, 1024);
+    megabytes->setObjectName(QStringLiteral("newDiskMegabytes"));
+    megabytes->setToolTip(QStringLiteral(
+        "Up to 1 GB here. The command line makes up to the 4 GB an AmigaDOS volume can\n"
+        "address; the window holds a disk whole while it is edited, so it stops lower."));
     megabytes->setValue(8);
     megabytes->setSuffix(QStringLiteral(" MB"));
     megabytes->setEnabled(false);

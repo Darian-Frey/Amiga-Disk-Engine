@@ -135,6 +135,21 @@ fn run(
     commands: &str,
     limit: Duration,
 ) -> Result<Outcome, String> {
+    run_with(setup, name, (floppies, &[]), inputs, commands, limit)
+}
+
+/// As [`run`], with `hardfiles` mounted as `DH1:`, `DH2:` … beside the
+/// floppies. A raw hardfile is given FS-UAE's default geometry — 32 sectors,
+/// 1 surface, 2 reserved blocks — which is the shape ADE writes, and which
+/// stops at 65,535 cylinders: a little under 1 GB.
+fn run_with(
+    setup: &Setup,
+    name: &str,
+    (floppies, hardfiles): (&[&Path], &[&Path]),
+    inputs: &[(&str, &[u8])],
+    commands: &str,
+    limit: Duration,
+) -> Result<Outcome, String> {
     let _one = ONE_AT_A_TIME
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -158,6 +173,9 @@ fn run(
     for drive in 0..floppies.len() {
         let _ = writeln!(script, "C:Lock DF{drive}: ON");
     }
+    for unit in 1..=hardfiles.len() {
+        let _ = writeln!(script, "C:Lock DH{unit}: ON");
+    }
     script.push_str("C:Wait 3\nEcho \"done\" >SYS:out/done\nEndCLI\n");
     fs::write(boot.join("S/Startup-Sequence"), latin1(&script)).unwrap();
 
@@ -172,6 +190,9 @@ fn run(
     );
     for (drive, floppy) in floppies.iter().enumerate() {
         let _ = writeln!(config, "floppy_drive_{drive} = {}", floppy.display());
+    }
+    for (unit, hardfile) in hardfiles.iter().enumerate() {
+        let _ = writeln!(config, "hard_drive_{} = {}", unit + 1, hardfile.display());
     }
     let cfg = dir.join("run.fs-uae");
     fs::write(&cfg, config).unwrap();
@@ -891,4 +912,92 @@ fn a_run_that_times_out_keeps_a_screenshot_of_the_amiga() {
     } else {
         assert!(failed.contains("no screenshot"), "{failed}");
     }
+}
+
+#[test]
+fn large_hardfiles_need_a_bitmap_chain_and_amigados_reads_and_writes_both_ways() {
+    // Past 25 bitmap blocks — a hard disk above about 50 MB — the rest are
+    // listed in a `bm_ext` chain, which ADE now writes. A 330 MB hardfile has
+    // 167 bitmap blocks and two extension blocks; the blocks around the
+    // rootblock, where both AmigaDOS and ADE allocate first, are mapped by
+    // pages only the chain lists. ADE makes it and writes a file; AmigaDOS
+    // reads it and writes its own. AmigaDOS formats a 100 MB one; ADE writes
+    // a file onto it; AmigaDOS reads that.
+    let Some(setup) = setup() else { return };
+    let dir = scratch("bighd");
+    fs::create_dir_all(&dir).unwrap();
+    let payload = pattern(300_000, 12);
+    let theirs = pattern(200_000, 13);
+
+    let shape = ade_core::create::Shape::Hard(330);
+    let geometry = shape.geometry().unwrap();
+    let blank = format::blank(geometry, dostype(1), "BigF", WHEN).unwrap();
+    let mut s = Session::from_bytes(blank).unwrap();
+    s.set_clock(Some(WHEN));
+    let root = s.root();
+    let sub = s.make_dir(root, b"Dir").unwrap();
+    s.add_file(sub, b"payload.bin", &payload).unwrap();
+    let ade_made = dir.join("ade330.hdf");
+    fs::write(&ade_made, s.bytes()).unwrap();
+    drop(s);
+    let zeros = dir.join("zeros100.hdf");
+    fs::File::create(&zeros)
+        .unwrap()
+        .set_len(100 * 1024 * 1024)
+        .unwrap();
+
+    let commands = "SYS:System/Format DRIVE DH2: NAME Fmt FFS NOICONS QUICK <S:cr >NIL:\n\
+                    C:Copy BigF:Dir/payload.bin SYS:out/payload\n\
+                    C:Copy SYS:in/theirs BigF:theirs.bin\n\
+                    C:MakeDir BigF:Theirs\n";
+    let outcome = run_with(
+        &setup,
+        "bighd-1",
+        (&[], &[&ade_made, &zeros]),
+        &[("theirs", &theirs)],
+        commands,
+        Duration::from_secs(120),
+    )
+    .unwrap();
+    let got = fs::read(outcome.out.join("payload")).unwrap();
+    assert!(
+        got == payload,
+        "AmigaDOS read different bytes from ADE's 330 MB hardfile"
+    );
+    assert!(
+        faults_on(&ade_made).is_empty(),
+        "{:?}",
+        faults_on(&ade_made)
+    );
+    let image = Image::from_bytes(fs::read(&ade_made).unwrap()).unwrap();
+    let volume = image.volume().unwrap();
+    let entry = volume.lookup("theirs.bin").unwrap();
+    assert!(volume.read_file(&entry).unwrap().bytes == theirs);
+    assert!(volume.lookup("Theirs").is_ok());
+    drop(image);
+
+    // AmigaDOS's own 100 MB volume: ADE finds it sound, writes a file onto
+    // it, and AmigaDOS reads that back.
+    assert!(faults_on(&zeros).is_empty(), "{:?}", faults_on(&zeros));
+    let mut s = Session::from_bytes(fs::read(&zeros).unwrap()).unwrap();
+    s.set_clock(Some(WHEN));
+    let root = s.root();
+    s.add_file(root, b"from-ade.bin", &payload).unwrap();
+    fs::write(&zeros, s.bytes()).unwrap();
+    drop(s);
+    let outcome = run_with(
+        &setup,
+        "bighd-2",
+        (&[], &[&ade_made, &zeros]),
+        &[],
+        "C:Copy Fmt:from-ade.bin SYS:out/from-ade\n",
+        Duration::from_secs(90),
+    )
+    .unwrap();
+    let got = fs::read(outcome.out.join("from-ade")).unwrap();
+    assert!(
+        got == payload,
+        "AmigaDOS read different bytes from its own volume after ADE wrote"
+    );
+    assert!(faults_on(&zeros).is_empty(), "{:?}", faults_on(&zeros));
 }

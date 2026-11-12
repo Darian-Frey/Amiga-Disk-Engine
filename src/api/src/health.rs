@@ -1362,7 +1362,8 @@ fn cross_check_bitmap(
     // had marked free (BUG-015).
     let mut referenced = referenced.clone();
     referenced.insert(volume.root());
-    for &b in &bitmap.blocks {
+    // The `bm_ext` chain is the bitmap's too: nothing else reaches it.
+    for &b in bitmap.blocks.iter().chain(&bitmap.extensions) {
         if !bitmap.out_of_range.contains(&b) {
             referenced.insert(b);
         }
@@ -1568,7 +1569,7 @@ fn free_holding_data(
     let mut deleted: HashSet<u32> = HashSet::new();
     for b in start..end {
         let Ok(b) = u32::try_from(b) else { break };
-        if bitmap.is_allocated(b) || referenced.contains(&b) || bitmap.blocks.contains(&b) {
+        if bitmap.is_allocated(b) || referenced.contains(&b) || bitmap.is_own_block(b) {
             continue;
         }
         let Some(raw) = read(b) else { continue };

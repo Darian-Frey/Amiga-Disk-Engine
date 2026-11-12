@@ -513,6 +513,12 @@ If 25 bitmap pointers are insufficient (hard disks above roughly 50 MB), further
 
 Note this block has **no checksum**.
 
+**Where `Format` puts them, measured (F-038, 2026-11-12).** In FS-UAE, Workbench 3.1's `Format … FFS QUICK` on zeroed 100 MB and 500 MB hardfiles: the 25 bitmap blocks the rootblock names come straight after it, and **each extension block sits directly before the bitmap blocks it lists**, the next extension after those. On 500 MB (1,024,000 blocks, 252 bitmap blocks): root 512000; pages 512001–512025; extension 512026 listing 512027–512153 (127, a full block); extension 512154 listing 512155–512254 and ending the chain — 255 blocks in use, as `Info` reports. 100 MB: 51 pages, one extension at 102426, 53 blocks in use. ADE's formatter lays a volume out the same way: the same blocks in use, every bitmap block and extension block equal byte for byte but the last bitmap block's bits past the volume's end (§Repairing a volume), and the rootblock equal but for its datestamps and one field below.
+
+**One field `Format` writes that ADE does not.** On a volume without the dircache bit, `Format` puts the number of the **first bitmap block** in the root's `extension` (`BSIZE-8`) — 102401 on 100 MB, 512001 on 500 MB, 881 on a floppy — where the field means the dircache chain on `DOS\4`/`DOS\5`. No source consulted says what it means on other volumes; ADE writes 0 there, and AmigaDOS has written to every such ADE volume in every test without complaint. Recorded rather than copied: a value whose meaning is not sourced is not written.
+
+**A raw hardfile in FS-UAE stops a little under 1 GB.** Mounted without an RDB, a hardfile is given 32 sectors and 1 surface, so 65,535 cylinders is its limit; a 1 GB file did not mount at all. Up to 4 GB a volume is the RDB's to describe (Phase 6).
+
 ## Directory cache blocks
 
 Chained from the `extension` field of a root or directory block. [FAQ §4.7]
@@ -649,7 +655,7 @@ A new directory or file changes more blocks than the one it occupies. For one en
 
 - a tree that cannot be read in full: `tree-unreadable`, `walk-capped`, `file-unreadable`, `file-exceeds-volume`, `dircache-chain-broken`, or a `directory-damaged` finding for a pointer to no entry or a loop (BUG-016). A block the walk missed would be marked free. A **merge** of two chains does not stop it: nothing is lost to a walk.
 - a bitmap pointer outside the volume, on the rootblock, named twice, or naming a block the tree uses.
-- a bitmap that does not cover the volume, or continues in a `bm_ext` chain, which ADE does not write.
+- a bitmap that does not cover the volume. A `bm_ext` chain is not a reason, since 2026-11-12: its blocks are held to the checks the pages are and kept marked used, and only the pages are rewritten.
 - a clear flag on a rootblock that fails its checksum: setting the flag reseals the block.
 
 **A misfiled entry** (§Writing into a volume, last paragraph) is taken out of whichever chain holds it and put into the chain its name hashes to, in block order. Nothing else moves: no datestamp, no cache record, since the cache lists entries, not slots. It is left where it is when another entry in the directory has the same name — refiling would change which one AmigaDOS opens — or when a block the move reseals already fails its checksum.

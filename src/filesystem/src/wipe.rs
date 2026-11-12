@@ -175,7 +175,7 @@ pub fn free_space<S: BuildHasher>(
             if bitmap.is_allocated(b)
                 || in_use.contains(&b)
                 || b == volume.root()
-                || bitmap.blocks.contains(&b)
+                || bitmap.is_own_block(b)
             {
                 continue;
             }

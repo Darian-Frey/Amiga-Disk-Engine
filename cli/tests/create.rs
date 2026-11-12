@@ -232,19 +232,22 @@ fn a_hard_disk_is_made_by_size_and_is_not_a_bigger_floppy() {
 }
 
 #[test]
-fn a_hard_disk_too_large_for_its_own_bitmap_is_refused() {
-    // Past 25 bitmap pointers the rest belong in a `bm_ext` chain ADE does not
-    // write. A volume whose bitmap is half described reports free blocks that
-    // are not.
-    let dir = scratch("toobig");
-    let (_, err, code) = run(&[
-        "create",
-        dir.join("huge.hdf").to_str().unwrap(),
-        "--size=64",
-    ]);
+fn a_hard_disk_past_49_mb_is_made_and_past_4_gb_is_refused() {
+    // Past 25 bitmap pointers the rest go in a `bm_ext` chain, which ADE
+    // writes (F-038); past 4 GB an AmigaDOS volume cannot address its blocks
+    // (C-002), and nothing is written.
+    let dir = scratch("bigdisk");
+    let made = dir.join("big.hdf");
+    let (_, err, code) = run(&["create", made.to_str().unwrap(), "--size=64"]);
+    assert_eq!(code, Some(0), "{err}");
+    let (check, _, code) = run(&["check", made.to_str().unwrap()]);
+    assert_eq!(code, Some(0), "{check}");
+
+    let huge = dir.join("huge.hdf");
+    let (_, err, code) = run(&["create", huge.to_str().unwrap(), "--size=4097"]);
     assert_eq!(code, Some(2), "{err}");
-    assert!(err.contains("bitmap extension"), "{err}");
-    assert!(!dir.join("huge.hdf").exists(), "nothing half-written");
+    assert!(err.contains("4 GB"), "{err}");
+    assert!(!huge.exists(), "nothing written");
     let _ = fs::remove_dir_all(&dir);
 }
 

@@ -77,12 +77,12 @@ pub enum FormatError {
         /// Blocks the geometry offers.
         blocks: u64,
     },
-    /// The volume needs more bitmap blocks than a rootblock can name.
+    /// The volume is larger than FFS can address.
     ///
-    /// Past 25 pointers the rest live in a `bm_ext` chain — a hard disk above
-    /// roughly 50 MB. Refused rather than written wrongly: a volume whose
-    /// bitmap is only half described reports free blocks that are not, which
-    /// is how a write path destroys data.
+    /// FFS and OFS address a volume in 32-bit byte offsets, so 4 GB is the
+    /// end (C-002); the 64-bit extensions (TD64, NSD) are how a handler talks
+    /// to a device, and whether they mean anything for an image file is an
+    /// open question, not something to write around.
     TooLarge {
         /// Blocks the geometry offers.
         blocks: u64,
@@ -111,7 +111,7 @@ impl core::fmt::Display for FormatError {
             }
             Self::TooLarge { blocks } => write!(
                 f,
-                "{blocks} blocks needs a bitmap extension chain, which ADE does not write"
+                "{blocks} blocks is past the 4 GB an AmigaDOS volume can address (C-002)"
             ),
         }
     }
@@ -182,11 +182,7 @@ pub fn blank_named(
     let per_block = bits_per_bitmap_block(geometry.block_size());
     let pages = mapped.div_ceil(per_block.max(1));
 
-    // 25 pointers fit in the rootblock; past that they need a `bm_ext` chain,
-    // which is a hard disk above roughly 50 MB. Refused rather than written
-    // wrongly: a volume whose bitmap is half-described reports free blocks
-    // that are not, which is how a write path destroys data.
-    if pages > BM_PAGES {
+    if geometry.total_bytes() > MAX_VOLUME_BYTES {
         return Err(FormatError::TooLarge { blocks: total });
     }
 
@@ -199,25 +195,114 @@ pub fn blank_named(
     let bitmap = root
         .saturating_add(1)
         .saturating_add(u64::from(cache.is_some()));
-    if total <= bitmap.saturating_add(pages) {
+    let layout = lay_out_bitmap(bitmap, pages, geometry.block_size());
+    if total <= layout.end {
         return Err(FormatError::TooSmall { blocks: total });
     }
-    let blocks: Vec<u64> = (0..pages).map(|i| bitmap.saturating_add(i)).collect();
 
     let mut image = vec![0u8; usize::try_from(geometry.total_bytes()).unwrap_or(0)];
     write_bootblock(&mut image, dostype);
-    write_rootblock(&mut image, geometry, name, created, root, &blocks, cache);
+    let in_rootblock = layout
+        .pages
+        .get(..layout.pages.len().min(BM_PAGES))
+        .unwrap_or(&[]);
+    let first_extension = layout.extensions.first().map(|(block, _)| *block);
+    write_rootblock(
+        &mut image,
+        geometry,
+        name,
+        created,
+        root,
+        (in_rootblock, first_extension),
+        cache,
+    );
     if let Some(cache) = cache {
         write_empty_cache(&mut image, geometry, cache, root);
     }
-    write_bitmap(&mut image, geometry, root, &blocks, cache);
+    write_extensions(&mut image, geometry, &layout.extensions);
+    let mut also_used: Vec<u64> = layout.extensions.iter().map(|(block, _)| *block).collect();
+    also_used.extend(cache);
+    write_bitmap(&mut image, geometry, root, &layout.pages, &also_used);
     let _ = block_size;
     Ok(image)
 }
 
 /// Bitmap pointers the rootblock itself can hold. Past this a `bm_ext` chain
 /// is needed, which is a hard disk above roughly 50 MB.
-const BM_PAGES: u64 = 25;
+const BM_PAGES: usize = 25;
+
+/// The most an AmigaDOS volume can hold: 32-bit byte offsets (C-002).
+const MAX_VOLUME_BYTES: u64 = 1 << 32;
+
+/// Where a volume's bitmap blocks go, and its `bm_ext` chain.
+struct BitmapLayout {
+    /// Every bitmap block, in map order.
+    pages: Vec<u64>,
+    /// Each extension block, with the bitmap blocks it lists.
+    extensions: Vec<(u64, Vec<u64>)>,
+    /// The first block after all of them.
+    end: u64,
+}
+
+/// Lay out `pages` bitmap blocks from `start`, as AmigaDOS's `Format` does —
+/// measured in FS-UAE on 100 MB and 500 MB hardfiles: the first 25 straight
+/// after the rootblock (or its cache), each extension block directly before
+/// the bitmap blocks it lists, up to `BSIZE/4 - 1` of them, the next
+/// extension after those. On 500 MB that is root 512000, pages
+/// 512001–512025, extension 512026 listing 512027–512153, extension 512154
+/// listing 512155–512254.
+fn lay_out_bitmap(start: u64, pages: u64, block_size: u32) -> BitmapLayout {
+    let per_extension = (u64::from(block_size) / 4).saturating_sub(1).max(1);
+    let direct = pages.min(BM_PAGES as u64);
+    let mut next = start;
+    let mut layout = BitmapLayout {
+        pages: Vec::new(),
+        extensions: Vec::new(),
+        end: start,
+    };
+    for _ in 0..direct {
+        layout.pages.push(next);
+        next = next.saturating_add(1);
+    }
+    let mut remaining = pages.saturating_sub(direct);
+    while remaining > 0 {
+        let extension = next;
+        next = next.saturating_add(1);
+        let listed = remaining.min(per_extension);
+        let these: Vec<u64> = (0..listed).map(|i| next.saturating_add(i)).collect();
+        next = next.saturating_add(listed);
+        layout.pages.extend(&these);
+        layout.extensions.push((extension, these));
+        remaining = remaining.saturating_sub(listed);
+    }
+    layout.end = next;
+    layout
+}
+
+/// Each `bm_ext` block: the bitmap blocks it lists, then the next extension
+/// in its last long (0 for the last). It carries no checksum (SPEC §Bitmap).
+fn write_extensions(image: &mut [u8], geometry: Geometry, extensions: &[(u64, Vec<u64>)]) {
+    let bsize = geometry.block_size() as usize;
+    for (i, (block, listed)) in extensions.iter().enumerate() {
+        let next = extensions.get(i.saturating_add(1)).map_or(0, |(b, _)| *b);
+        let at = usize::try_from(*block).unwrap_or(0).saturating_mul(bsize);
+        let Some(raw) = image.get_mut(at..at.saturating_add(bsize)) else {
+            return;
+        };
+        for (slot, page) in listed.iter().enumerate() {
+            let _ = put_u32(
+                raw,
+                slot.saturating_mul(4),
+                u32::try_from(*page).unwrap_or(0),
+            );
+        }
+        let _ = put_u32(
+            raw,
+            bsize.saturating_sub(4),
+            u32::try_from(next).unwrap_or(0),
+        );
+    }
+}
 
 /// How many blocks one bitmap block can map.
 ///
@@ -295,7 +380,7 @@ fn write_rootblock(
     name: &[u8],
     created: Stamp,
     root: u64,
-    bitmap: &[u64],
+    (bitmap, extension): (&[u64], Option<u64>),
     cache: Option<u64>,
 ) {
     let bsize = geometry.block_size() as usize;
@@ -315,8 +400,15 @@ fn write_rootblock(
     let _ = put_u32(block, end.saturating_sub(200), u32::MAX); // bm_flag = -1
     // Every bitmap block, not just the first: `bm_pages` is an array of 25,
     // and a volume that names one of its five bitmap blocks describes an
-    // eighth of its own free space. `bm_ext` stays zero — a volume needing it
-    // was refused before this was called.
+    // eighth of its own free space. Past 25, the rest are in the `bm_ext`
+    // chain, whose first block the rootblock names.
+    if let Some(extension) = extension {
+        let _ = put_u32(
+            block,
+            end.saturating_sub(96),
+            u32::try_from(extension).unwrap_or(0),
+        );
+    }
     for (index, block_number) in bitmap.iter().enumerate() {
         let offset = end
             .saturating_sub(196)
@@ -387,10 +479,18 @@ fn write_bitmap(
     geometry: Geometry,
     root: u64,
     bitmap: &[u64],
-    cache: Option<u64>,
+    also_used: &[u64],
 ) {
     let bsize = geometry.block_size() as usize;
     let reserved = u64::from(geometry.reserved());
+    // Looked up once per block, so a set: a 4 GB volume has 8 million blocks
+    // and over two thousand bitmap blocks.
+    let occupied: std::collections::HashSet<u64> = bitmap
+        .iter()
+        .chain(also_used)
+        .copied()
+        .chain(core::iter::once(root))
+        .collect();
     let mapped = geometry.total_blocks().saturating_sub(reserved);
     let per_block = bits_per_bitmap_block(geometry.block_size());
 
@@ -413,8 +513,9 @@ fn write_bitmap(
             }
             let block_index = index.saturating_add(reserved);
             // Everything is free except the blocks this filesystem occupies:
-            // the rootblock, and every one of its bitmap blocks.
-            if block_index == root || bitmap.contains(&block_index) || cache == Some(block_index) {
+            // the rootblock, every bitmap block, every `bm_ext` block, and on
+            // a dircache volume the root's cache.
+            if occupied.contains(&block_index) {
                 continue;
             }
             let long = usize::try_from(bit / 32).unwrap_or(0);
@@ -450,6 +551,38 @@ mod tests {
             counter = counter.wrapping_add(2);
         }
         block
+    }
+
+    #[test]
+    fn the_bitmap_is_laid_out_as_amigados_format_lays_it_out() {
+        // Measured in FS-UAE: a 500 MB hardfile, 252 bitmap blocks. Root at
+        // 512000; pages 512001–512025; extension 512026 listing
+        // 512027–512153; extension 512154 listing 512155–512254.
+        let layout = super::lay_out_bitmap(512_001, 252, 512);
+        assert_eq!(layout.pages.len(), 252);
+        assert_eq!(
+            layout.pages[..25],
+            (512_001..512_026).collect::<Vec<_>>()[..]
+        );
+        assert_eq!(layout.extensions.len(), 2);
+        assert_eq!(layout.extensions[0].0, 512_026);
+        assert_eq!(
+            layout.extensions[0].1,
+            (512_027..512_154).collect::<Vec<_>>()
+        );
+        assert_eq!(layout.extensions[1].0, 512_154);
+        assert_eq!(
+            layout.extensions[1].1,
+            (512_155..512_255).collect::<Vec<_>>()
+        );
+        assert_eq!(layout.end, 512_255);
+        // And at 100 MB: 51 pages, one extension at 102426.
+        let layout = super::lay_out_bitmap(102_401, 51, 512);
+        assert_eq!(layout.extensions.len(), 1);
+        assert_eq!(layout.extensions[0].0, 102_426);
+        assert_eq!(layout.end, 102_453);
+        // A floppy needs none.
+        assert_eq!(super::lay_out_bitmap(881, 1, 512).extensions.len(), 0);
     }
 
     #[test]

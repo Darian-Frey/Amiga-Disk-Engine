@@ -439,27 +439,44 @@ fn a_hard_disk_gets_as_many_bitmap_blocks_as_it_needs() {
 }
 
 #[test]
-fn a_volume_needing_a_bitmap_extension_chain_is_refused_not_half_written() {
-    // Past 25 bitmap pointers the rest belong in a `bm_ext` chain, which ADE
-    // does not write. Refusing is the only safe answer: a volume whose bitmap
-    // is half described reports free blocks that are not, and that is how a
-    // write path destroys data.
-    // The boundary is exact rather than "roughly 50 MB": 25 pages of 4064
-    // blocks each is 101,600 mapped, plus 2 reserved, which at 2048 blocks to
-    // the megabyte is 49 MB fitting and 50 not.
-    let ok = Geometry::new(49 * 64, 1, 32, 512, 2).unwrap();
-    assert!(format::blank(ok, ffs(), "Fits", WHEN).is_ok(), "49 MB fits");
+fn a_bitmap_extension_chain_begins_exactly_where_25_pages_run_out() {
+    // 25 pages of 4064 blocks each map 101,600 blocks, plus 2 reserved: at
+    // 2048 blocks to the megabyte, 49 MB fits in the rootblock's own
+    // pointers and 50 MB needs a `bm_ext` chain — refused until 2026-11-12,
+    // written now as AmigaDOS's `Format` lays it out (F-038).
+    use ade_core::layers::endian::u32_at;
+    let bm_ext = |bytes: &[u8], root: usize| u32_at(bytes, root * 512 + 512 - 96).unwrap();
+
+    let fits = Geometry::new(49 * 64, 1, 32, 512, 2).unwrap();
+    let image = format::blank(fits, ffs(), "Fits", WHEN).unwrap();
+    let root = ade_core::Image::from_bytes(image.clone())
+        .unwrap()
+        .volume()
+        .unwrap()
+        .root() as usize;
+    assert_eq!(bm_ext(&image, root), 0, "49 MB needs no chain");
+    assert!(ade_core::health::examine(image).is_sound());
 
     let over = Geometry::new(50 * 64, 1, 32, 512, 2).unwrap();
-    assert!(
-        matches!(
-            format::blank(over, ffs(), "Over", WHEN),
-            Err(FormatError::TooLarge { .. })
-        ),
-        "50 MB is one page past what a rootblock can name"
+    let image = format::blank(over, ffs(), "Over", WHEN).unwrap();
+    let root = ade_core::Image::from_bytes(image.clone())
+        .unwrap()
+        .volume()
+        .unwrap()
+        .root() as usize;
+    let ext = bm_ext(&image, root) as usize;
+    assert_eq!(ext, root + 26, "directly after the rootblock's 25 pages");
+    assert_eq!(
+        u32_at(&image, ext * 512).unwrap() as usize,
+        ext + 1,
+        "listing the next"
     );
+    assert_eq!(u32_at(&image, ext * 512 + 508).unwrap(), 0, "and the last");
+    let report = ade_core::health::examine(image);
+    assert!(report.is_sound(), "{:?}", report.findings);
 
-    let too_big = Geometry::new(64 * 64, 1, 32, 512, 2).unwrap();
+    // Past the 4 GB a volume can address, refused before anything is built.
+    let too_big = Geometry::new(4_097 * 64, 1, 32, 512, 2).unwrap();
     assert!(matches!(
         format::blank(too_big, ffs(), "TooBig", WHEN),
         Err(FormatError::TooLarge { .. })
