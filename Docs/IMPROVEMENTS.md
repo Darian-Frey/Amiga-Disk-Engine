@@ -11,8 +11,12 @@ Effort vocabulary: trivial | small | medium | large.
 
 ## Suggested
 
+_None._
+
+## Applied
+
 ### IMP-021 `ade extract <image> <path> -` writes a file called `-` rather than to standard output
-**Status:** suggested
+**Status:** applied
 **Effort:** trivial
 **Found:** 2026-11-12, writing F-012's CLI test: `ade extract back.adf Kept -` exited 0, printed nothing, and left a 24-byte file named `-` in the working directory — `cli/-`, which then went into commit 879d9e8 unnoticed and was removed the next commit.
 
@@ -24,8 +28,7 @@ Effort vocabulary: trivial | small | medium | large.
 
 **Trade-offs.** A file genuinely named `-` could no longer be written by passing `-`; it would need `./-`, which is the convention every tool that reads `-` already imposes. Commands whose output is an image (`--output=`) have no use for standard output, since D-018's atomic save renames a temporary file into place, so for those the honest answer is a refusal rather than a new meaning.
 
-
-## Applied
+**Applied 2026-11-12.** `ade extract <image> <path> -` writes to standard output, as no destination does, `--format=json` with it refused as before. `-` anywhere ADE would write a disk image or a folder is refused before anything runs, exit 2, with the reason — `--output=-` on every command that takes it (the edits, `consolidate`, `batch`), `extract --all -`, `carve --all -`, `convert <in> -` and `create -` — since a saved image is written whole and renamed into place (D-018) and a folder is many files. `./-` still names a file called `-`. `cli/tests/dash.rs` runs each case with a scratch folder as the working directory and requires no file called `-` to appear; undoing either half of the change fails it.
 
 ### IMP-020 The export is written in Devpac's syntax, and has been assembled only by GNU `as`
 **Status:** applied

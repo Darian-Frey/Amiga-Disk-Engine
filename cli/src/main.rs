@@ -346,6 +346,9 @@ fn main() -> ExitCode {
             return ExitCode::from(EXIT_USAGE);
         }
     };
+    if let Some(refused) = refuse_standard_output(&args) {
+        return refused;
+    }
     let p = |n: usize| args.positional.get(n).map_or("", String::as_str);
 
     match (args.command.as_str(), args.positional.len()) {
@@ -436,6 +439,35 @@ fn main() -> ExitCode {
     }
 }
 
+/// `-` where ADE would write a disk image or a folder, refused rather than
+/// taken as a file called `-` (IMP-021).
+///
+/// `-` is the Unix spelling of standard output, and a script passing it
+/// expects the bytes on its pipe; taken literally, it got nothing and a stray
+/// file appeared where it ran. Only `extract <image> <path> -` can honour it,
+/// and does. An image is saved whole to a temporary file and renamed into
+/// place (D-018), and a folder is many files, so neither can be a stream: the
+/// honest answer for those is a refusal. A file really called `-` is still
+/// reachable as `./-`, as with every tool that reads `-` this way.
+fn refuse_standard_output(args: &Args) -> Option<ExitCode> {
+    let dash = |n: usize| args.positional.get(n).is_some_and(|p| p == "-");
+    let what = if args.output.as_deref() == Some(Path::new("-")) {
+        "--output names a disk image or a folder, written whole"
+    } else {
+        match args.command.as_str() {
+            "extract" | "carve" if args.all && dash(1) => "--all writes a folder of files",
+            "convert" if dash(1) => "convert writes a disk image, saved whole",
+            "create" if dash(0) => "create writes a disk image, saved whole",
+            _ => return None,
+        }
+    };
+    eprintln!(
+        "ade: `-` means standard output, and {what}, which cannot go there; name a file or \
+         folder (`./-` for one called -)"
+    );
+    Some(ExitCode::from(EXIT_USAGE))
+}
+
 fn usage() {
     let mut lines = vec![
         format!("ade {} — Amiga Disk Engine", ade_core::version()),
@@ -444,7 +476,8 @@ fn usage() {
         "    ade info <image>                   inspect a disk image".to_owned(),
         "    ade check <image>                  full health report (F-010)".to_owned(),
         "    ade ls <image> [path]              list a directory".to_owned(),
-        "    ade extract <image> <path> [dest]  extract a file".to_owned(),
+        "    ade extract <image> <path> [dest]  extract a file; no dest, or -, is stdout"
+            .to_owned(),
         "    ade extract <image> --all <dir>    extract every file into a folder (F-024)"
             .to_owned(),
         "    ade convert <in> <out>             convert between containers (F-016)".to_owned(),
@@ -1800,7 +1833,13 @@ fn extract(args: &Args) -> ExitCode {
     let p = |n: usize| args.positional.get(n).map_or("", String::as_str);
     let path = Path::new(p(0));
     let inner = p(1);
-    let dest = args.positional.get(2).map(PathBuf::from);
+    // `-` is standard output, as no destination is, and never a file called
+    // `-` (IMP-021).
+    let dest = args
+        .positional
+        .get(2)
+        .filter(|d| d.as_str() != "-")
+        .map(PathBuf::from);
     let partition = args.partition.as_deref();
     // The file's bytes go to stdout when there is no destination, so there is
     // nowhere for a JSON report to go: refused, not ignored (BUG-012).
