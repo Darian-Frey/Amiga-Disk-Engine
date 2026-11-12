@@ -332,6 +332,23 @@ impl<'a> Volume<'a> {
                 name: header.name_lossy(),
             });
         }
+        // A directory link holds no hash table: what it lists is the
+        // directory it names (BUG-026). One hop only — a link never names a
+        // link, and one that does is not followed into a loop.
+        if header.kind == EntryKind::HardLinkDir {
+            let target = header.real_entry;
+            let named = self
+                .read_block(target)
+                .ok()
+                .and_then(|b| Entry::parse(&b, target).ok())
+                .filter(|e| e.kind == EntryKind::Directory);
+            return match named {
+                Some(_) => self.list(target),
+                None => Err(FsError::NotADirectory {
+                    name: header.name_lossy(),
+                }),
+            };
+        }
 
         let mut listing = Listing::default();
         let ht = self.hash_table_size() as usize;
@@ -690,12 +707,14 @@ impl<'a> Volume<'a> {
                 walked.push(component.to_owned());
                 entry
             };
-            current = if found.kind.is_directory() {
-                found.block
-            } else {
+            current = match found.kind {
+                // A directory link holds no hash table: the path goes on from
+                // the directory it names, as AmigaDOS's does (BUG-026). One
+                // hop, since a link never names a link.
+                EntryKind::HardLinkDir => found.real_entry,
                 // A non-directory can only be the final component; if it is
                 // not, the next iteration's `list` will report it.
-                found.block
+                _ => found.block,
             };
             last = Some(found);
         }

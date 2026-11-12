@@ -387,7 +387,8 @@ fn main() -> ExitCode {
         ("convert", 2) => convert(Path::new(p(0)), Path::new(p(1)), args.raw, args.format),
         ("create", 1) => create(&args),
         (
-            "mkdir" | "put" | "rm" | "undelete" | "rename" | "repair" | "mv" | "format" | "wipe",
+            "mkdir" | "put" | "rm" | "undelete" | "link" | "rename" | "repair" | "mv" | "format"
+            | "wipe",
             _,
         ) => edit_command(&args),
         ("disasm", 1 | 2) => disasm(&args),
@@ -488,6 +489,8 @@ fn usage() {
             .to_owned(),
         "    ade rm <image> <path> [--all] --output=<new>  delete a file or empty folder; --all \
          a whole folder"
+            .to_owned(),
+        "    ade link <image> <target> <path> --output=<new>  make a hard link at path to target"
             .to_owned(),
         "    ade undelete <image> <block|name> --output=<new>  put a deleted file or folder back \
          (F-012); `ade carve` lists them"
@@ -658,6 +661,13 @@ fn edit_command(args: &Args) -> ExitCode {
         ("mkdir", 2) => make_dir(Path::new(p(0)), p(1), args.overwrite_free_data, output),
         ("rm", 2) => remove(Path::new(p(0)), p(1), args.all, output),
         ("undelete", 2) => undelete(Path::new(p(0)), p(1), output),
+        ("link", 3) => make_link(
+            Path::new(p(0)),
+            p(1),
+            p(2),
+            args.overwrite_free_data,
+            output,
+        ),
         ("rename", 3) => rename(Path::new(p(0)), p(1), p(2), output),
         ("repair", 1) => repair(Path::new(p(0)), args.free_orphans, output),
         ("mv", 3) => move_entry(Path::new(p(0)), p(1), p(2), output),
@@ -898,6 +908,35 @@ fn make_dir(
         Ok(format!(
             "made directory {} (block {block})",
             path.trim_end_matches('/')
+        ))
+    })
+}
+
+/// `ade link`: make a hard link at `path` to the file or directory at
+/// `target`, as AmigaDOS's `MakeLink … HARD` does.
+fn make_link(
+    image: &Path,
+    target: &str,
+    path: &str,
+    overwrite_free_data: bool,
+    output: Option<&Path>,
+) -> ExitCode {
+    let (parent, name) = split_last(path);
+    let Ok(amiga) = ade_core::edit::amiga_name(name) else {
+        eprintln!("ade: {name:?}: an Amiga name is Latin-1, and this has a character outside it");
+        return ExitCode::from(EXIT_USAGE);
+    };
+    edit_and_save(image, output, |session| {
+        if overwrite_free_data {
+            session.allow_overwriting_free_data();
+        }
+        let object = session.entry(target)?;
+        let dir = session.directory(parent)?;
+        let block = session.make_link(object, dir, &amiga)?;
+        Ok(format!(
+            "linked {} to {} (block {block})",
+            path.trim_end_matches('/'),
+            target.trim_end_matches('/')
         ))
     })
 }

@@ -672,7 +672,140 @@ fn scan_tree(volume: &Volume<'_>, findings: &mut Vec<Finding>) -> TreeScan {
     scan_parents(volume, &walked, findings);
     scan_duplicate_names(volume, &walked, findings);
     scan_root_in_tables(volume, &walked, findings);
+    scan_links(volume, &walked, findings);
     scan
+}
+
+/// Hard links and the chains that hold them together.
+///
+/// A link's header names its object (`real_entry`); the object names its
+/// newest link (`next_link`), and each link the next older one, to 0 —
+/// measured on links AmigaDOS's own `MakeLink` made in FS-UAE (D-023). When
+/// the object is deleted, AmigaDOS promotes the head of that chain, and when
+/// a link is deleted it unhooks it from the chain: so a chain that does not
+/// list exactly the links naming the object, or a link naming something that
+/// is not there, is a disk AmigaDOS will damage further the next time it
+/// deletes. Checked here so ADE's own link writes are held to it too.
+fn scan_links(
+    volume: &Volume<'_>,
+    walked: &ade_filesystem::volume::Walk,
+    findings: &mut Vec<Finding>,
+) {
+    let live: HashMap<u32, &str> = walked
+        .entries
+        .iter()
+        .map(|(path, e)| (e.block, path.as_str()))
+        .collect();
+    // Every link, grouped by the object it names.
+    let mut naming: HashMap<u32, Vec<u32>> = HashMap::new();
+    for (path, e) in &walked.entries {
+        if !matches!(e.kind, EntryKind::HardLinkFile | EntryKind::HardLinkDir) {
+            continue;
+        }
+        let wants = if e.kind == EntryKind::HardLinkFile {
+            EntryKind::File
+        } else {
+            EntryKind::Directory
+        };
+        let target = volume.entry_at(e.real_entry).ok();
+        let problem = match target {
+            _ if e.real_entry == volume.root() => Some("the root".to_owned()),
+            None => Some("a block that is not an entry".to_owned()),
+            Some(t) if t.kind != wants => Some(format!(
+                "{}, which is not a {}",
+                t.name_lossy(),
+                if wants == EntryKind::File {
+                    "file"
+                } else {
+                    "directory"
+                }
+            )),
+            Some(t) if !live.contains_key(&t.block) => Some(format!(
+                "{}, which nothing in the tree reaches",
+                t.name_lossy()
+            )),
+            Some(_) => None,
+        };
+        if let Some(problem) = problem {
+            findings.push(
+                Finding::new(
+                    "link-target-missing",
+                    Severity::Warning,
+                    format!("{path}: a hard link to block {} — {problem}", e.real_entry),
+                )
+                .at(e.block),
+            );
+            continue;
+        }
+        naming.entry(e.real_entry).or_default().push(e.block);
+    }
+
+    let objects = walked
+        .entries
+        .iter()
+        .filter(|(_, e)| matches!(e.kind, EntryKind::File | EntryKind::Directory));
+    for (path, object) in objects {
+        let expected = naming.remove(&object.block).unwrap_or_default();
+        let fault = chain_fault(volume, object, expected, &live);
+        if let Some(fault) = fault {
+            findings.push(
+                Finding::new(
+                    "link-chain-broken",
+                    Severity::Warning,
+                    format!("{path}: its chain of hard links {fault}"),
+                )
+                .at(object.block),
+            );
+        }
+    }
+}
+
+/// What is wrong with `object`'s chain of hard links, if anything: a loop, a
+/// block in it that is not a link to the object, or a difference between the
+/// links it lists and `expected`, the links in the tree that name it.
+fn chain_fault(
+    volume: &Volume<'_>,
+    object: &ade_filesystem::entry::Entry,
+    mut expected: Vec<u32>,
+    live: &HashMap<u32, &str>,
+) -> Option<String> {
+    expected.sort_unstable();
+    let mut chain: Vec<u32> = Vec::new();
+    let mut seen: HashSet<u32> = HashSet::new();
+    let mut next = object.next_link;
+    while next != 0 {
+        if u64::from(next) >= volume.geometry().total_blocks() {
+            return Some(format!("names block {next}, which is outside the volume"));
+        }
+        if !seen.insert(next) {
+            return Some(format!("loops at block {next}"));
+        }
+        match volume.entry_at(next) {
+            Ok(link) if link.kind.is_link() && link.real_entry == object.block => {
+                chain.push(next);
+                next = link.next_link;
+            }
+            _ => return Some(format!("names block {next}, which is not a link to it")),
+        }
+    }
+    let mut sorted = chain.clone();
+    sorted.sort_unstable();
+    if sorted == expected {
+        return None;
+    }
+    let missing: Vec<String> = expected
+        .iter()
+        .filter(|b| !chain.contains(b))
+        .map(|b| {
+            live.get(b)
+                .map_or_else(|| b.to_string(), |p| (*p).to_owned())
+        })
+        .collect();
+    Some(if missing.is_empty() {
+        "lists a link that is not in the tree".to_owned()
+    } else {
+        format!("leaves out {}, which links to it", missing.join(", "))
+    })
 }
 
 /// How many damaged directories to report before saying so in one line.

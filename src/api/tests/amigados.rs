@@ -200,9 +200,22 @@ fn run(
         }
         std::thread::sleep(Duration::from_millis(200));
     }
-    let _ = Command::new("kill")
-        .args(["-KILL", "--", &format!("-{}", child.id())])
-        .status();
+    // Asked to quit first, and given time to: FS-UAE keeps written floppy
+    // tracks in memory and writes them back to the image when it quits. A
+    // KILL straight after the marker intermittently left disks half-written
+    // — a link deleted from its directory but still named by its object's
+    // chain, blocks marked used that nothing reached — states AmigaDOS
+    // never wrote, failing tests that passed when the same steps ran again.
+    let group = format!("-{}", child.id());
+    let _ = Command::new("kill").args(["-TERM", "--", &group]).status();
+    let quitting = Instant::now();
+    while quitting.elapsed() < Duration::from_secs(15) {
+        if child.try_wait().ok().flatten().is_some() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let _ = Command::new("kill").args(["-KILL", "--", &group]).status();
     // And the child itself, should the group kill not have reached it: a
     // harness that waits on a live emulator never returns.
     let _ = child.kill();
@@ -629,5 +642,165 @@ fn what_amigados_deletes_ade_puts_back_and_amigados_reads_again() {
         let volume = image.volume().unwrap();
         let again = volume.lookup("Drawer/again.bin").unwrap();
         assert!(volume.read_file(&again).unwrap().bytes == small, "{v}");
+    }
+}
+
+/// Faults the health report finds on `disk`, warnings and worse.
+fn faults_on(disk: &Path) -> Vec<String> {
+    ade_core::health::examine(fs::read(disk).unwrap())
+        .findings
+        .iter()
+        .filter(|f| f.severity >= ade_core::Severity::Warning)
+        .map(|f| format!("{}: {}", f.code, f.message))
+        .collect()
+}
+
+#[test]
+fn hard_links_ade_makes_are_ones_amigados_reads_and_deletes() {
+    // ADE links to a file from the root, from a directory and under an
+    // accented name, and to a directory. AmigaDOS reads through every one,
+    // then deletes the file — promoting the newest link, in a chain ADE
+    // wrote — a link, and the directory link. ADE then finds nothing wrong
+    // and reads what is left.
+    let Some(setup) = setup() else { return };
+    let dir = scratch("links-ade");
+    let target = pattern(3_000, 9);
+    let other = pattern(400, 10);
+    let mut disks = Vec::new();
+    for (flags, label) in [(0u8, "OFS"), (1, "FFS"), (5, "DC")] {
+        let blank = format::blank(Geometry::DD_FLOPPY, dostype(flags), label, WHEN).unwrap();
+        let mut s = Session::from_bytes(blank).unwrap();
+        s.set_clock(Some(WHEN));
+        let root = s.root();
+        let file = s.add_file(root, b"target.bin", &target).unwrap();
+        let sub = s.make_dir(root, b"Sub").unwrap();
+        s.add_file(sub, b"other.bin", &other).unwrap();
+        s.make_link(file, root, b"link.bin").unwrap();
+        s.make_link(file, sub, b"deep.bin").unwrap();
+        s.make_link(sub, root, b"dirlink").unwrap();
+        // Made last, so the newest: the one AmigaDOS promotes.
+        s.make_link(file, root, b"l\xefnk.bin").unwrap();
+        disks.push(floppy(&dir, &format!("{label}.adf"), s.bytes()));
+    }
+    let paths: Vec<&Path> = disks.iter().map(PathBuf::as_path).collect();
+    let mut commands = String::new();
+    for v in ["OFS", "FFS", "DC"] {
+        let _ = write!(
+            commands,
+            "C:Copy {v}:link.bin SYS:out/{v}-link\nC:Copy {v}:Sub/deep.bin SYS:out/{v}-deep\n\
+             C:Copy \"{v}:lïnk.bin\" SYS:out/{v}-accent\nC:Copy {v}:dirlink/other.bin SYS:out/{v}-other\n\
+             C:Delete {v}:target.bin\nC:Delete {v}:link.bin\nC:Delete {v}:dirlink\n"
+        );
+    }
+    let outcome = run(
+        &setup,
+        "links-ade",
+        &paths,
+        &[],
+        &commands,
+        Duration::from_secs(90),
+    )
+    .unwrap();
+    for v in ["OFS", "FFS", "DC"] {
+        for (name, want) in [
+            ("link", &target),
+            ("deep", &target),
+            ("accent", &target),
+            ("other", &other),
+        ] {
+            let got = fs::read(outcome.out.join(format!("{v}-{name}")))
+                .unwrap_or_else(|_| panic!("{v}: AmigaDOS could not read through {name}"));
+            assert!(&got == want, "{v}: {name} read different bytes");
+        }
+    }
+    for (disk, v) in disks.iter().zip(["OFS", "FFS", "DC"]) {
+        assert!(faults_on(disk).is_empty(), "{v}: {:?}", faults_on(disk));
+        let image = Image::from_bytes(fs::read(disk).unwrap()).unwrap();
+        let volume = image.volume().unwrap();
+        // The newest link took the file's place; the other still reaches it.
+        for path in ["lïnk.bin", "Sub/deep.bin"] {
+            let entry = volume
+                .lookup(path)
+                .unwrap_or_else(|e| panic!("{v}: {path}: {e}"));
+            assert!(
+                volume.read_file(&entry).unwrap().bytes == target,
+                "{v}: {path}"
+            );
+        }
+        assert!(volume.lookup("target.bin").is_err() && volume.lookup("dirlink").is_err());
+    }
+}
+
+#[test]
+fn hard_links_amigados_makes_are_ones_ade_deletes_as_amigados_would() {
+    // AmigaDOS links; ADE deletes the file, promoting the newest link, and an
+    // older link; AmigaDOS must then read the promoted file by name and write
+    // beside it, and ADE find nothing wrong.
+    let Some(setup) = setup() else { return };
+    let dir = scratch("links-amiga");
+    let target = pattern(3_000, 11);
+    let mut disks = Vec::new();
+    for (flags, label) in [(0u8, "OFS"), (1, "FFS"), (5, "DC")] {
+        let blank = format::blank(Geometry::DD_FLOPPY, dostype(flags), label, WHEN).unwrap();
+        disks.push(floppy(&dir, &format!("{label}.adf"), &blank));
+    }
+    let paths: Vec<&Path> = disks.iter().map(PathBuf::as_path).collect();
+    let mut made = String::new();
+    for v in ["OFS", "FFS", "DC"] {
+        let _ = write!(
+            made,
+            "C:Copy SYS:in/target {v}:target.bin\nC:MakeDir {v}:Sub\n\
+             C:MakeLink {v}:link.bin {v}:target.bin HARD\n\
+             C:MakeLink {v}:Sub/deep.bin {v}:target.bin HARD\n"
+        );
+    }
+    let inputs: [(&str, &[u8]); 1] = [("target", &target)];
+    run(
+        &setup,
+        "links-amiga-1",
+        &paths,
+        &inputs,
+        &made,
+        Duration::from_secs(90),
+    )
+    .unwrap();
+
+    for disk in &disks {
+        let mut s = Session::from_bytes(fs::read(disk).unwrap()).unwrap();
+        s.set_clock(Some(WHEN));
+        // `deep.bin` is the newest, so it takes the file's place.
+        let file = s.entry("target.bin").unwrap();
+        s.delete(file)
+            .unwrap_or_else(|e| panic!("{}: {e}", disk.display()));
+        let link = s.entry("link.bin").unwrap();
+        s.delete(link)
+            .unwrap_or_else(|e| panic!("{}: {e}", disk.display()));
+        fs::write(disk, s.bytes()).unwrap();
+    }
+
+    let mut read = String::new();
+    for v in ["OFS", "FFS", "DC"] {
+        let _ = write!(
+            read,
+            "C:Copy {v}:Sub/deep.bin SYS:out/{v}-deep\nC:Copy SYS:in/target {v}:Sub/beside.bin\n"
+        );
+    }
+    let outcome = run(
+        &setup,
+        "links-amiga-2",
+        &paths,
+        &inputs,
+        &read,
+        Duration::from_secs(90),
+    )
+    .unwrap();
+    for (disk, v) in disks.iter().zip(["OFS", "FFS", "DC"]) {
+        let got = fs::read(outcome.out.join(format!("{v}-deep")))
+            .unwrap_or_else(|_| panic!("{v}: AmigaDOS did not find the promoted file"));
+        assert!(
+            got == target,
+            "{v}: the promoted file reads different bytes"
+        );
+        assert!(faults_on(disk).is_empty(), "{v}: {:?}", faults_on(disk));
     }
 }

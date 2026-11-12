@@ -226,6 +226,12 @@ int main(int argc, char **argv) {
                           ADE_REFUSED &&
                       ade_edit_delete(NULL, 0, true, NULL) == ADE_NULL_ARGUMENT,
                   "the root cannot be deleted or renamed");
+            /* Hard links: the volume itself cannot be linked to; NULL tolerated. */
+            AdeBytes linkname = {(const uint8_t *)"l", 1};
+            check(ade_edit_link(image, ade_image_root_block(image), ade_image_root_block(image),
+                                linkname, NULL, NULL) == ADE_REFUSED &&
+                      ade_edit_link(NULL, 0, 0, linkname, NULL, NULL) == ADE_NULL_ARGUMENT,
+                  "the volume is not something to link to");
             /* Undelete (F-012): the root was never deleted; NULL tolerated. */
             check(ade_edit_undelete(image, ade_image_root_block(image), NULL) == ADE_REFUSED &&
                       ade_edit_undelete(NULL, 0, NULL) == ADE_NULL_ARGUMENT,

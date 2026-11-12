@@ -14,6 +14,18 @@ _None._
 
 ## Fixed
 
+### BUG-026 A path through a hard link to a directory finds nothing: `ade ls disk dirlink` lists an empty directory
+**Severity:** medium
+**Status:** fixed
+**Found:** 2026-11-12, writing hard links (ROADMAP §Links): a test reading `dirlink/other.bin` through a directory link ADE had made got *no such entry*, while AmigaDOS, in FS-UAE, copied the same file through the same link. On a disk AmigaDOS's own `MakeLink … HARD FORCE` wrote, `ade ls OFS.adf dirlink` prints *0 entries* where AmigaDOS lists two files. **Fixed** 2026-11-12.
+**Where:** [src/filesystem/src/volume.rs](../src/filesystem/src/volume.rs), `lookup_traced`, which every path-taking command, the ABI and the window go through.
+
+**What is wrong.** A directory link's header holds no hash table; it names the directory it stands for in `real_entry`. The lookup moves on to the link's own block, finds an empty table, and reports either nothing in it or no such entry. The tree walk follows such links already — `ade ls -r`, the health report and the window's tree all see through them — so only a path that runs through one fails, which is why nothing caught it: the corpus has no links, and ADFlib leaves them out of its listings.
+
+**Correct behaviour.** A path component that is a directory link continues from the directory it names, as AmigaDOS does. One hop is enough, since a link cannot name a link (`MakeLink` refuses, and so does ADE).
+
+**The fix.** `Volume::list` lists a directory link's block as the directory it names, one hop, refusing a link that names anything but a directory; and `lookup_traced` carries on from `real_entry` past a directory-link component. Between them every path — `ls`, `extract`, the ABI's `ade_dir_open`, and opening the link in the window — sees through. `ade ls OFS.adf dirlink` on AmigaDOS's disk now lists the two files AmigaDOS lists. `a_directory_link_lists_and_resolves_as_its_directory` lists the link's block and reads a file through it; `links_are_made_read_through_and_deleted_on_every_type` reads through one on all six dostypes; the AmigaDOS test `hard_links_ade_makes_are_ones_amigados_reads_and_deletes` reads the same files through ADE's link in FS-UAE.
+
 ### BUG-025 On a dircache disk ADE leaves directories without a cache block, and AmigaDOS's filesystem crashes writing into them
 **Severity:** high
 **Status:** fixed

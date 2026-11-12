@@ -2071,6 +2071,86 @@ fn the_root_met_as_an_entry_is_the_volume_not_a_folder() {
 }
 
 #[test]
+fn a_hard_link_is_made_and_outlives_its_original_through_the_abi() {
+    let (path, c_path) = fixture("links", &blank_disk());
+    let bytes = |b: &[u8]| ade::AdeBytes {
+        data: b.as_ptr(),
+        len: b.len(),
+    };
+    // SAFETY: a valid path; every handle is freed once.
+    unsafe {
+        let image = ade::ade_image_open(c_path.as_ptr(), std::ptr::null(), std::ptr::null_mut());
+        let root = ade::ade_image_root_block(image);
+        let mut file = 0u32;
+        assert_eq!(
+            ade::ade_edit_add_file(
+                image,
+                root,
+                bytes(b"original"),
+                bytes(b"kept by the link"),
+                &raw mut file,
+                std::ptr::null_mut()
+            ),
+            AdeResult::Ok
+        );
+        let mut link = 0u32;
+        assert_eq!(
+            ade::ade_edit_link(
+                image,
+                file,
+                root,
+                bytes(b"alias"),
+                &raw mut link,
+                std::ptr::null_mut()
+            ),
+            AdeResult::Ok
+        );
+        assert_ne!(link, 0);
+        // A link to the link is refused; the name taken says so.
+        assert_eq!(
+            ade::ade_edit_link(
+                image,
+                link,
+                root,
+                bytes(b"again"),
+                std::ptr::null_mut(),
+                std::ptr::null_mut()
+            ),
+            AdeResult::Refused
+        );
+        assert_eq!(
+            ade::ade_edit_link(
+                image,
+                file,
+                root,
+                bytes(b"ALIAS"),
+                std::ptr::null_mut(),
+                std::ptr::null_mut()
+            ),
+            AdeResult::AlreadyExists
+        );
+        // Deleting the original promotes the link: one entry, named alias,
+        // in the original's header block.
+        assert_eq!(
+            ade::ade_edit_delete(image, file, false, std::ptr::null_mut()),
+            AdeResult::Ok
+        );
+        let listing = ade::ade_dir_open(image, ade::ADE_WHOLE_IMAGE, root);
+        assert_eq!(ade::ade_listing_count(listing), 1);
+        let mut entry = std::mem::zeroed::<AdeEntry>();
+        ade::ade_listing_entry(listing, 0, &raw mut entry);
+        assert_eq!(
+            std::slice::from_raw_parts(entry.name.data, entry.name.len),
+            b"alias"
+        );
+        assert_eq!(entry.block, file);
+        ade::ade_listing_free(listing);
+        ade::ade_image_free(image);
+    }
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
 fn an_entry_is_renamed_and_deleted_through_the_abi() {
     let (path, c_path) = fixture("rmren", &blank_disk());
     let bytes = |b: &[u8]| ade::AdeBytes {

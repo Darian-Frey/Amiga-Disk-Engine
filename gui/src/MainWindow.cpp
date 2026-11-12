@@ -730,6 +730,19 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
     m_rename->setShortcut(QKeySequence(Qt::Key_F2));
     m_rename->setEnabled(false);
     connect(m_rename, &QAction::triggered, this, &MainWindow::renameSelected);
+    m_makeLink = edit->addAction(QStringLiteral("Make hard &link..."));
+    m_makeLink->setEnabled(false);
+    m_makeLink->setToolTip(QStringLiteral(
+        "Make a hard link to the selected file or folder, beside it, as AmigaDOS's\n"
+        "MakeLink HARD does. Deleting the original keeps the contents under the link."));
+    connect(m_makeLink, &QAction::triggered, this, [this] {
+        if (!m_selected) return;
+        bool ok = false;
+        const QString name = QInputDialog::getText(
+            this, QStringLiteral("Make hard link"), QStringLiteral("Name of the link"),
+            QLineEdit::Normal, QStringLiteral("Link to %1").arg(m_selected->text(ColName)), &ok);
+        if (ok && !name.isEmpty()) makeLinkTo(m_selected, name);
+    });
     m_delete = edit->addAction(QStringLiteral("&Delete"));
     m_delete->setShortcut(QKeySequence::Delete);
     m_delete->setEnabled(false);
@@ -2480,6 +2493,35 @@ bool MainWindow::deleteItem(QTreeWidgetItem *item) {
     return true;
 }
 
+bool MainWindow::makeLinkTo(QTreeWidgetItem *item, const QString &name) {
+    Open *open = imageFor(item);
+    if (!open || !isEditableEntry(item, m_tree)) return false;
+    // Beside the entry: in the folder that holds it, which for an entry at
+    // the top of the disk is the disk's own row.
+    const quint32 dir = directoryFor(item->parent(), *open);
+    if (dir == 0) return false;
+    QByteArray amiga;
+    if (!ade::amigaName(name, &amiga)) {
+        emit errorOccurred(QStringLiteral("%1: an Amiga name is Latin-1, and this has a "
+                                          "character outside it.")
+                               .arg(name));
+        return false;
+    }
+    if (!mayOverwriteFreeData(*open, QStringLiteral("making a link"))) return false;
+    const QString target = item->text(ColName);
+    const ade::EditResult r =
+        open->image.makeLink(item->data(0, RoleBlock).toUInt(), dir, amiga);
+    m_lastEdited = open->index;
+    if (!r.ok()) {
+        emit errorOccurred(QStringLiteral("Could not link %1 to %2: %3").arg(name, target, r.message));
+        return false;
+    }
+    reloadImage(*open);
+    statusBar()->showMessage(
+        QStringLiteral("Linked %1 to %2 — not saved yet").arg(name, target));
+    return true;
+}
+
 QString MainWindow::putBackDeleted(QTreeWidgetItem *item, const QVector<quint32> &blocks) {
     Open *open = imageFor(item);
     if (!open || blocks.isEmpty()) return QString();
@@ -2900,6 +2942,7 @@ void MainWindow::updateEditActions() {
     const bool entry = plain && isEditableEntry(m_selected, m_tree);
     if (m_delete) m_delete->setEnabled(entry);
     if (m_rename) m_rename->setEnabled(entry);
+    if (m_makeLink) m_makeLink->setEnabled(entry);
     if (m_undo) m_undo->setEnabled(open && open->image.canUndo());
     if (m_redo) m_redo->setEnabled(open && open->image.canRedo());
     if (m_save) m_save->setEnabled(open && open->image.isModified());

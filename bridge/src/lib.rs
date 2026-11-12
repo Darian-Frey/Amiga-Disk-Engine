@@ -2510,6 +2510,29 @@ pub unsafe extern "C" fn ade_edit_mkdir(
     edit(image, out_block, out_message, |s| s.make_dir(parent, name))
 }
 
+/// Make a hard link called `name` in the directory at `parent`, to the file
+/// or directory at `object`, as AmigaDOS's `MakeLink … HARD` does.
+///
+/// # Safety
+/// As [`ade_edit_mkdir`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ade_edit_link(
+    image: *mut AdeImage,
+    object: u32,
+    parent: u32,
+    name: AdeBytes,
+    out_block: *mut u32,
+    out_message: *mut *mut c_char,
+) -> AdeResult {
+    // SAFETY: the caller's contract.
+    let Some(name) = (unsafe { borrowed(name) }) else {
+        return AdeResult::NullArgument;
+    };
+    edit(image, out_block, out_message, |s| {
+        s.make_link(object, parent, name)
+    })
+}
+
 /// Add a file called `name`, holding `data`, to the directory at `parent`.
 ///
 /// # Safety

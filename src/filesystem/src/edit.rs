@@ -78,6 +78,10 @@ pub const MAX_NAME: usize = 30;
 const ST_USERDIR: u32 = 2;
 /// `ST_FILE`, which is -3 stored as an unsigned long.
 const ST_FILE: u32 = 0xFFFF_FFFD;
+/// `ST_LINKFILE`, -4: a hard link to a file.
+const ST_LINKFILE: u32 = 0xFFFF_FFFC;
+/// `ST_LINKDIR`, 4: a hard link to a directory.
+const ST_LINKDIR: u32 = 4;
 
 /// Bytes of header in a directory cache block before the first record.
 const DIRCACHE_HEADER: usize = 24;
@@ -352,16 +356,40 @@ pub fn add_file(
 /// The entry leaves its parent's hash chain and cache, and every block it
 /// occupied is marked free — but none is erased (SPEC §Deletion).
 ///
+/// A hard link is unhooked from its object's chain and its one block freed;
+/// a file or directory that hard links name gives its place to the newest of
+/// them, as AmigaDOS's `Delete` does (SPEC §Hard links are written as AmigaDOS writes them).
+///
 /// # Errors
-/// [`EditError::NotRemovable`] for the root, a directory with anything in it,
-/// or an entry a hard link is part of; otherwise as [`make_dir`]. The image
-/// is unchanged whenever one is returned.
+/// [`EditError::NotRemovable`] for the root, or a directory with anything in
+/// it; otherwise as [`make_dir`]. The image is unchanged whenever one is
+/// returned.
 pub fn delete(
     image: &mut [u8],
     geometry: Geometry,
     block: u32,
     when: Stamp,
 ) -> Result<(), EditError> {
+    {
+        let source = Slice { image, geometry };
+        let (entry, _) = removable_for_rename(&source, block)?;
+        if matches!(entry.kind, EntryKind::HardLinkFile | EntryKind::HardLinkDir) {
+            return delete_link(image, geometry, block, when);
+        }
+        if matches!(entry.kind, EntryKind::File | EntryKind::Directory) && entry.next_link != 0 {
+            if entry.kind == EntryKind::Directory {
+                let volume = Volume::mount(&source)?;
+                let listed = volume.list(block)?.entries.len();
+                if listed > 0 {
+                    return Err(EditError::NotRemovable(format!(
+                        "{} is a directory with {listed} entries in it; delete them first",
+                        entry.name_lossy()
+                    )));
+                }
+            }
+            return delete_promoting(image, geometry, block, when);
+        }
+    }
     let writes = {
         let source = Slice { image, geometry };
         let (entry, parent) = removable(&source, block)?;
@@ -402,6 +430,250 @@ pub fn delete(
     };
     apply(image, geometry, &writes);
     Ok(())
+}
+
+/// Delete the hard link at `block`: out of its directory and its cache, out
+/// of its object's chain of links, and its block freed. The object and its
+/// other links are untouched but for the one `next_link` that pointed at it —
+/// measured: AmigaDOS's `Delete` of a link changes exactly that, the
+/// directory, and the bitmap.
+fn delete_link(
+    image: &mut [u8],
+    geometry: Geometry,
+    block: u32,
+    when: Stamp,
+) -> Result<(), EditError> {
+    let writes = {
+        let source = Slice { image, geometry };
+        let (link, parent) = removable_for_rename(&source, block)?;
+        let mut plan = Plan::open(&source, parent)?;
+        plan.unhook(&link)?;
+        plan.unlink(block)?;
+        if plan.volume.has_dircache() {
+            plan.rewrite_cache(|records| records.retain(|r| r.header != block))?;
+        }
+        plan.touch(when)?;
+        plan.release(&[block]);
+        plan.finish()
+    };
+    apply(image, geometry, &writes);
+    Ok(())
+}
+
+/// Delete a file or directory that hard links name, as AmigaDOS's `Delete`
+/// does: the newest link — the head of its chain — takes its place.
+///
+/// Measured in FS-UAE: the object's header block is kept, so its data blocks
+/// still name it and the other links still reach it, and it moves to where
+/// the link was — the link's name, its directory, its slot in that
+/// directory's hash chain, and its successor in the chain. The object's own
+/// datestamp, protection and comment stay; the link's block is freed. On a
+/// dircache volume the link's record becomes the object's.
+fn delete_promoting(
+    image: &mut [u8],
+    geometry: Geometry,
+    block: u32,
+    when: Stamp,
+) -> Result<(), EditError> {
+    // Two directories, so two plans, as a move has; on a copy, kept only when
+    // both work.
+    let mut work = image.to_vec();
+    let (object, head) = {
+        let source = Slice {
+            image: &work,
+            geometry,
+        };
+        let (object, from) = removable_for_rename(&source, block)?;
+        let volume = Volume::mount(&source)?;
+        let head = volume
+            .entry_at(object.next_link)
+            .ok()
+            .filter(|l| l.kind.is_link() && l.real_entry == block)
+            .ok_or_else(|| {
+                EditError::Damaged(format!(
+                    "{}'s chain of hard links names block {}, which is not a link to it; ADE \
+                     will not edit it",
+                    object.name_lossy(),
+                    object.next_link
+                ))
+            })?;
+        let mut plan = Plan::open(&source, from)?;
+        plan.unlink(block)?;
+        if plan.volume.has_dircache() {
+            plan.rewrite_cache(|records| records.retain(|r| r.header != block))?;
+        }
+        plan.touch(when)?;
+        let writes = plan.finish();
+        apply(&mut work, geometry, &writes);
+        (object, head)
+    };
+    let writes = {
+        let source = Slice {
+            image: &work,
+            geometry,
+        };
+        let mut plan = Plan::open(&source, head.parent)?;
+        plan.unlink(head.block)?;
+        let mut raw = plan.read(block)?;
+        let at = from_end(&raw, 80);
+        if let Some(field) = raw.get_mut(at..at.saturating_add(MAX_NAME + 1)) {
+            field.fill(0);
+        }
+        put_name(&mut raw, &head.name);
+        let _ = put_back(&mut raw, 12, head.parent);
+        let _ = put_back(&mut raw, 40, head.next_link);
+        seal(&mut raw);
+        plan.put(block, raw);
+        plan.insert(block, &head.name)?;
+        if plan.volume.has_dircache() {
+            let record = Record {
+                header: block,
+                size: if object.kind == EntryKind::File {
+                    object.byte_size
+                } else {
+                    0
+                },
+                protection: object.protection,
+                uid: object.uid,
+                gid: object.gid,
+                altered: object.altered,
+                secondary_type: if object.kind == EntryKind::File {
+                    -3
+                } else {
+                    2
+                },
+                name: head.name.clone(),
+                comment: object.comment.clone(),
+            };
+            plan.rewrite_cache(|records| {
+                records.retain(|r| r.header != head.block);
+                records.push(record);
+            })?;
+        }
+        plan.touch(when)?;
+        plan.release(&[head.block]);
+        plan.finish()
+    };
+    apply(&mut work, geometry, &writes);
+    image.copy_from_slice(&work);
+    Ok(())
+}
+
+/// Make a hard link called `name` in the directory at `parent`, to the file
+/// or directory at `object`. Returns the link's block.
+///
+/// As AmigaDOS's `MakeLink … HARD` makes one, measured in FS-UAE: a header
+/// of its own (secondary type -4 for a file, 4 for a directory) holding only
+/// its name, its directory, a datestamp and `real_entry`; at the head of the
+/// object's chain, so the object's `next_link` names it and it names the
+/// link that was there before; and on a dircache volume a record with size
+/// 0. A link to a link is refused — name what it links to — and so is a
+/// directory link inside that directory or below it, which would make the
+/// tree a loop.
+///
+/// # Errors
+/// [`EditError::NotRemovable`] for an object that cannot be linked to, and
+/// why; otherwise as [`make_dir`]. The image is unchanged whenever one is
+/// returned.
+pub fn make_link(
+    image: &mut [u8],
+    geometry: Geometry,
+    object: u32,
+    parent: u32,
+    name: &[u8],
+    when: Stamp,
+) -> Result<u32, EditError> {
+    let plan = {
+        let source = Slice { image, geometry };
+        let mut plan = Plan::new(&source, parent, name)?;
+        let refuse = |why: String| Err(EditError::NotRemovable(why));
+        let root = plan.volume.root();
+        let Ok(target) = plan.volume.entry_at(object) else {
+            return refuse(format!("block {object} is not an entry to link to"));
+        };
+        if object == root || target.kind == EntryKind::Root {
+            return refuse("the volume itself cannot be linked to".to_owned());
+        }
+        let sec = match target.kind {
+            EntryKind::File => ST_LINKFILE,
+            EntryKind::Directory => ST_LINKDIR,
+            EntryKind::HardLinkFile | EntryKind::HardLinkDir => {
+                return refuse(format!(
+                    "{} is itself a hard link; link to what it names, block {}",
+                    target.name_lossy(),
+                    target.real_entry
+                ));
+            }
+            _ => {
+                return refuse(format!(
+                    "{} is not a file or a directory",
+                    target.name_lossy()
+                ));
+            }
+        };
+        let live = plan
+            .volume
+            .walk(root)?
+            .entries
+            .iter()
+            .any(|(_, e)| e.block == object && e.kind == target.kind);
+        if !live {
+            return refuse(format!(
+                "{} is not in the directory tree; only a live entry can be linked to",
+                target.name_lossy()
+            ));
+        }
+        if sec == ST_LINKDIR {
+            let mut up = parent;
+            let mut seen: HashSet<u32> = HashSet::new();
+            while up != 0 && seen.insert(up) {
+                if up == object {
+                    return refuse(format!(
+                        "a link to {} inside itself would make the tree a loop",
+                        target.name_lossy()
+                    ));
+                }
+                if up == root {
+                    break;
+                }
+                up = plan
+                    .volume
+                    .entry_at(up)
+                    .map_err(|_| EditError::NotADirectory { block: parent })?
+                    .parent;
+            }
+        }
+        plan.reserve(1)?;
+        let block = plan.allocate()?;
+        let mut header = plan.entry_block(block, name, sec, 0, when);
+        let _ = put_back(&mut header, 44, object);
+        let _ = put_back(&mut header, 40, target.next_link);
+        seal(&mut header);
+        plan.put(block, header);
+        let mut owner = plan.read(object)?;
+        let _ = put_back(&mut owner, 40, block);
+        seal(&mut owner);
+        plan.put(object, owner);
+        plan.insert(block, name)?;
+        plan.touch(when)?;
+        if plan.volume.has_dircache() {
+            let record = Record {
+                header: block,
+                size: 0,
+                protection: Protection(0),
+                uid: 0,
+                gid: 0,
+                altered: crate::datestamp::Datestamp::new(when.days, when.mins, when.ticks),
+                secondary_type: if sec == ST_LINKFILE { -4 } else { 4 },
+                name: name.to_vec(),
+                comment: Vec::new(),
+            };
+            plan.rewrite_cache(|records| records.push(record))?;
+        }
+        (plan.finish(), block)
+    };
+    apply(image, geometry, &plan.0);
+    Ok(plan.1)
 }
 
 /// Put back the deleted file or directory whose header is at `block` (F-012).
@@ -1072,6 +1344,30 @@ impl<'a> Plan<'a> {
         self.taken_set.insert(block);
         self.cursor = u64::from(block).saturating_add(1);
         Ok(block)
+    }
+
+    /// Take the hard link `link` out of its object's chain: whatever in the
+    /// chain names it — the object, or an older-made link — names its
+    /// successor instead.
+    fn unhook(&mut self, link: &crate::entry::Entry) -> Result<(), EditError> {
+        let mut at = link.real_entry;
+        let mut seen: HashSet<u32> = HashSet::new();
+        while at != 0 && seen.insert(at) {
+            let mut raw = self.read(at)?;
+            let next = u32_at(&raw, from_end(&raw, 40)).unwrap_or(0);
+            if next == link.block {
+                let _ = put_back(&mut raw, 40, link.next_link);
+                seal(&mut raw);
+                self.put(at, raw);
+                return Ok(());
+            }
+            at = next;
+        }
+        Err(EditError::Damaged(format!(
+            "the chain of hard links on block {} does not reach {}; ADE will not edit it",
+            link.real_entry,
+            link.name_lossy()
+        )))
     }
 
     /// Take a particular block, as putting a deleted entry back takes the

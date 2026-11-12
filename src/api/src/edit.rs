@@ -639,6 +639,19 @@ impl Session {
         self.edit(|bytes| fs_edit::make_dir(bytes, geometry, parent, name, when))
     }
 
+    /// Make a hard link called `name` in the directory at `parent`, to the
+    /// file or directory at `object`, as AmigaDOS's `MakeLink … HARD` does.
+    /// Returns the link's block. See [`ade_filesystem::edit::make_link`].
+    ///
+    /// # Errors
+    /// See [`EditError`]. A refused edit leaves the session as it was.
+    pub fn make_link(&mut self, object: u32, parent: u32, name: &[u8]) -> Result<u32, EditError> {
+        self.free_data_allowed()?;
+        let geometry = self.geometry;
+        let when = self.now();
+        self.edit(|bytes| fs_edit::make_link(bytes, geometry, object, parent, name, when))
+    }
+
     /// Add a file holding `data` to the directory at `parent`.
     ///
     /// # Errors

@@ -123,6 +123,7 @@ private slots:
     void theVolumeListedInItsOwnTableIsMarkedAndCannotBeOpened();
     void entriesAreRenamedAndDeletedAndUndoBringsThemBack();
     void deletedEntriesArePutBackInAnyOrder();
+    void aHardLinkIsMadeAndOutlivesItsOriginal();
     void aDiskIsRepairedFromTheDiskMenuAndUndoneInOneStep();
     void rowsDroppedOnAFolderMoveAndAFormatAndWipesUndo();
     void aDiskWhoseFreeBlocksHoldAGameAsksBeforeWriting();
@@ -3333,4 +3334,37 @@ void TestMainWindow::deletedEntriesArePutBackInAnyOrder() {
     // One Undo takes all three off again.
     QVERIFY(window.undoEdit());
     QCOMPARE(tree->topLevelItem(0)->childCount(), 0);
+}
+
+void TestMainWindow::aHardLinkIsMadeAndOutlivesItsOriginal() {
+    // Make hard link beside a file; delete the file; the link keeps it, as
+    // AmigaDOS's Delete promotes a link. One Undo brings the original back.
+    QTemporaryDir dir;
+    const QString disk = blankDisk(dir, QStringLiteral("links.adf"));
+    const QString note = dir.filePath(QStringLiteral("note"));
+    writeFile(note, QByteArray("a linked note"));
+
+    MainWindow window;
+    window.setDiscardConfirmation([](const QString &) { return true; });
+    window.openImage(disk);
+    auto *tree = browser(window);
+    QCOMPARE(window.addFiles(tree->topLevelItem(0), {note}), 1);
+    QTreeWidgetItem *file = childNamed(tree->topLevelItem(0), QStringLiteral("note"));
+    QVERIFY(file);
+    QVERIFY(window.makeLinkTo(file, QStringLiteral("alias")));
+    QTreeWidgetItem *root = tree->topLevelItem(0);
+    QVERIFY(childNamed(root, QStringLiteral("alias")));
+
+    // A link to a link is refused, and says why.
+    QString said;
+    connect(&window, &MainWindow::errorOccurred, [&said](const QString &m) { said = m; });
+    QVERIFY(!window.makeLinkTo(childNamed(root, QStringLiteral("alias")), QStringLiteral("again")));
+    QVERIFY2(said.contains(QStringLiteral("itself a hard link")), qPrintable(said));
+
+    QVERIFY(window.deleteItem(childNamed(tree->topLevelItem(0), QStringLiteral("note"))));
+    root = tree->topLevelItem(0);
+    QVERIFY(!childNamed(root, QStringLiteral("note")));
+    QVERIFY2(childNamed(root, QStringLiteral("alias")), "the link took the file's place");
+    QVERIFY(window.undoEdit());
+    QVERIFY(childNamed(tree->topLevelItem(0), QStringLiteral("note")));
 }

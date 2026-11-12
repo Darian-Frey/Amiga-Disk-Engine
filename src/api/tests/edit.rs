@@ -1056,7 +1056,7 @@ fn a_directory_is_deleted_only_when_empty_or_as_a_whole_tree() {
 }
 
 #[test]
-fn the_root_and_hard_links_are_not_deleted() {
+fn the_root_is_not_deleted_and_generated_links_delete_either_way() {
     let mut s = session(1);
     let root = s.root();
     assert!(matches!(
@@ -1068,20 +1068,30 @@ fn the_root_and_hard_links_are_not_deleted() {
         Err(EditError::Refused(FsEditError::NotRemovable(_)))
     ));
 
-    // A link, and the file it points at: removing either end means
-    // rewriting the link chain, which ADE does not do yet.
-    let mut v = ade_fixtures::Volume::dd(1).named("Links");
-    let target = v.add_file("target", b"linked to");
-    let link = v.add_hardlink("link", target, false);
-    let mut s = Session::from_bytes(v.build()).unwrap();
-    for block in [target, link] {
-        let e = s.delete(block).unwrap_err();
-        assert!(
-            matches!(e, EditError::Refused(FsEditError::NotRemovable(_))),
-            "{e}"
-        );
+    // A link and the file it points at, built by the fixture generator — a
+    // writer that shares no code with ADE's (D-010). Once refused, because
+    // removing either end means rewriting the link chain; now written as
+    // AmigaDOS's `Delete` was measured to, in either order. Deleting the
+    // file promotes the link; deleting the link leaves the file alone.
+    for first_the_target in [true, false] {
+        let mut v = ade_fixtures::Volume::dd(1).named("Links");
+        let target = v.add_file("target", b"linked to");
+        let link = v.add_hardlink("link", target, false);
+        let mut s = Session::from_bytes(v.build()).unwrap();
+        s.set_clock(Some(WHEN));
+        let (gone, kept) = if first_the_target {
+            (target, "link")
+        } else {
+            (link, "target")
+        };
+        s.delete(gone).unwrap_or_else(|e| panic!("{e}"));
+        let image = ade_core::Image::from_bytes(s.bytes().to_vec()).unwrap();
+        let volume = image.volume().unwrap();
+        let entry = volume.lookup(kept).unwrap();
+        assert_eq!(volume.read_file(&entry).unwrap().bytes, b"linked to");
+        let report = ade_core::health::examine(s.bytes().to_vec());
+        assert!(report.is_sound(), "{:?}", report.findings);
     }
-    assert!(!s.is_dirty());
 }
 
 #[test]

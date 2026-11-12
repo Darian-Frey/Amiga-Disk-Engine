@@ -125,6 +125,10 @@ public:
     /// it whatever the order. Returns what happened, refusals with their
     /// reasons — also shown in the status bar.
     QString putBackDeleted(QTreeWidgetItem *item, const QVector<quint32> &blocks);
+    /// Make a hard link called `name`, beside the entry `item` is, to it — as
+    /// AmigaDOS's `MakeLink … HARD` does. The link can be moved like any
+    /// entry; deleting the original promotes it, as on an Amiga.
+    bool makeLinkTo(QTreeWidgetItem *item, const QString &name);
     /// Repair the disk `item` belongs to (F-034): its bitmap, and entries
     /// filed under the wrong hash slot, as one step for Undo. Blocks nothing
     /// reaches stay marked used. Returns the report — also sent through
@@ -419,6 +423,7 @@ private:
     Confirm m_confirmDelete;
     QAction *m_delete = nullptr;
     QAction *m_rename = nullptr;
+    QAction *m_makeLink = nullptr;
     QAction *m_repair = nullptr;
     QAction *m_format = nullptr;
     QAction *m_wipeSlack = nullptr;

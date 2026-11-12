@@ -851,6 +851,19 @@ AdeResult ade_edit_mkdir(AdeImage *image, uint32_t parent, AdeBytes name,
                          uint32_t *out_block, char **out_message);
 AdeResult ade_edit_add_file(AdeImage *image, uint32_t parent, AdeBytes name,
                             AdeBytes data, uint32_t *out_block, char **out_message);
+/* Make a hard link called `name` in the directory at `parent`, to the file or
+ * directory at `object`, as AmigaDOS's MakeLink HARD makes one: at the head of
+ * the object's chain of links. `name` and `out_block` as for ade_edit_mkdir.
+ *
+ * ADE_REFUSED for a link to a link (name what it links to), to the volume, or
+ * to a directory from inside itself or below it, which would make the tree a
+ * loop. ADE_ALREADY_EXISTS when the name is taken.
+ *
+ * Deleting with ade_edit_delete then follows AmigaDOS: a link is unhooked from
+ * its chain; a file or directory that links name gives its place, name and
+ * directory to the newest link, keeping its own header block. */
+AdeResult ade_edit_link(AdeImage *image, uint32_t object, uint32_t parent, AdeBytes name,
+                        uint32_t *out_block, char **out_message);
 
 /* Delete the entry at `block`: a file, a soft link or an empty directory; with
  * `all`, a directory and everything in it, as one undo step. Its blocks are

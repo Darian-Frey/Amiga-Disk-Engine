@@ -314,6 +314,16 @@ fn every_command_either_emits_json_or_refuses_it() {
             Json::Refuses,
         ),
         (
+            "link",
+            vec![
+                d.clone(),
+                "X".into(),
+                "Y".into(),
+                format!("--output={}", out_path("ln.adf")),
+            ],
+            Json::Refuses,
+        ),
+        (
             "undelete",
             vec![
                 d.clone(),

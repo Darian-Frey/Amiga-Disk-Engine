@@ -11,7 +11,19 @@ Effort vocabulary: trivial | small | medium | large.
 
 ## Suggested
 
-_None._
+### IMP-022 An AmigaDOS run that times out says only that it did; the screen that would say why is gone
+**Status:** suggested
+**Effort:** small
+**Found:** 2026-11-12. `what_amigados_deletes_ade_puts_back_and_amigados_reads_again` hung in its first run — AmigaDOS writing files onto three floppies — twice in about eight runs, and passed every other time, including twice straight after with screenshots being taken, so the screen at the moment of the hang has never been seen. The other emulator tests have not hung since FS-UAE was stopped with TERM rather than KILL.
+
+**Where:** [src/api/tests/amigados.rs](../src/api/tests/amigados.rs), `run`.
+
+**What it does.** On a timeout the harness stops the emulator and fails with the last lines of FS-UAE's log, which say nothing about the Amiga's screen. Every hang met so far was a requester or a crash on that screen — *Please insert volume*, *Program failed* — and was diagnosed only by rerunning by hand and taking a screenshot, which an intermittent hang does not allow.
+
+**What would be better.** Before stopping a run that has timed out, capture the FS-UAE window (`import -window`, when ImageMagick is installed; FS-UAE's own screenshot key otherwise) into the run's folder, and name the file in the failure. Kept with the run, so the next hang explains itself.
+
+**Trade-offs.** One more optional tool, used only on a failure and skipped without it. **Not a retry**: a hang is how BUG-023 and BUG-025 showed themselves, and retrying a timed-out run would hide the next one. D-023's reversal condition — flaky runs make the tests opt-in — stays the remedy if the hangs turn out to be FS-UAE's and not ADE's.
+
 
 ## Applied
 

@@ -650,6 +650,14 @@ public:
         r.message = take(why);
         return r;
     }
+    // A hard link called `name` in the folder at `parent`, to `object`.
+    EditResult makeLink(quint32 object, quint32 parent, const QByteArray &name) {
+        EditResult r;
+        char *why = nullptr;
+        r.code = ade_edit_link(m_raw, object, parent, view(name), &r.block, &why);
+        r.message = take(why);
+        return r;
+    }
     EditResult addFile(quint32 parent, const QByteArray &name, const QByteArray &data) {
         EditResult r;
         char *why = nullptr;
