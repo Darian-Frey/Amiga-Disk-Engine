@@ -58,6 +58,14 @@ impl RawImage {
         Ok(Self { bytes, geometry })
     }
 
+    /// The bytes, handed back: for a caller that lent them to be read and
+    /// needs them again, which is cheaper than having copied them (D-024
+    /// part 7).
+    #[must_use]
+    pub fn into_bytes(self) -> Vec<u8> {
+        self.bytes
+    }
+
     /// The raw bytes, for parsers that need to look outside the block grid —
     /// the bootblock spans two blocks, and its checksum covers both.
     #[must_use]

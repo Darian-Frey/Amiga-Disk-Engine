@@ -11,7 +11,19 @@ Effort vocabulary: trivial | small | medium | large.
 
 ## Suggested
 
-_None._
+### IMP-023 An edit still copies the whole image once, to be able to refuse itself
+**Status:** suggested
+**Effort:** medium
+**Found:** 2026-11-13, implementing D-024 part 7. History now keeps the blocks each edit changed, and the health check borrows the image instead of copying it — a `put` on a 500 MB hardfile went from 2.05 GB peak to 1.03 GB. What is left is one copy: the session makes each edit on `next`, a copy of the image, so that an edit the health check objects to leaves the session untouched.
+
+**Where:** [src/api/src/edit.rs](../src/api/src/edit.rs) `Session::edit` and its siblings, and every function in [src/filesystem/src/edit.rs](../src/filesystem/src/edit.rs), which writes its planned blocks into the image it is given.
+
+**What it does.** Two copies of the image at peak: the session's and `next`. For the window's 1 GB limit that is 2 GB; for a 4 GB hardfile from the command line, 8 GB.
+
+**What would be better.** Every filesystem edit already plans its writes in full before placing any (`Plan::finish` returns them). If each returned that plan instead of applying it, the session could save the blocks it is about to overwrite, apply the writes in place, examine, and on a refusal put the saved blocks back — the history step and the rollback would be the same list. One copy of the image, whatever its size.
+
+**Trade-offs.** Touches every edit function, including the two that work on a scratch copy internally (`move_entry`, deleting a linked object), which would need their two plans merged into one. The health check would examine the image in place, so a refusal has to restore it before anything else reads it — which is true of the session today only because nothing else holds it.
+
 
 ## Applied
 

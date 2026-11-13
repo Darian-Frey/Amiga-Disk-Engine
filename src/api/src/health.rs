@@ -544,15 +544,53 @@ pub fn examine_partition(bytes: Vec<u8>, partition: Option<&str>) -> Health {
     examine_into(bytes, partition, &mut HashSet::new())
 }
 
-/// [`examine`], and every block the directory tree reaches — the set the
-/// bitmap is checked against, which a bitmap repair writes back.
-pub(crate) fn examine_in_use(bytes: Vec<u8>) -> (Health, HashSet<u32>) {
+/// [`examine`], handing back the bytes — so a caller that needs them again,
+/// as an edit session does, lends them rather than copying them (D-024 part
+/// 7). For a compressed or raw-track container, whose examination reads
+/// unwrapped or reconstructed bytes, the bytes are copied first and the
+/// originals handed back unchanged.
+#[must_use]
+pub fn examine_returning(bytes: Vec<u8>) -> (Health, Vec<u8>) {
+    examine_lent(bytes, &mut HashSet::new())
+}
+
+/// [`examine_returning`], and every block the directory tree reaches.
+pub(crate) fn examine_in_use_returning(bytes: Vec<u8>) -> (Health, HashSet<u32>, Vec<u8>) {
     let mut in_use = HashSet::new();
-    let health = examine_into(bytes, None, &mut in_use);
-    (health, in_use)
+    let (health, bytes) = examine_lent(bytes, &mut in_use);
+    (health, in_use, bytes)
+}
+
+fn examine_lent(bytes: Vec<u8>, in_use: &mut HashSet<u32>) -> (Health, Vec<u8>) {
+    let head = bytes
+        .get(..crate::inspect::HEAD_BYTES.min(bytes.len()))
+        .unwrap_or(&[]);
+    let kind = ade_container::sniff(head, bytes.len() as u64).kind;
+    if matches!(
+        kind,
+        ade_container::Kind::Gzip
+            | ade_container::Kind::ExtendedAdf { .. }
+            | ade_container::Kind::Scp
+    ) {
+        let health = examine_core(bytes.clone(), None, in_use).0;
+        return (health, bytes);
+    }
+    examine_core(bytes, None, in_use)
 }
 
 fn examine_into(bytes: Vec<u8>, partition: Option<&str>, in_use: &mut HashSet<u32>) -> Health {
+    examine_core(bytes, partition, in_use).0
+}
+
+/// The examination, and the bytes it read: for a plain image the bytes
+/// given; for a compressed or raw-track container the unwrapped or
+/// reconstructed ones, which is why only [`examine_lent`] hands them to a
+/// caller.
+fn examine_core(
+    bytes: Vec<u8>,
+    partition: Option<&str>,
+    in_use: &mut HashSet<u32>,
+) -> (Health, Vec<u8>) {
     // The inspection unwraps an ADZ for itself; everything below reads blocks
     // directly, so it needs the same bytes the inspection saw. Passing the
     // still-compressed ones reported a truncated image on a sound disk.
@@ -560,9 +598,9 @@ fn examine_into(bytes: Vec<u8>, partition: Option<&str>, in_use: &mut HashSet<u3
     // The inspection sees the container as it is — it does its own assembly
     // and reports the result — while the block reads below need the
     // reconstruction. Inspecting the assembled bytes instead would report a
-    // protected disk's container as a plain ADF (F-007).
-    let inspection = inspect_bytes(bytes.clone());
-    let bytes = crate::inspect::assemble_for_reading(bytes);
+    // protected disk's container as a plain ADF (F-007). The inspection hands
+    // back exactly that reconstruction, so it is not made twice.
+    let (inspection, bytes) = crate::inspect::inspect_returning(bytes);
     let mut findings: Vec<Finding> = inspection
         .faults()
         .into_iter()
@@ -578,20 +616,25 @@ fn examine_into(bytes: Vec<u8>, partition: Option<&str>, in_use: &mut HashSet<u3
                 .clone()
                 .unwrap_or_else(|| "no geometry could be established".to_owned()),
         ));
-        return barren(inspection, findings);
+        return (barren(inspection, findings), bytes);
     };
 
     // Asked here, while the bytes are at hand, for the one kind a disk with
     // no volume cannot be told apart from without them. Stops at the first
     // non-zero byte, which on a real disk is in the first few.
     let unformatted = bytes.iter().all(|&b| b == 0);
-    let Ok(image) = ade_container::RawImage::new(bytes, geometry) else {
+    // Checked before the bytes go into an image, so a short one is handed
+    // back with the finding.
+    if (bytes.len() as u64) < geometry.total_bytes() {
         findings.push(Finding::new(
             "image-truncated",
             Severity::Error,
             "the image is shorter than the geometry it claims",
         ));
-        return barren(inspection, findings);
+        return (barren(inspection, findings), bytes);
+    }
+    let Ok(image) = ade_container::RawImage::new(bytes, geometry) else {
+        return (barren(inspection, findings), Vec::new());
     };
     // A partitioned device has no volume at its own rootblock; the volume to
     // examine is inside a partition.
@@ -603,12 +646,12 @@ fn examine_into(bytes: Vec<u8>, partition: Option<&str>, in_use: &mut HashSet<u3
             .find(|p| p.first_block == w.start())
             .map(|p| p.name.clone())
     });
+    if window.is_err() {
+        return (barren(inspection, findings), image.into_bytes());
+    }
     let mounted = match &window {
         Ok(Some(w)) => Volume::mount(w),
-        Ok(None) => Volume::mount(&image),
-        Err(()) => {
-            return barren(inspection, findings);
-        }
+        _ => Volume::mount(&image),
     };
     let Ok(volume) = mounted else {
         // Not an error: a quarter of real images are not AmigaDOS disks.
@@ -624,7 +667,7 @@ fn examine_into(bytes: Vec<u8>, partition: Option<&str>, in_use: &mut HashSet<u3
         if unformatted {
             health.kind = DiskKind::Unformatted;
         }
-        return health;
+        return (health, image.into_bytes());
     };
 
     volume_prelude(&inspection, &volume, &mut findings);
@@ -648,7 +691,7 @@ fn examine_into(bytes: Vec<u8>, partition: Option<&str>, in_use: &mut HashSet<u3
 
     // Worst first, so the first line a reader sees is the one that matters.
     findings.sort_by_key(|f| core::cmp::Reverse(f.severity));
-    Health {
+    let health = Health {
         dircache: scan.dircache.clone(),
         bitmap,
         kind,
@@ -666,7 +709,8 @@ fn examine_into(bytes: Vec<u8>, partition: Option<&str>, in_use: &mut HashSet<u3
                 .and_then(|_| chosen_name.clone()),
         }),
         inspection,
-    }
+    };
+    (health, image.into_bytes())
 }
 
 struct TreeScan {

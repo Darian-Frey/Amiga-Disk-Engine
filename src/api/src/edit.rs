@@ -133,6 +133,90 @@ impl From<FsEditError> for EditError {
     }
 }
 
+/// One step of history: the blocks an edit changed, each holding the version
+/// the image does *not* have — the one before the edit while the step is on
+/// the undo stack, the one after it on the redo stack (D-024 part 7).
+///
+/// Applying a step swaps its blocks with the image's, which makes it its own
+/// inverse: undo and redo are the same operation, and neither copies the
+/// image. An edit to a 500 MB hardfile that changes ten blocks is ten blocks
+/// of history, where a whole-image snapshot was 500 MB.
+#[derive(Debug, Clone, Default)]
+struct Step {
+    /// Each changed chunk: its byte offset, and the version it holds.
+    chunks: Vec<(usize, Vec<u8>)>,
+    /// When the image changed length — which no edit does, but a step must
+    /// not be wrong if one ever did — the other whole image instead.
+    whole: Option<Vec<u8>>,
+}
+
+/// The granularity history is kept in: one 512-byte block.
+const CHUNK: usize = 512;
+
+impl Step {
+    /// The step from `before` to `after`: every chunk that differs, holding
+    /// `before`'s version.
+    fn between(before: Vec<u8>, after: &[u8]) -> Self {
+        if before.len() != after.len() {
+            return Self {
+                chunks: Vec::new(),
+                whole: Some(before),
+            };
+        }
+        let chunks = before
+            .chunks(CHUNK)
+            .zip(after.chunks(CHUNK))
+            .enumerate()
+            .filter(|(_, (old, new))| old != new)
+            .map(|(i, (old, _))| (i.saturating_mul(CHUNK), old.to_vec()))
+            .collect();
+        Self {
+            chunks,
+            whole: None,
+        }
+    }
+
+    /// Swap this step's blocks with `bytes`'s.
+    fn apply(&mut self, bytes: &mut Vec<u8>) {
+        if let Some(whole) = self.whole.as_mut() {
+            std::mem::swap(whole, bytes);
+            return;
+        }
+        for (at, chunk) in &mut self.chunks {
+            if let Some(there) = bytes.get_mut(*at..at.saturating_add(chunk.len())) {
+                there.swap_with_slice(chunk);
+            }
+        }
+    }
+
+    /// Fold a later step of the same group into this one: chunks this step
+    /// already holds keep their earlier version, the rest are added.
+    fn absorb(&mut self, later: Self) {
+        if self.whole.is_some() {
+            return;
+        }
+        if later.whole.is_some() {
+            *self = later;
+            return;
+        }
+        let held: std::collections::HashSet<usize> =
+            self.chunks.iter().map(|(at, _)| *at).collect();
+        self.chunks.extend(
+            later
+                .chunks
+                .into_iter()
+                .filter(|(at, _)| !held.contains(at)),
+        );
+    }
+
+    /// The bytes this step holds.
+    fn size(&self) -> usize {
+        self.whole
+            .as_ref()
+            .map_or_else(|| self.chunks.iter().map(|(_, c)| c.len()).sum(), Vec::len)
+    }
+}
+
 /// A disk open for editing.
 pub struct Session {
     bytes: Vec<u8>,
@@ -151,8 +235,10 @@ pub struct Session {
     /// refused while this is non-zero and `free_data` protects them.
     free_holding_data: usize,
     free_data: FreeData,
-    undo: Vec<Vec<u8>>,
-    redo: Vec<Vec<u8>>,
+    /// History, as the blocks each edit changed (D-024 part 7): never whole
+    /// images, which on a hard disk would be several copies of it.
+    undo: Vec<Step>,
+    redo: Vec<Step>,
     /// Whether there are edits no save has captured.
     dirty: bool,
     /// A fixed datestamp for edits, in place of the clock.
@@ -354,7 +440,6 @@ impl Session {
     /// The first refusal.
     pub fn delete_tree(&mut self, block: u32) -> Result<usize, EditError> {
         let order = self.deletion_order(block)?;
-        let before = self.bytes.clone();
         let (undo_depth, redo, dirty, baseline) = (
             self.undo.len(),
             self.redo.clone(),
@@ -369,8 +454,13 @@ impl Session {
         });
         if result.is_err() {
             // All or nothing: a half-deleted folder is not what was asked for.
-            self.bytes = before;
-            self.undo.truncate(undo_depth);
+            // The removals that were kept are one grouped step; taking it
+            // back puts every block they changed back as it was.
+            while self.undo.len() > undo_depth {
+                if let Some(mut step) = self.undo.pop() {
+                    step.apply(&mut self.bytes);
+                }
+            }
             self.redo = redo;
             self.dirty = dirty;
             self.baseline = baseline;
@@ -439,7 +529,9 @@ impl Session {
     /// [`EditError::Lookup`] if the volume cannot be read. A refused repair
     /// leaves the session as it was.
     pub fn repair(&mut self, free_orphans: bool) -> Result<Repaired, EditError> {
-        let (report, in_use) = health::examine_in_use(self.bytes.clone());
+        let (report, in_use, bytes) =
+            health::examine_in_use_returning(std::mem::take(&mut self.bytes));
+        self.bytes = bytes;
         let image = crate::Image::from_bytes(self.bytes.clone())
             .map_err(|e| EditError::NotEditable(e.to_string()))?;
         let volume = image.volume().map_err(EditError::Lookup)?;
@@ -504,7 +596,7 @@ impl Session {
             // Orphaned blocks are allowed to appear: a bitmap block that
             // failed its checksum hid what it marked, and the repaired one
             // shows it. Everything else is held to the edit's standard.
-            let report = health::examine(next.clone());
+            let (report, next) = health::examine_returning(next);
             self.keep(next, &report, &["orphaned-blocks"])?;
         }
         Ok(done)
@@ -583,7 +675,7 @@ impl Session {
                 dst.copy_from_slice(src);
             }
         }
-        let report = health::examine(next.clone());
+        let (report, next) = health::examine_returning(next);
         self.keep(next, &report, &[])
     }
 
@@ -609,7 +701,9 @@ impl Session {
         let mut next = self.bytes.clone();
         let mut done = Wipe::default();
         if free {
-            let (report, in_use) = health::examine_in_use(self.bytes.clone());
+            let (report, in_use, bytes) =
+                health::examine_in_use_returning(std::mem::take(&mut self.bytes));
+            self.bytes = bytes;
             let image = crate::Image::from_bytes(self.bytes.clone())
                 .map_err(|e| EditError::NotEditable(e.to_string()))?;
             let volume = image.volume().map_err(EditError::Lookup)?;
@@ -630,7 +724,7 @@ impl Session {
             done.slack = Some(ade_filesystem::wipe::slack(&mut next, self.geometry)?);
         }
         if done.blocks() > 0 {
-            let report = health::examine(next.clone());
+            let (report, next) = health::examine_returning(next);
             self.keep(next, &report, &[])?;
         }
         Ok(done)
@@ -723,7 +817,7 @@ impl Session {
         }
         let mut next = self.bytes.clone();
         let block = change(&mut next)?;
-        let report = health::examine(next.clone());
+        let (report, next) = health::examine_returning(next);
         self.keep(next, &report, &[])?;
         Ok(block)
     }
@@ -758,11 +852,16 @@ impl Session {
         }
 
         let previous = std::mem::replace(&mut self.bytes, next);
-        // Inside a group only the first edit records where to undo to, so the
-        // whole group comes off with one Undo.
-        if self.group_depth == 0 || !self.group_snapshot {
-            self.push_undo(previous);
-            self.group_snapshot = self.group_depth > 0;
+        let step = Step::between(previous, &self.bytes);
+        // Inside a group every edit joins one step, so the whole group comes
+        // off with one Undo; a block the group already changed keeps the
+        // version from before the group.
+        match self.undo.last_mut() {
+            Some(open) if self.group_depth > 0 && self.group_snapshot => open.absorb(step),
+            _ => {
+                self.push_undo(step);
+                self.group_snapshot = self.group_depth > 0;
+            }
         }
         self.redo.clear();
         self.baseline = after;
@@ -772,12 +871,12 @@ impl Session {
         Ok(())
     }
 
-    fn push_undo(&mut self, bytes: Vec<u8>) {
-        self.undo.push(bytes);
-        let mut held: usize = self.undo.iter().map(Vec::len).sum();
+    fn push_undo(&mut self, step: Step) {
+        self.undo.push(step);
+        let mut held: usize = self.undo.iter().map(Step::size).sum();
         while held > UNDO_BUDGET && self.undo.len() > 1 {
             let dropped = self.undo.remove(0);
-            held = held.saturating_sub(dropped.len());
+            held = held.saturating_sub(dropped.size());
         }
     }
 
@@ -826,6 +925,13 @@ impl Session {
         !self.undo.is_empty()
     }
 
+    /// How many bytes Undo and Redo hold: the blocks edits changed, never
+    /// the image (D-024 part 7).
+    #[must_use]
+    pub fn history_bytes(&self) -> usize {
+        self.undo.iter().chain(&self.redo).map(Step::size).sum()
+    }
+
     /// Whether there is an undone edit to redo.
     #[must_use]
     pub fn can_redo(&self) -> bool {
@@ -835,11 +941,11 @@ impl Session {
     /// Undo the last edit. Returns whether there was one.
     pub fn undo(&mut self) -> bool {
         self.close_groups();
-        let Some(previous) = self.undo.pop() else {
+        let Some(mut step) = self.undo.pop() else {
             return false;
         };
-        let current = std::mem::replace(&mut self.bytes, previous);
-        self.redo.push(current);
+        step.apply(&mut self.bytes);
+        self.redo.push(step);
         self.settle();
         true
     }
@@ -847,11 +953,11 @@ impl Session {
     /// Redo the last undone edit. Returns whether there was one.
     pub fn redo(&mut self) -> bool {
         self.close_groups();
-        let Some(next) = self.redo.pop() else {
+        let Some(mut step) = self.redo.pop() else {
             return false;
         };
-        let current = std::mem::replace(&mut self.bytes, next);
-        self.push_undo(current);
+        step.apply(&mut self.bytes);
+        self.push_undo(step);
         self.settle();
         true
     }
@@ -859,7 +965,8 @@ impl Session {
     /// After moving through history: the baseline follows the bytes, and the
     /// disk counts as changed — a save may already hold a different state.
     fn settle(&mut self) {
-        let report = health::examine(self.bytes.clone());
+        let (report, bytes) = health::examine_returning(std::mem::take(&mut self.bytes));
+        self.bytes = bytes;
         self.baseline = problems(&report);
         self.unsound = unsound(&report);
         self.free_holding_data = free_holding_data(&report);
@@ -1250,4 +1357,60 @@ fn write_atomically(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
         let _ = fs::remove_file(&temp);
     }
     result
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::indexing_slicing,
+    clippy::unwrap_used,
+    reason = "tests build their own buffers"
+)]
+mod tests {
+    use super::{CHUNK, Step};
+
+    #[test]
+    fn a_step_holds_only_what_changed_and_is_its_own_inverse() {
+        let before = vec![1u8; CHUNK * 8];
+        let mut after = before.clone();
+        after[CHUNK * 3 + 7] = 9;
+        after[CHUNK * 6] = 9;
+        let mut step = Step::between(before.clone(), &after);
+        assert_eq!(step.size(), CHUNK * 2, "two blocks changed, two held");
+
+        let mut image = after.clone();
+        step.apply(&mut image);
+        assert_eq!(image, before, "applied once: undone");
+        step.apply(&mut image);
+        assert_eq!(image, after, "applied again: redone");
+    }
+
+    #[test]
+    fn a_group_keeps_each_blocks_earliest_version() {
+        // Three states of one image; a group spanning both edits must take
+        // it back to the first, even where the second edit changed a block
+        // the first had already changed.
+        let first = vec![0u8; CHUNK * 4];
+        let mut second = first.clone();
+        second[0] = 1;
+        let mut third = second.clone();
+        third[0] = 2;
+        third[CHUNK * 2] = 2;
+        let mut group = Step::between(first.clone(), &second);
+        group.absorb(Step::between(second, &third));
+        let mut image = third;
+        group.apply(&mut image);
+        assert_eq!(image, first);
+    }
+
+    #[test]
+    fn an_image_that_changed_length_is_held_whole() {
+        let before = vec![5u8; CHUNK * 2];
+        let after = vec![5u8; CHUNK * 3];
+        let mut step = Step::between(before.clone(), &after);
+        let mut image = after.clone();
+        step.apply(&mut image);
+        assert_eq!(image, before);
+        step.apply(&mut image);
+        assert_eq!(image, after);
+    }
 }

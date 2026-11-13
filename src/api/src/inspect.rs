@@ -35,7 +35,7 @@ use crate::json::Value;
 
 /// Bytes of an image that sniffing needs — the first two blocks, plus enough
 /// to scan sixteen blocks for an RDB.
-const HEAD_BYTES: usize = 512 * 16;
+pub(crate) const HEAD_BYTES: usize = 512 * 16;
 
 /// The most a compressed image may expand to (AV-005).
 ///
@@ -68,20 +68,6 @@ pub struct Compression {
 /// A container that is not compressed passes straight through. A wrapper that
 /// fails to decompress yields the *original* bytes and a recorded error, so the
 /// caller still reports something truthful about the file rather than nothing.
-/// Reconstruct a raw-track container so blocks can be read from it (F-007).
-///
-/// A pass-through for every other container. Anything that reads blocks
-/// directly rather than through an [`Inspection`] needs this, or it sees the
-/// track table as if it were sectors.
-pub(crate) fn assemble_for_reading(bytes: Vec<u8>) -> Vec<u8> {
-    let head = bytes.get(..HEAD_BYTES.min(bytes.len())).unwrap_or(&[]);
-    let kind = sniff(head, bytes.len() as u64).kind;
-    match assemble_container(&bytes, kind) {
-        Some((assembled, _)) => assembled,
-        None => bytes,
-    }
-}
-
 pub(crate) fn unwrap_container(bytes: Vec<u8>) -> (Vec<u8>, Option<Compression>) {
     let size = bytes.len() as u64;
     let head = bytes.get(..HEAD_BYTES.min(bytes.len())).unwrap_or(&[]);
@@ -757,6 +743,14 @@ pub fn inspect_bytes_named(bytes: Vec<u8>, catalogue: Option<&Catalogue>) -> Ins
 /// Inspect an image already in memory.
 #[must_use]
 pub fn inspect_bytes(bytes: Vec<u8>) -> Inspection {
+    inspect_returning(bytes).0
+}
+
+/// [`inspect_bytes`], handing back the bytes it read: for a plain image the
+/// bytes given; for a compressed or raw-track container, the unwrapped or
+/// reconstructed ones. Lets a caller that needs the bytes afterwards lend them
+/// rather than copy them (D-024 part 7).
+pub(crate) fn inspect_returning(bytes: Vec<u8>) -> (Inspection, Vec<u8>) {
     // ADZ and HDZ are gzip-wrapped ADF and HDF; everything below this line
     // sees the image itself, and the wrapper is reported separately.
     let (bytes, compression) = unwrap_container(bytes);
@@ -806,12 +800,15 @@ pub fn inspect_bytes(bytes: Vec<u8>) -> Inspection {
         detection.kind
     };
     let Some(geometry) = geometry_for(geometry_kind, bytes.len() as u64) else {
-        return unreadable_container(detection, size, bootblock, tracks, flux, compression);
+        return (
+            unreadable_container(detection, size, bootblock, tracks, flux, compression),
+            bytes,
+        );
     };
     let geometry = match geometry {
         Ok(g) => g,
         Err(e) => {
-            return Inspection {
+            let inspection = Inspection {
                 detection,
                 size,
                 geometry: None,
@@ -829,13 +826,25 @@ pub fn inspect_bytes(bytes: Vec<u8>) -> Inspection {
                 partition_faults: Vec::new(),
                 identified: Vec::new(),
             };
+            return (inspection, bytes);
         }
     };
 
     // The volume may be smaller than the file it sits in (BUG-009).
     let geometry = volume_geometry(&bytes, geometry);
+    // Checked before the bytes go into an image, so a short one is still
+    // handed back.
+    if (bytes.len() as u64) < geometry.total_bytes() {
+        return (
+            too_short(detection, size, geometry, bootblock, compression),
+            bytes,
+        );
+    }
     let Ok(image) = RawImage::new(bytes, geometry) else {
-        return too_short(detection, size, geometry, bootblock, compression);
+        return (
+            too_short(detection, size, geometry, bootblock, compression),
+            Vec::new(),
+        );
     };
     let (volume, volume_absent) = read_volume(&image, geometry);
     // Needs a real mount rather than the rootblock parse above, because it is
@@ -845,7 +854,7 @@ pub fn inspect_bytes(bytes: Vec<u8>) -> Inspection {
         .ok()
         .and_then(|v| read_description(&v));
     let (rdb, partitions, partition_faults) = read_partition_table(&image);
-    Inspection {
+    let inspection = Inspection {
         tracks,
         flux,
         assembly,
@@ -865,7 +874,8 @@ pub fn inspect_bytes(bytes: Vec<u8>) -> Inspection {
         partitions,
         partition_faults,
         identified: Vec::new(),
-    }
+    };
+    (inspection, image.into_bytes())
 }
 
 /// Read the partition table, mounting each partition far enough to learn its

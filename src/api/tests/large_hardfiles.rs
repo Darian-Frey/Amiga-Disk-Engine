@@ -173,3 +173,92 @@ fn adflib_reads_a_large_hardfile_ade_writes() {
     assert!(listing.contains("big.bin"), "{listing}");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn history_on_a_large_hardfile_is_the_blocks_edits_changed_not_the_disk() {
+    // D-024 part 7: Undo once kept a whole image per step — on a hard disk,
+    // copies of the disk. It now keeps the blocks each edit changed.
+    let geometry = Shape::Hard(100).geometry().unwrap();
+    let blank = format::blank(
+        geometry,
+        Dostype::from_raw(0x444F_5301).unwrap(),
+        "Hist",
+        WHEN,
+    )
+    .unwrap();
+    let mut s = Session::from_bytes(blank.clone()).unwrap();
+    s.set_clock(Some(WHEN));
+    let root = s.root();
+    s.add_file(root, b"one", &pattern(20_000, 1)).unwrap();
+    let after_one = s.bytes().to_vec();
+    s.grouped(|s| {
+        for i in 0..20u8 {
+            s.add_file(root, format!("drop{i}").as_bytes(), &pattern(3_000, i))
+                .unwrap();
+        }
+    });
+    let after_group = s.bytes().to_vec();
+    // A few dozen blocks of history for 21 files, on a 100 MB disk.
+    assert!(
+        s.history_bytes() < 512 * 1024,
+        "history holds {} bytes",
+        s.history_bytes()
+    );
+
+    // One Undo takes the whole group off; another the first file; Redo puts
+    // them back, each exactly.
+    assert!(s.undo());
+    assert!(
+        s.bytes() == after_one.as_slice(),
+        "the group came off as one"
+    );
+    assert!(s.undo());
+    assert!(s.bytes() == blank.as_slice(), "the disk as it was made");
+    assert!(s.redo() && s.redo());
+    assert!(s.bytes() == after_group.as_slice());
+}
+
+#[test]
+fn a_folder_deletion_that_fails_part_way_is_taken_back_exactly() {
+    // `delete_tree` is all or nothing: if one removal is refused, the ones
+    // already made are undone. It once kept a copy of the whole disk to do
+    // that; it now takes back the grouped step. The failure is real: a file
+    // whose header names another directory as its parent (BUG-018), which
+    // ADE will not edit — and deletion goes deepest first, so the good files
+    // in `Box/Sub` are deleted before `Box/bad` is refused.
+    use ade_core::layers::block::checksum::normal_at;
+    use ade_core::layers::endian::put_u32;
+    let geometry = Shape::Hard(60).geometry().unwrap();
+    let blank = format::blank(
+        geometry,
+        Dostype::from_raw(0x444F_5301).unwrap(),
+        "Tree",
+        WHEN,
+    )
+    .unwrap();
+    let mut s = Session::from_bytes(blank).unwrap();
+    s.set_clock(Some(WHEN));
+    let root = s.root();
+    let dir = s.make_dir(root, b"Box").unwrap();
+    let sub = s.make_dir(dir, b"Sub").unwrap();
+    s.add_file(sub, b"one", &pattern(4_000, 1)).unwrap();
+    s.add_file(sub, b"two", &pattern(4_000, 2)).unwrap();
+    let bad = s.add_file(dir, b"bad", b"names the wrong parent").unwrap();
+
+    let mut bytes = s.bytes().to_vec();
+    let at = bad as usize * 512;
+    put_u32(&mut bytes, at + 512 - 12, root).unwrap();
+    put_u32(&mut bytes, at + 20, 0).unwrap();
+    let sum = normal_at(&bytes[at..at + 512], 20).unwrap();
+    put_u32(&mut bytes, at + 20, sum).unwrap();
+    let mut s = Session::from_bytes(bytes.clone()).unwrap();
+    s.set_clock(Some(WHEN));
+
+    assert!(s.delete_tree(dir).is_err(), "Box/bad cannot be deleted");
+    assert!(
+        s.bytes() == bytes.as_slice(),
+        "every removal before it is taken back"
+    );
+    assert!(!s.can_undo(), "and nothing is left on the undo stack");
+    assert_eq!(s.history_bytes(), 0);
+}
