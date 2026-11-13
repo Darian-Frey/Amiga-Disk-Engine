@@ -643,78 +643,81 @@ public:
     // Writing into the disk (D-018). Every edit changes the open image in
     // memory; nothing reaches a file until saveAs, which never writes over the
     // file it was opened from. An edit invalidates strings borrowed from the
-    // image — volumeName() and the rest are re-read, never cached.
-    EditResult makeDir(quint32 parent, const QByteArray &name) {
+    // image — volumeName() and the rest are re-read, never cached. Each takes
+    // the partition it is made in, as the reading calls do: ADE_WHOLE_IMAGE
+    // for a disk that is its own volume, and block numbers are that
+    // partition's.
+    EditResult makeDir(quint32 partition, quint32 parent, const QByteArray &name) {
         EditResult r;
         char *why = nullptr;
-        r.code = ade_edit_mkdir(m_raw, parent, view(name), &r.block, &why);
+        r.code = ade_edit_mkdir(m_raw, partition, parent, view(name), &r.block, &why);
         r.message = take(why);
         return r;
     }
     // A hard link called `name` in the folder at `parent`, to `object`.
-    EditResult makeLink(quint32 object, quint32 parent, const QByteArray &name) {
+    EditResult makeLink(quint32 partition, quint32 object, quint32 parent, const QByteArray &name) {
         EditResult r;
         char *why = nullptr;
-        r.code = ade_edit_link(m_raw, object, parent, view(name), &r.block, &why);
+        r.code = ade_edit_link(m_raw, partition, object, parent, view(name), &r.block, &why);
         r.message = take(why);
         return r;
     }
-    EditResult addFile(quint32 parent, const QByteArray &name, const QByteArray &data) {
+    EditResult addFile(quint32 partition, quint32 parent, const QByteArray &name, const QByteArray &data) {
         EditResult r;
         char *why = nullptr;
-        r.code = ade_edit_add_file(m_raw, parent, view(name), view(data), &r.block, &why);
+        r.code = ade_edit_add_file(m_raw, partition, parent, view(name), view(data), &r.block, &why);
         r.message = take(why);
         return r;
     }
     // `all` deletes a folder with everything in it, as one undo step.
-    EditResult deleteEntry(quint32 block, bool all) {
+    EditResult deleteEntry(quint32 partition, quint32 block, bool all) {
         EditResult r;
         char *why = nullptr;
-        r.code = ade_edit_delete(m_raw, block, all, &why);
+        r.code = ade_edit_delete(m_raw, partition, block, all, &why);
         r.message = take(why);
         r.block = block;
         return r;
     }
     // F-012: put back a deleted entry, by its header's block as carve lists it.
-    EditResult undeleteEntry(quint32 block) {
+    EditResult undeleteEntry(quint32 partition, quint32 block) {
         EditResult r;
         char *why = nullptr;
-        r.code = ade_edit_undelete(m_raw, block, &why);
+        r.code = ade_edit_undelete(m_raw, partition, block, &why);
         r.message = take(why);
         r.block = block;
         return r;
     }
-    EditResult renameEntry(quint32 block, const QByteArray &name) {
+    EditResult renameEntry(quint32 partition, quint32 block, const QByteArray &name) {
         EditResult r;
         char *why = nullptr;
-        r.code = ade_edit_rename(m_raw, block, view(name), &why);
+        r.code = ade_edit_rename(m_raw, partition, block, view(name), &why);
         r.message = take(why);
         r.block = block;
         return r;
     }
-    EditResult moveEntry(quint32 block, quint32 to) {
+    EditResult moveEntry(quint32 partition, quint32 block, quint32 to) {
         EditResult r;
         char *why = nullptr;
-        r.code = ade_edit_move(m_raw, block, to, &why);
+        r.code = ade_edit_move(m_raw, partition, block, to, &why);
         r.message = take(why);
         r.block = block;
         return r;
     }
     /// Quick-format in place; an empty `name` keeps the old one.
-    EditResult format(const QByteArray &name) {
+    EditResult format(quint32 partition, const QByteArray &name) {
         EditResult r;
         char *why = nullptr;
-        r.code = ade_edit_format(m_raw, view(name), &why);
+        r.code = ade_edit_format(m_raw, partition, view(name), &why);
         r.message = take(why);
         return r;
     }
     /// Zero file slack, free blocks or both. On success `message` is the
     /// report; otherwise why not.
-    EditResult wipe(bool slack, bool free) {
+    EditResult wipe(quint32 partition, bool slack, bool free) {
         EditResult r;
         char *report = nullptr;
         char *why = nullptr;
-        r.code = ade_edit_wipe(m_raw, slack, free, &report, &why);
+        r.code = ade_edit_wipe(m_raw, partition, slack, free, &report, &why);
         const QString said = take(report);
         const QString refused = take(why);
         r.message = r.ok() ? said : refused;
@@ -722,11 +725,11 @@ public:
     }
     /// Repair the bitmap and misfiled entries (F-034). On success `message`
     /// is the report, a line per thing done or left; otherwise why not.
-    EditResult repair(bool freeOrphans) {
+    EditResult repair(quint32 partition, bool freeOrphans) {
         EditResult r;
         char *report = nullptr;
         char *why = nullptr;
-        r.code = ade_edit_repair(m_raw, freeOrphans, &report, &why);
+        r.code = ade_edit_repair(m_raw, partition, freeOrphans, &report, &why);
         const QString said = take(report);
         const QString refused = take(why);
         r.message = r.ok() ? said : refused;

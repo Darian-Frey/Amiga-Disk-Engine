@@ -346,16 +346,6 @@ fn a_command_that_cannot_honour_partition_refuses_it() {
     for (command, why) in [
         (vec!["specs", "@", "--partition=DH0"], "as a whole"),
         (vec!["info", "@", "--partition=DH0"], "as a whole"),
-        (
-            vec![
-                "mkdir",
-                "@",
-                "X",
-                "--partition=DH0",
-                "--output=/nonexistent/x.hdf",
-            ],
-            "Phase 6",
-        ),
         (vec!["batch", "@", "--partition=DH0"], "takes no partition"),
     ] {
         let (code, _, err) = run_at("refused", &command);
@@ -365,4 +355,61 @@ fn a_command_that_cannot_honour_partition_refuses_it() {
             "{err}"
         );
     }
+}
+
+#[test]
+fn an_edit_goes_into_the_partition_named_and_nowhere_else() {
+    let dir = std::env::temp_dir().join(format!("ade-part-edit-{}", std::process::id()));
+    fs::create_dir_all(&dir).unwrap();
+    let image = dir.join("in.hdf");
+    let edited = dir.join("out.hdf");
+    fs::write(&image, device()).unwrap();
+    let ade_at = |args: &[&str]| {
+        let out = Command::new(ade()).args(args).output().unwrap();
+        (
+            out.status.code().unwrap_or(-1),
+            String::from_utf8_lossy(&out.stdout).into_owned(),
+            String::from_utf8_lossy(&out.stderr).into_owned(),
+        )
+    };
+    let (image_s, edited_s) = (image.to_str().unwrap(), edited.to_str().unwrap());
+
+    // A device needs --partition: an edit does not pick one quietly.
+    let (code, _, err) = ade_at(&["mkdir", image_s, "Docs", &format!("--output={edited_s}")]);
+    assert_eq!(code, 2, "{err}");
+    assert!(
+        err.contains("--partition") && err.contains("DH0, DH1"),
+        "{err}"
+    );
+    assert!(!edited.exists(), "nothing is written");
+
+    // A partition the device lacks is named in the refusal.
+    let (code, _, err) = ade_at(&[
+        "mkdir",
+        image_s,
+        "Docs",
+        "--partition=DH9",
+        &format!("--output={edited_s}"),
+    ]);
+    assert_eq!(code, 2, "{err}");
+    assert!(
+        err.contains("no partition \"DH9\"; this device has DH0, DH1"),
+        "{err}"
+    );
+
+    let (code, out, err) = ade_at(&[
+        "mkdir",
+        image_s,
+        "Docs",
+        "--partition=dh1",
+        &format!("--output={edited_s}"),
+    ]);
+    assert_eq!(code, 0, "{out}{err}");
+    let (_, listing, _) = ade_at(&["ls", edited_s, "--partition=DH1"]);
+    assert!(listing.contains("Docs"), "{listing}");
+    let (_, listing, _) = ade_at(&["ls", edited_s, "--partition=DH0"]);
+    assert!(!listing.contains("Docs"), "DH0 untouched: {listing}");
+    let (code, report, _) = ade_at(&["check", edited_s, "--partition=DH1"]);
+    assert_eq!(code, 0, "{report}");
+    let _ = fs::remove_dir_all(&dir);
 }

@@ -1001,3 +1001,104 @@ fn large_hardfiles_need_a_bitmap_chain_and_amigados_reads_and_writes_both_ways()
     );
     assert!(faults_on(&zeros).is_empty(), "{:?}", faults_on(&zeros));
 }
+
+/// A file's bytes in partition `name` of a device, as ADE reads it.
+fn read_in_partition(bytes: &[u8], name: &str, path: &str) -> Option<Vec<u8>> {
+    let image = Image::from_bytes(bytes.to_vec()).unwrap();
+    let (parts, _) = image.partitions().unwrap();
+    let p = parts.iter().find(|p| p.name_lossy() == name)?;
+    let window = image.partition_window(p).unwrap();
+    let volume = ade_core::layers::filesystem::volume::Volume::mount(&window).ok()?;
+    let entry = volume.lookup(path).ok()?;
+    if entry.kind.is_directory() {
+        return Some(Vec::new());
+    }
+    Some(volume.read_file(&entry).unwrap().bytes)
+}
+
+fn partition_faults(bytes: &[u8], name: &str) -> Vec<String> {
+    ade_core::health::examine_partition(bytes.to_vec(), Some(name))
+        .findings
+        .iter()
+        .filter(|f| f.severity >= ade_core::Severity::Warning)
+        .map(|f| format!("{}: {}", f.code, f.message))
+        .collect()
+}
+
+#[test]
+fn amigados_reads_and_writes_the_partitions_ade_edits_on_a_partitioned_disk() {
+    // F-038, D-024: ADE edits inside each partition of an RDB disk; AmigaDOS
+    // mounts the partitions from the table and reads what ADE wrote, then
+    // writes its own, which ADE reads. The disk is the fixture generator's
+    // (D-010), without its placeholder filesystem driver, so the Amiga mounts
+    // the partitions with the FFS in its ROM. The partitions are DH1 and DH2
+    // because the boot folder is DH0.
+    let Some(setup) = setup() else { return };
+    let dir = scratch("rdb");
+    fs::create_dir_all(&dir).unwrap();
+    let mut device = ade_fixtures::device::Device::new(200, 4, 32).without_filesystem_driver();
+    device.add_partition("DH1", 2, 99, 1, false, |v| {
+        v.add_file("hello", b"from the fixture");
+    });
+    device.add_partition("DH2", 100, 199, 0, false, |v| {
+        v.add_file("data.bin", &[0xAA; 3000]);
+    });
+    let built = device.build();
+
+    let ffs_payload = pattern(150_000, 21);
+    let ofs_payload = pattern(40_000, 22);
+    let theirs = pattern(60_000, 23);
+    let mut s = Session::from_bytes(built.clone()).unwrap();
+    s.set_clock(Some(WHEN));
+    s.select_partition("DH2").unwrap();
+    let root = s.root();
+    let sub = s.make_dir(root, b"Dir").unwrap();
+    s.add_file(sub, b"payload.bin", &ofs_payload).unwrap();
+    s.select_partition("DH1").unwrap();
+    let root = s.root();
+    s.add_file(root, b"payload.bin", &ffs_payload).unwrap();
+    s.rename(s.entry("hello").unwrap(), b"hello.txt").unwrap();
+    let disk = dir.join("rdb.hdf");
+    fs::write(&disk, s.bytes()).unwrap();
+    drop(s);
+
+    let commands = "C:Copy DH1:payload.bin SYS:out/ffs\n\
+                    C:Copy DH2:Dir/payload.bin SYS:out/ofs\n\
+                    C:Copy DH1:hello.txt SYS:out/hello\n\
+                    C:Copy SYS:in/theirs DH2:theirs.bin\n\
+                    C:MakeDir DH1:Theirs\n\
+                    C:Lock DH2: ON\n";
+    let outcome = run_with(
+        &setup,
+        "rdb",
+        (&[], &[&disk]),
+        &[("theirs", &theirs)],
+        commands,
+        Duration::from_secs(120),
+    )
+    .unwrap();
+    let got = |name: &str| fs::read(outcome.out.join(name)).ok();
+    assert!(
+        got("ffs").as_deref() == Some(ffs_payload.as_slice()),
+        "AmigaDOS read different bytes from DH1 (FFS)"
+    );
+    assert!(
+        got("ofs").as_deref() == Some(ofs_payload.as_slice()),
+        "AmigaDOS read different bytes from DH2 (OFS)"
+    );
+    assert_eq!(got("hello").as_deref(), Some(&b"from the fixture"[..]));
+
+    // What AmigaDOS wrote, ADE reads; both partitions sound, and the table
+    // still one ADE will edit.
+    let after = fs::read(&disk).unwrap();
+    assert!(read_in_partition(&after, "DH2", "theirs.bin") == Some(theirs));
+    assert!(read_in_partition(&after, "DH1", "Theirs").is_some());
+    for name in ["DH1", "DH2"] {
+        assert!(
+            partition_faults(&after, name).is_empty(),
+            "{name}: {:?}",
+            partition_faults(&after, name)
+        );
+    }
+    assert!(Session::from_bytes(after).is_ok());
+}

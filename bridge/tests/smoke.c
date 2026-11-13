@@ -220,37 +220,37 @@ int main(int argc, char **argv) {
             /* Deleting and renaming (F-031): the root is not an entry, so both
                are refused before anything is written; NULL is tolerated. */
             AdeBytes newname = {(const uint8_t *)"x", 1};
-            check(ade_edit_delete(image, ade_image_root_block(image), false, NULL) ==
+            check(ade_edit_delete(image, ADE_WHOLE_IMAGE, ade_image_root_block(image), false, NULL) ==
                           ADE_REFUSED &&
-                      ade_edit_rename(image, ade_image_root_block(image), newname, NULL) ==
+                      ade_edit_rename(image, ADE_WHOLE_IMAGE, ade_image_root_block(image), newname, NULL) ==
                           ADE_REFUSED &&
-                      ade_edit_delete(NULL, 0, true, NULL) == ADE_NULL_ARGUMENT,
+                      ade_edit_delete(NULL, ADE_WHOLE_IMAGE, 0, true, NULL) == ADE_NULL_ARGUMENT,
                   "the root cannot be deleted or renamed");
             /* Hard links: the volume itself cannot be linked to; NULL tolerated. */
             AdeBytes linkname = {(const uint8_t *)"l", 1};
-            check(ade_edit_link(image, ade_image_root_block(image), ade_image_root_block(image),
+            check(ade_edit_link(image, ADE_WHOLE_IMAGE, ade_image_root_block(image), ade_image_root_block(image),
                                 linkname, NULL, NULL) == ADE_REFUSED &&
-                      ade_edit_link(NULL, 0, 0, linkname, NULL, NULL) == ADE_NULL_ARGUMENT,
+                      ade_edit_link(NULL, ADE_WHOLE_IMAGE, 0, 0, linkname, NULL, NULL) == ADE_NULL_ARGUMENT,
                   "the volume is not something to link to");
             /* Undelete (F-012): the root was never deleted; NULL tolerated. */
-            check(ade_edit_undelete(image, ade_image_root_block(image), NULL) == ADE_REFUSED &&
-                      ade_edit_undelete(NULL, 0, NULL) == ADE_NULL_ARGUMENT,
+            check(ade_edit_undelete(image, ADE_WHOLE_IMAGE, ade_image_root_block(image), NULL) == ADE_REFUSED &&
+                      ade_edit_undelete(NULL, ADE_WHOLE_IMAGE, 0, NULL) == ADE_NULL_ARGUMENT,
                   "the root is not something to undelete");
 
             /* Repairing (F-034): a report either way, and NULL tolerated. */
             char *report = NULL;
-            check(ade_edit_repair(image, false, &report, NULL) == ADE_OK && report != NULL &&
+            check(ade_edit_repair(image, ADE_WHOLE_IMAGE, false, &report, NULL) == ADE_OK && report != NULL &&
                       report[0] != '\0' &&
-                      ade_edit_repair(NULL, false, NULL, NULL) == ADE_NULL_ARGUMENT,
+                      ade_edit_repair(NULL, ADE_WHOLE_IMAGE, false, NULL, NULL) == ADE_NULL_ARGUMENT,
                   "a repair says what it did");
             ade_string_free(report);
 
             /* The rest of the write suite (F-031): NULL is tolerated, and a
                wipe asked for nothing is refused before anything is touched. */
             AdeBytes keep = {(const uint8_t *)"", 0};
-            check(ade_edit_move(NULL, 0, 0, NULL) == ADE_NULL_ARGUMENT &&
-                      ade_edit_format(NULL, keep, NULL) == ADE_NULL_ARGUMENT &&
-                      ade_edit_wipe(image, false, false, NULL, NULL) == ADE_REFUSED,
+            check(ade_edit_move(NULL, ADE_WHOLE_IMAGE, 0, 0, NULL) == ADE_NULL_ARGUMENT &&
+                      ade_edit_format(NULL, ADE_WHOLE_IMAGE, keep, NULL) == ADE_NULL_ARGUMENT &&
+                      ade_edit_wipe(image, ADE_WHOLE_IMAGE, false, false, NULL, NULL) == ADE_REFUSED,
                   "move, format and wipe check their arguments");
         }
         AdeDisasm *boot = ade_disasm_bootblock(image);
@@ -426,14 +426,14 @@ int main(int argc, char **argv) {
         AdeBytes dir = { dir_name, sizeof dir_name - 1 };
         uint32_t made_dir = 0;
         char *why = NULL;
-        check(ade_edit_mkdir(fresh, root, dir, &made_dir, &why) == ADE_OK && made_dir != 0,
+        check(ade_edit_mkdir(fresh, ADE_WHOLE_IMAGE, root, dir, &made_dir, &why) == ADE_OK && made_dir != 0,
               "a directory is made");
         ade_string_free(why);
         const uint8_t file_name[] = "f\xfcr";
         const uint8_t contents[] = "written through the C ABI";
         AdeBytes file = { file_name, sizeof file_name - 1 };
         AdeBytes data = { contents, sizeof contents - 1 };
-        check(ade_edit_add_file(fresh, made_dir, file, data, NULL, NULL) == ADE_OK,
+        check(ade_edit_add_file(fresh, ADE_WHOLE_IMAGE, made_dir, file, data, NULL, NULL) == ADE_OK,
               "a file with a Latin-1 name is added inside it");
         check(ade_image_is_modified(fresh), "the image says it is modified");
         check(ade_edit_group_end(fresh) == ADE_NOT_FOUND, "no group to close");

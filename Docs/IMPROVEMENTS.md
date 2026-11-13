@@ -11,7 +11,44 @@ Effort vocabulary: trivial | small | medium | large.
 
 ## Suggested
 
-_None._
+### IMP-024 On a partitioned disk, the window asks about free blocks holding data for the partition last edited, not the one about to be
+**Status:** suggested
+**Effort:** small
+**Found:** 2026-11-13, making edits inside partitions (F-038).
+
+**Where:** [bridge/src/lib.rs](../bridge/src/lib.rs) `ade_image_free_blocks_holding_data` and `ade_edit_allow_overwriting_free_data`, which take no partition; [gui/src/MainWindow.cpp](../gui/src/MainWindow.cpp) `mayOverwriteFreeData`, which asks before an edit.
+
+**What it does.** The session keeps the free-data guard (IMP-019) per partition, and both calls answer for the partition the last edit went to. The window asks *before* an edit, so on a hard disk where one partition is an emptied game disk and the edit goes to another, it can ask about the wrong one — or not ask. Nothing is lost: the engine still refuses the edit, and the refusal is shown, but the person gets an error where they should have had the question.
+
+**What would be better.** Both calls take the partition selector, as every other call does since F-038.
+
+**Trade-offs.** Two more signature changes to the ABI. The case needs a hard disk with a partition holding free data behind an empty root, which is rare on hard disks and absent from the material on hand.
+
+### IMP-025 After every edit, the ABI handle copies the whole image three times
+**Status:** suggested
+**Effort:** small
+**Found:** 2026-11-13, reading `refresh` while making the ABI's edits take a partition.
+
+**Where:** [bridge/src/lib.rs](../bridge/src/lib.rs) `refresh`.
+
+**What it does.** To re-read the edited disk, `refresh` copies the session's bytes (`to_vec`), then clones that copy for the health report and again for the inspection, and keeps the first as the handle's `Image`. The session itself peaks at one copy since IMP-023; the window, through this, holds four for a moment after each edit — 4 GB at its 1 GB limit.
+
+**What would be better.** The `_returning` forms the session uses (`examine_returning`, `inspect_returning`) lend the bytes and hand them back, so one copy for the handle's `Image` would do; or the handle could read through the session instead of keeping its own.
+
+**Trade-offs.** The handle's `Image` is borrowed by volumes the window holds between calls (IMP-006), so it cannot simply borrow the session's bytes without a lifetime the ABI cannot express.
+
+### IMP-026 The partition-table check at open does not hold partitions to the cylinders the RDB reserves for them
+**Status:** suggested
+**Effort:** small
+**Found:** 2026-11-13, implementing D-024 part 3's table checks.
+
+**Where:** [src/api/src/edit.rs](../src/api/src/edit.rs) `table_faults`.
+
+**What it does.** A partitioned disk opens for editing only if its table is sound: checksums, each partition inside the disk and past the table's own blocks, no overlaps, unique names, and the chain faults the reader already reports. D-024 part 3 also names *inside the cylinders the RDB reserves for partitions* — the `RDSK` block's `LoCylinder`/`HiCylinder` — which `RdbInfo` does not carry, so it is not checked.
+
+**What would be better.** Read the two fields into `RdbInfo` and check every partition against them.
+
+**Trade-offs.** None worth the name; edits cannot write outside a partition in any case, so this guards against opening a table that is wrong, not against writing one. It matters more when ADE edits tables.
 
 ## Applied
 

@@ -22,6 +22,8 @@
 use ade_core::layers::endian::{put_u16, put_u32};
 use std::ffi::{CStr, CString};
 
+/// The partition an edit on a floppy or unpartitioned hardfile names.
+use ade::ADE_WHOLE_IMAGE as WHOLE;
 use ade::{AdeEntry, AdeEntryKind, AdeResult};
 
 /// Write a fixture and hand back its path as a C string.
@@ -1428,6 +1430,7 @@ fn an_edit_shows_in_the_next_listing_and_saves_only_to_a_new_file() {
         let mut message = std::ptr::null_mut();
         let made = ade::ade_edit_mkdir(
             image,
+            WHOLE,
             root,
             ade::AdeBytes {
                 data: name.as_ptr(),
@@ -1450,6 +1453,7 @@ fn an_edit_shows_in_the_next_listing_and_saves_only_to_a_new_file() {
         let data = b"from C";
         let added = ade::ade_edit_add_file(
             image,
+            WHOLE,
             block,
             ade::AdeBytes {
                 data: file.as_ptr(),
@@ -1468,6 +1472,7 @@ fn an_edit_shows_in_the_next_listing_and_saves_only_to_a_new_file() {
         let mut message = std::ptr::null_mut();
         let again = ade::ade_edit_mkdir(
             image,
+            WHOLE,
             root,
             ade::AdeBytes {
                 data: b"DRAWER".as_ptr(),
@@ -1535,11 +1540,11 @@ fn the_edit_calls_tolerate_null() {
     unsafe {
         let null = std::ptr::null_mut();
         assert_eq!(
-            ade::ade_edit_mkdir(null, 880, empty, null.cast(), null.cast()),
+            ade::ade_edit_mkdir(null, WHOLE, 880, empty, null.cast(), null.cast()),
             AdeResult::NullArgument
         );
         assert_eq!(
-            ade::ade_edit_add_file(null, 880, empty, empty, null.cast(), null.cast()),
+            ade::ade_edit_add_file(null, WHOLE, 880, empty, empty, null.cast(), null.cast()),
             AdeResult::NullArgument
         );
         assert!(!ade::ade_image_is_modified(null));
@@ -1562,7 +1567,7 @@ fn the_edit_calls_tolerate_null() {
             len: 3,
         };
         assert_eq!(
-            ade::ade_edit_mkdir(null, 880, bad, null.cast(), null.cast()),
+            ade::ade_edit_mkdir(null, WHOLE, 880, bad, null.cast(), null.cast()),
             AdeResult::NullArgument
         );
     }
@@ -2089,6 +2094,7 @@ fn a_hard_link_is_made_and_outlives_its_original_through_the_abi() {
         assert_eq!(
             ade::ade_edit_add_file(
                 image,
+                WHOLE,
                 root,
                 bytes(b"original"),
                 bytes(b"kept by the link"),
@@ -2101,6 +2107,7 @@ fn a_hard_link_is_made_and_outlives_its_original_through_the_abi() {
         assert_eq!(
             ade::ade_edit_link(
                 image,
+                WHOLE,
                 file,
                 root,
                 bytes(b"alias"),
@@ -2114,6 +2121,7 @@ fn a_hard_link_is_made_and_outlives_its_original_through_the_abi() {
         assert_eq!(
             ade::ade_edit_link(
                 image,
+                WHOLE,
                 link,
                 root,
                 bytes(b"again"),
@@ -2125,6 +2133,7 @@ fn a_hard_link_is_made_and_outlives_its_original_through_the_abi() {
         assert_eq!(
             ade::ade_edit_link(
                 image,
+                WHOLE,
                 file,
                 root,
                 bytes(b"ALIAS"),
@@ -2136,7 +2145,7 @@ fn a_hard_link_is_made_and_outlives_its_original_through_the_abi() {
         // Deleting the original promotes the link: one entry, named alias,
         // in the original's header block.
         assert_eq!(
-            ade::ade_edit_delete(image, file, false, std::ptr::null_mut()),
+            ade::ade_edit_delete(image, WHOLE, file, false, std::ptr::null_mut()),
             AdeResult::Ok
         );
         let listing = ade::ade_dir_open(image, ade::ADE_WHOLE_IMAGE, root);
@@ -2170,6 +2179,7 @@ fn an_entry_is_renamed_and_deleted_through_the_abi() {
         assert_eq!(
             ade::ade_edit_add_file(
                 image,
+                WHOLE,
                 root,
                 bytes(name),
                 bytes(data),
@@ -2191,7 +2201,7 @@ fn an_entry_is_renamed_and_deleted_through_the_abi() {
         };
 
         assert_eq!(
-            ade::ade_edit_rename(image, block, bytes(b"final"), std::ptr::null_mut()),
+            ade::ade_edit_rename(image, WHOLE, block, bytes(b"final"), std::ptr::null_mut()),
             AdeResult::Ok
         );
         assert_eq!(names(image), vec![b"final".to_vec()]);
@@ -2199,14 +2209,14 @@ fn an_entry_is_renamed_and_deleted_through_the_abi() {
         // The root is not an entry, and says why.
         let mut why: *mut std::ffi::c_char = std::ptr::null_mut();
         assert_eq!(
-            ade::ade_edit_delete(image, root, false, &raw mut why),
+            ade::ade_edit_delete(image, WHOLE, root, false, &raw mut why),
             AdeResult::Refused
         );
         assert!(!why.is_null());
         ade::ade_string_free(why);
 
         assert_eq!(
-            ade::ade_edit_delete(image, block, false, std::ptr::null_mut()),
+            ade::ade_edit_delete(image, WHOLE, block, false, std::ptr::null_mut()),
             AdeResult::Ok
         );
         assert_eq!(names(image), Vec::<Vec<u8>>::new());
@@ -2216,12 +2226,12 @@ fn an_entry_is_renamed_and_deleted_through_the_abi() {
         // Deleted again, and put back by undelete rather than undo (F-012);
         // undeleting what is not deleted is refused.
         assert_eq!(
-            ade::ade_edit_delete(image, block, false, std::ptr::null_mut()),
+            ade::ade_edit_delete(image, WHOLE, block, false, std::ptr::null_mut()),
             AdeResult::Ok
         );
         assert_eq!(names(image), Vec::<Vec<u8>>::new());
         assert_eq!(
-            ade::ade_edit_undelete(image, block, std::ptr::null_mut()),
+            ade::ade_edit_undelete(image, WHOLE, block, std::ptr::null_mut()),
             AdeResult::Ok
         );
         assert_eq!(
@@ -2230,13 +2240,13 @@ fn an_entry_is_renamed_and_deleted_through_the_abi() {
             "undelete brings it back"
         );
         assert_eq!(
-            ade::ade_edit_undelete(image, block, std::ptr::null_mut()),
+            ade::ade_edit_undelete(image, WHOLE, block, std::ptr::null_mut()),
             AdeResult::Refused
         );
 
         // Null is tolerated.
         assert_eq!(
-            ade::ade_edit_delete(std::ptr::null_mut(), 0, false, std::ptr::null_mut()),
+            ade::ade_edit_delete(std::ptr::null_mut(), WHOLE, 0, false, std::ptr::null_mut()),
             AdeResult::NullArgument
         );
         ade::ade_image_free(image);
@@ -2263,6 +2273,7 @@ fn a_group_opened_before_the_first_edit_still_undoes_as_one() {
             assert_eq!(
                 ade::ade_edit_mkdir(
                     image,
+                    WHOLE,
                     root,
                     bytes,
                     std::ptr::null_mut(),
@@ -2313,6 +2324,7 @@ fn save_over_keeps_the_original_once_and_writes_the_edit() {
         };
         ade::ade_edit_mkdir(
             image,
+            WHOLE,
             root,
             bytes,
             std::ptr::null_mut(),
@@ -2336,6 +2348,7 @@ fn save_over_keeps_the_original_once_and_writes_the_edit() {
         };
         ade::ade_edit_mkdir(
             image,
+            WHOLE,
             root,
             bytes,
             std::ptr::null_mut(),
@@ -2382,7 +2395,7 @@ fn a_disk_is_repaired_through_the_abi() {
         let report = |image| {
             let mut text: *mut std::ffi::c_char = std::ptr::null_mut();
             assert_eq!(
-                ade::ade_edit_repair(image, false, &raw mut text, std::ptr::null_mut()),
+                ade::ade_edit_repair(image, WHOLE, false, &raw mut text, std::ptr::null_mut()),
                 AdeResult::Ok
             );
             assert!(!text.is_null());
@@ -2402,6 +2415,7 @@ fn a_disk_is_repaired_through_the_abi() {
         assert_eq!(
             ade::ade_edit_repair(
                 std::ptr::null_mut(),
+                WHOLE,
                 false,
                 std::ptr::null_mut(),
                 std::ptr::null_mut()
@@ -2409,7 +2423,13 @@ fn a_disk_is_repaired_through_the_abi() {
             AdeResult::NullArgument
         );
         assert_eq!(
-            ade::ade_edit_repair(image, false, std::ptr::null_mut(), std::ptr::null_mut()),
+            ade::ade_edit_repair(
+                image,
+                WHOLE,
+                false,
+                std::ptr::null_mut(),
+                std::ptr::null_mut()
+            ),
             AdeResult::Ok
         );
         ade::ade_image_free(image);
@@ -2471,6 +2491,7 @@ fn a_decoded_picture_says_the_shape_of_its_pixels() {
 
 #[test]
 fn an_entry_moves_and_a_disk_is_wiped_and_formatted_through_the_abi() {
+    use std::ptr::null_mut as none;
     let (path, c_path) = fixture("suite", &blank_disk());
     let bytes = |b: &[u8]| ade::AdeBytes {
         data: b.as_ptr(),
@@ -2478,27 +2499,22 @@ fn an_entry_moves_and_a_disk_is_wiped_and_formatted_through_the_abi() {
     };
     // SAFETY: a valid path; every handle and string is freed once.
     unsafe {
-        let image = ade::ade_image_open(c_path.as_ptr(), std::ptr::null(), std::ptr::null_mut());
+        let image = ade::ade_image_open(c_path.as_ptr(), std::ptr::null(), none());
         let root = ade::ade_image_root_block(image);
         let (mut dir, mut file) = (0u32, 0u32);
         assert_eq!(
-            ade::ade_edit_mkdir(
-                image,
-                root,
-                bytes(b"Box"),
-                &raw mut dir,
-                std::ptr::null_mut()
-            ),
+            ade::ade_edit_mkdir(image, WHOLE, root, bytes(b"Box"), &raw mut dir, none()),
             AdeResult::Ok
         );
         assert_eq!(
             ade::ade_edit_add_file(
                 image,
+                WHOLE,
                 root,
                 bytes(b"note"),
                 bytes(b"contents"),
                 &raw mut file,
-                std::ptr::null_mut()
+                none()
             ),
             AdeResult::Ok
         );
@@ -2509,22 +2525,22 @@ fn an_entry_moves_and_a_disk_is_wiped_and_formatted_through_the_abi() {
             n
         };
         assert_eq!(
-            ade::ade_edit_move(image, file, dir, std::ptr::null_mut()),
+            ade::ade_edit_move(image, WHOLE, file, dir, none()),
             AdeResult::Ok
         );
         assert_eq!((count(image, root), count(image, dir)), (1, 1));
-        let mut why: *mut std::ffi::c_char = std::ptr::null_mut();
+        let mut why: *mut std::ffi::c_char = none();
         assert_eq!(
-            ade::ade_edit_move(image, dir, dir, &raw mut why),
+            ade::ade_edit_move(image, WHOLE, dir, dir, &raw mut why),
             AdeResult::Refused
         );
         assert!(!why.is_null());
         ade::ade_string_free(why);
 
         // A wipe says what it did; asked for nothing, it is refused.
-        let mut report: *mut std::ffi::c_char = std::ptr::null_mut();
+        let mut report: *mut std::ffi::c_char = none();
         assert_eq!(
-            ade::ade_edit_wipe(image, true, true, &raw mut report, std::ptr::null_mut()),
+            ade::ade_edit_wipe(image, WHOLE, true, true, &raw mut report, none()),
             AdeResult::Ok
         );
         let text = CStr::from_ptr(report).to_string_lossy().into_owned();
@@ -2534,19 +2550,13 @@ fn an_entry_moves_and_a_disk_is_wiped_and_formatted_through_the_abi() {
             "{text}"
         );
         assert_eq!(
-            ade::ade_edit_wipe(
-                image,
-                false,
-                false,
-                std::ptr::null_mut(),
-                std::ptr::null_mut()
-            ),
+            ade::ade_edit_wipe(image, WHOLE, false, false, none(), none()),
             AdeResult::Refused
         );
 
         // Formatted under a new name: empty, and one undo brings it all back.
         assert_eq!(
-            ade::ade_edit_format(image, bytes(b"Fresh"), std::ptr::null_mut()),
+            ade::ade_edit_format(image, WHOLE, bytes(b"Fresh"), none()),
             AdeResult::Ok
         );
         assert_eq!(count(image, root), 0);
@@ -2555,11 +2565,11 @@ fn an_entry_moves_and_a_disk_is_wiped_and_formatted_through_the_abi() {
 
         // Null is tolerated.
         assert_eq!(
-            ade::ade_edit_move(std::ptr::null_mut(), 0, 0, std::ptr::null_mut()),
+            ade::ade_edit_move(none(), WHOLE, 0, 0, none()),
             AdeResult::NullArgument
         );
         assert_eq!(
-            ade::ade_edit_format(std::ptr::null_mut(), bytes(b""), std::ptr::null_mut()),
+            ade::ade_edit_format(none(), WHOLE, bytes(b""), none()),
             AdeResult::NullArgument
         );
         ade::ade_image_free(image);
@@ -2591,6 +2601,7 @@ fn a_disk_whose_free_blocks_hold_data_is_written_only_when_allowed() {
         assert_eq!(
             ade::ade_edit_add_file(
                 image,
+                WHOLE,
                 root,
                 bytes(b"note"),
                 bytes(b"text"),
@@ -2608,6 +2619,7 @@ fn a_disk_whose_free_blocks_hold_data_is_written_only_when_allowed() {
         assert_eq!(
             ade::ade_edit_wipe(
                 image,
+                WHOLE,
                 false,
                 true,
                 std::ptr::null_mut(),
@@ -2624,6 +2636,7 @@ fn a_disk_whose_free_blocks_hold_data_is_written_only_when_allowed() {
         assert_eq!(
             ade::ade_edit_mkdir(
                 image,
+                WHOLE,
                 root,
                 bytes(b"Box"),
                 std::ptr::null_mut(),
@@ -2676,6 +2689,7 @@ fn what_a_disk_is_comes_through_the_abi_and_follows_an_edit() {
         assert_eq!(
             ade::ade_edit_add_file(
                 image,
+                WHOLE,
                 root,
                 ade::AdeBytes {
                     data: name.as_ptr(),
@@ -2701,4 +2715,115 @@ fn what_a_disk_is_comes_through_the_abi_and_follows_an_edit() {
     }
     let _ = std::fs::remove_file(&data_path);
     let _ = std::fs::remove_file(&blank_path);
+}
+
+/// How many entries the directory at `block` of `partition` holds.
+///
+/// # Safety
+/// `image` must be a live handle.
+unsafe fn count(image: *const ade::AdeImage, partition: u32, block: u32) -> usize {
+    // SAFETY: the caller's contract.
+    unsafe {
+        let listing = ade::ade_dir_open(image, partition, block);
+        assert!(!listing.is_null());
+        let n = ade::ade_listing_count(listing);
+        ade::ade_listing_free(listing);
+        n
+    }
+}
+
+#[test]
+fn an_edit_names_its_partition_and_lands_in_it() {
+    // F-038: every edit takes the partition as the reading calls do, so a
+    // front end editing DH1 says so on each call.
+    let (path, c_path) = fixture("partedit", &two_partition_device());
+    let bytes = |b: &[u8]| ade::AdeBytes {
+        data: b.as_ptr(),
+        len: b.len(),
+    };
+    // SAFETY: a valid path; every handle is freed once; strings returned are
+    // freed with ade_string_free.
+    unsafe {
+        let image = ade::ade_image_open(c_path.as_ptr(), std::ptr::null(), std::ptr::null_mut());
+        let table = ade::ade_partitions_open(image);
+        let mut p = std::mem::zeroed::<ade::AdePartition>();
+        assert_eq!(
+            ade::ade_partitions_entry(table, 1, &raw mut p),
+            AdeResult::Ok
+        );
+        let dh1_root = p.root_block;
+        assert_eq!(
+            ade::ade_partitions_entry(table, 0, &raw mut p),
+            AdeResult::Ok
+        );
+        let dh0_root = p.root_block;
+        ade::ade_partitions_free(table);
+
+        // The whole image is not a volume on a device: refused, with why.
+        let mut why: *mut std::ffi::c_char = std::ptr::null_mut();
+        assert_eq!(
+            ade::ade_edit_mkdir(
+                image,
+                WHOLE,
+                dh1_root,
+                bytes(b"Nowhere"),
+                std::ptr::null_mut(),
+                &raw mut why
+            ),
+            AdeResult::Refused
+        );
+        assert!(!why.is_null());
+        let text = std::ffi::CStr::from_ptr(why).to_string_lossy().into_owned();
+        assert!(text.contains("partition"), "{text}");
+        ade::ade_string_free(why);
+
+        let mut made = 0u32;
+        assert_eq!(
+            ade::ade_edit_mkdir(
+                image,
+                1,
+                dh1_root,
+                bytes(b"Docs"),
+                &raw mut made,
+                std::ptr::null_mut()
+            ),
+            AdeResult::Ok
+        );
+        assert_ne!(made, 0);
+        assert_eq!(count(image, 1, dh1_root), 2, "data.bin and Docs");
+        assert_eq!(count(image, 0, dh0_root), 2, "DH0 as it was");
+
+        // Then DH0, and Undo takes back DH0's edit, then DH1's.
+        assert_eq!(
+            ade::ade_edit_mkdir(
+                image,
+                0,
+                dh0_root,
+                bytes(b"More"),
+                std::ptr::null_mut(),
+                std::ptr::null_mut()
+            ),
+            AdeResult::Ok
+        );
+        assert_eq!(count(image, 0, dh0_root), 3);
+        assert_eq!(ade::ade_edit_undo(image), AdeResult::Ok);
+        assert_eq!(count(image, 0, dh0_root), 2);
+        assert_eq!(ade::ade_edit_undo(image), AdeResult::Ok);
+        assert_eq!(count(image, 1, dh1_root), 1);
+
+        // A partition the device lacks is refused, not a crash.
+        assert_eq!(
+            ade::ade_edit_mkdir(
+                image,
+                7,
+                dh1_root,
+                bytes(b"X"),
+                std::ptr::null_mut(),
+                std::ptr::null_mut()
+            ),
+            AdeResult::Refused
+        );
+        ade::ade_image_free(image);
+    }
+    let _ = std::fs::remove_file(&path);
 }

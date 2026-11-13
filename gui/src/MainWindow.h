@@ -125,6 +125,10 @@ public:
     /// it whatever the order. Returns what happened, refusals with their
     /// reasons — also shown in the status bar.
     QString putBackDeleted(QTreeWidgetItem *item, const QVector<quint32> &blocks);
+    /// As above, each entry by its partition and block — on a hard disk the
+    /// same block number is a different block in every partition.
+    QString putBackEntries(QTreeWidgetItem *item,
+                           const QVector<QPair<quint32, quint32>> &entries);
     /// Make a hard link called `name`, beside the entry `item` is, to it — as
     /// AmigaDOS's `MakeLink … HARD` does. The link can be moved like any
     /// entry; deleting the original promotes it, as on an Amiga.
@@ -252,13 +256,18 @@ private:
     // last edited, else the only one open.
     Open *editTarget();
     // The directory block `item` stands for, as a place to put things: itself
-    // if a directory, its parent if a file, the root for a disk's own row.
-    // Zero when it is not on a disk ADE can write into.
+    // if a directory, its parent if a file, the root for a disk's own row or
+    // a partition's. Zero when it is not in a volume ADE can write into — a
+    // hard disk's own row among them, whose volumes are in its partitions.
     quint32 directoryFor(const QTreeWidgetItem *item, const Open &open) const;
+    // Which partition of `open` an edit on `item` goes to; refused with a
+    // message, as false, for a partitioned disk's own row, which is no volume.
+    bool partitionFor(const QTreeWidgetItem *item, const Open &open, const QString &doing,
+                      quint32 *out);
     // One host path onto the disk, folders recursively, counting what was
     // made and collecting what was refused.
-    void addPath(Open &open, quint32 dir, const QString &path, int depth, int *made,
-                 QStringList *refused);
+    void addPath(Open &open, quint32 partition, quint32 dir, const QString &path, int depth,
+                 int *made, QStringList *refused);
     // Rebuild a disk's rows after it changed, keeping open what was open.
     void reloadImage(Open &open);
     void updateEditActions();

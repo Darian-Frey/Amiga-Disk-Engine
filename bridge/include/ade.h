@@ -827,8 +827,19 @@ void        ade_decoded_free(AdeDecoded *decoded);
  * was opened from, nor over any existing file this handle did not save. A
  * save is atomic: a temporary file beside the destination, then a rename.
  *
- * Only plain ADF and unpartitioned hardfile images can be edited. Anything
- * else is ADE_REFUSED with the reason.
+ * Plain ADF images, unpartitioned hardfiles and partitioned hard disks can be
+ * edited. Anything else is ADE_REFUSED with the reason. So is a partitioned
+ * disk whose partition table is not sound — a checksum that fails, partitions
+ * that overlap, run past the disk or into the table's own blocks, or share a
+ * name — since an edit could not be trusted to land where it was meant.
+ *
+ * Every edit takes `partition` as the reading calls do: ADE_WHOLE_IMAGE on a
+ * floppy or unpartitioned hardfile, and on a partitioned disk the index from
+ * ade_partitions_open of the partition to edit, whose numbering `block`,
+ * `parent` and the rest then follow. ADE_WHOLE_IMAGE on a partitioned disk,
+ * or an index on an image without partitions, is ADE_REFUSED. Every write an
+ * edit makes lands inside that partition. Undo and redo are the disk's: they
+ * take back the last edit, whichever partition it was in.
  *
  * Every edit is checked with ADE's health report before it is kept. If the
  * result has a problem the disk did not already have, the edit is undone and
@@ -852,10 +863,11 @@ void        ade_decoded_free(AdeDecoded *decoded);
  * names), ADE_NOT_FOUND when `parent` is not a directory, ADE_REFUSED for
  * everything else ADE will not do — a full disk, a damaged directory, a
  * bitmap it cannot trust. */
-AdeResult ade_edit_mkdir(AdeImage *image, uint32_t parent, AdeBytes name,
-                         uint32_t *out_block, char **out_message);
-AdeResult ade_edit_add_file(AdeImage *image, uint32_t parent, AdeBytes name,
-                            AdeBytes data, uint32_t *out_block, char **out_message);
+AdeResult ade_edit_mkdir(AdeImage *image, uint32_t partition, uint32_t parent,
+                         AdeBytes name, uint32_t *out_block, char **out_message);
+AdeResult ade_edit_add_file(AdeImage *image, uint32_t partition, uint32_t parent,
+                            AdeBytes name, AdeBytes data, uint32_t *out_block,
+                            char **out_message);
 /* Make a hard link called `name` in the directory at `parent`, to the file or
  * directory at `object`, as AmigaDOS's MakeLink HARD makes one: at the head of
  * the object's chain of links. `name` and `out_block` as for ade_edit_mkdir.
@@ -867,8 +879,9 @@ AdeResult ade_edit_add_file(AdeImage *image, uint32_t parent, AdeBytes name,
  * Deleting with ade_edit_delete then follows AmigaDOS: a link is unhooked from
  * its chain; a file or directory that links name gives its place, name and
  * directory to the newest link, keeping its own header block. */
-AdeResult ade_edit_link(AdeImage *image, uint32_t object, uint32_t parent, AdeBytes name,
-                        uint32_t *out_block, char **out_message);
+AdeResult ade_edit_link(AdeImage *image, uint32_t partition, uint32_t object,
+                        uint32_t parent, AdeBytes name, uint32_t *out_block,
+                        char **out_message);
 
 /* Delete the entry at `block`: a file, a soft link or an empty directory; with
  * `all`, a directory and everything in it, as one undo step. Its blocks are
@@ -877,7 +890,8 @@ AdeResult ade_edit_link(AdeImage *image, uint32_t object, uint32_t parent, AdeBy
  *
  * ADE_REFUSED for the root, a directory with entries when `all` is false, or
  * anything a hard link is part of (ADE does not rewrite link chains yet). */
-AdeResult ade_edit_delete(AdeImage *image, uint32_t block, bool all, char **out_message);
+AdeResult ade_edit_delete(AdeImage *image, uint32_t partition, uint32_t block, bool all,
+                          char **out_message);
 /* Put back the deleted file or directory whose header is at `block`, as
  * ade_image_carve lists them (F-012): back into its directory, its blocks
  * marked used again, its cache record rebuilt. One undo step.
@@ -888,27 +902,31 @@ AdeResult ade_edit_delete(AdeImage *image, uint32_t block, bool all, char **out_
  * ADE_ALREADY_EXISTS when its name has been taken in that directory. An FFS
  * file is put back, but nothing confirms its contents: the carve's evidence
  * says so. */
-AdeResult ade_edit_undelete(AdeImage *image, uint32_t block, char **out_message);
+AdeResult ade_edit_undelete(AdeImage *image, uint32_t partition, uint32_t block,
+                            char **out_message);
 /* Rename the entry at `block`, in the directory it is in. `name` as for
  * ade_edit_mkdir. ADE_ALREADY_EXISTS when another entry has the name; a change
  * of case alone is allowed. ADE_REFUSED for the root. */
-AdeResult ade_edit_rename(AdeImage *image, uint32_t block, AdeBytes name, char **out_message);
+AdeResult ade_edit_rename(AdeImage *image, uint32_t partition, uint32_t block,
+                          AdeBytes name, char **out_message);
 /* Move the entry at `block` into the directory at `to`, keeping its name.
  * ADE_REFUSED for the root, a folder moved inside itself, or one already
  * there; ADE_ALREADY_EXISTS when the destination has the name. */
-AdeResult ade_edit_move(AdeImage *image, uint32_t block, uint32_t to, char **out_message);
+AdeResult ade_edit_move(AdeImage *image, uint32_t partition, uint32_t block, uint32_t to,
+                        char **out_message);
 /* Quick-format in place, one undo step: a new bootblock, rootblock and bitmap
  * of the same size and filesystem, named `name` (Latin-1; empty keeps the old
  * name). Every other block is left, free, for a carve to find. Allowed on a
  * disk too damaged for any other edit. */
-AdeResult ade_edit_format(AdeImage *image, AdeBytes name, char **out_message);
+AdeResult ade_edit_format(AdeImage *image, uint32_t partition, AdeBytes name,
+                          char **out_message);
 /* Zero file slack, free blocks, or both, one undo step. `out_report` gets a
  * line per part, and one per file left alone with why; free it with
  * ade_string_free. Wiping free blocks destroys what a carve could recover,
  * and is refused when the bitmap or the tree cannot say which blocks are
  * free. ADE_REFUSED when asked for neither. */
-AdeResult ade_edit_wipe(AdeImage *image, bool slack, bool free, char **out_report,
-                        char **out_message);
+AdeResult ade_edit_wipe(AdeImage *image, uint32_t partition, bool slack, bool free,
+                        char **out_report, char **out_message);
 /* Repair the bitmap -- every block in use marked used, every bitmap block
  * sealed, the valid flag set -- and move entries filed under the wrong hash
  * slot to the one their name hashes to: one undo step. `out_report` receives a
@@ -916,15 +934,17 @@ AdeResult ade_edit_wipe(AdeImage *image, bool slack, bool free, char **out_repor
  * nothing needed it); free it with ade_string_free. Blocks marked used that
  * nothing reaches stay used unless `free_orphans` is set. ADE_OK even when
  * something is left: that is in the report. */
-AdeResult ade_edit_repair(AdeImage *image, bool free_orphans, char **out_report,
-                          char **out_message);
+AdeResult ade_edit_repair(AdeImage *image, uint32_t partition, bool free_orphans,
+                          char **out_report, char **out_message);
 
 /* On a volume with no files, how many blocks the bitmap marks free hold data:
  * usually a game its own loader reads (IMP-019). 0 on any other volume, and
  * for NULL. While it is not 0, ade_edit_mkdir, ade_edit_add_file and a wipe
  * of free blocks are ADE_REFUSED until ade_edit_allow_overwriting_free_data
  * says writing over them is meant -- for as long as the handle is open. A
- * front end asks the person first. */
+ * front end asks the person first. On a partitioned disk both are about the
+ * partition of the last edit: try the edit, and on ADE_REFUSED ask, allow and
+ * try again. Allowing it for one partition does not allow it for another. */
 size_t    ade_image_free_blocks_holding_data(const AdeImage *image);
 AdeResult ade_edit_allow_overwriting_free_data(AdeImage *image);
 

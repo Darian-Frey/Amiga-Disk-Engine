@@ -1690,6 +1690,22 @@ void MainWindow::showSurface() {
     dialog.exec();
 }
 
+// The index of the partition called `name` on `image`, as the edit calls take
+// it; ADE_WHOLE_IMAGE for an empty name, which is a disk that is its own
+// volume.
+static quint32 partitionNamed(const ade::Image &image, const QString &name) {
+    if (name.isEmpty()) return ADE_WHOLE_IMAGE;
+    const ade::Partitions partitions = image.partitions();
+    if (!partitions) return ADE_WHOLE_IMAGE;
+    for (size_t i = 0; i < partitions.count(); ++i) {
+        AdePartition partition{};
+        if (partitions.at(i, &partition) && ade::latin1(partition.name) == name) {
+            return static_cast<quint32>(i);
+        }
+    }
+    return ADE_WHOLE_IMAGE;
+}
+
 void MainWindow::recoverLostFiles() {
     Open *open = imageFor(m_selected);
     if (!open) {
@@ -1784,17 +1800,20 @@ void MainWindow::recoverLostFiles() {
     putBack->setToolTip(QStringLiteral(
         "Undelete the selected entries — or all of them — into the folders they were in. "
         "One step for Undo; nothing is saved until you save the disk."));
-    connect(putBack, &QPushButton::clicked, &dialog, [this, &dialog, &carve, table, count] {
-        QVector<quint32> wanted;
+    connect(putBack, &QPushButton::clicked, &dialog, [this, &dialog, &carve, table, count, open] {
+        // Each by its partition as well as its block: on a hard disk the
+        // same number is a different block in every partition.
+        QVector<QPair<quint32, quint32>> wanted;
+        const auto add = [&](size_t i) {
+            wanted.append({partitionNamed(open->image, carve.partition(i)), carve.block(i)});
+        };
         const QList<QTreeWidgetItem *> chosen = table->selectedItems();
         if (chosen.isEmpty()) {
-            for (size_t i = 0; i < count; ++i) wanted.append(carve.block(i));
+            for (size_t i = 0; i < count; ++i) add(i);
         } else {
-            for (const QTreeWidgetItem *row : chosen) {
-                wanted.append(carve.block(row->data(0, Qt::UserRole).toULongLong()));
-            }
+            for (const QTreeWidgetItem *row : chosen) add(row->data(0, Qt::UserRole).toULongLong());
         }
-        putBackDeleted(m_selected, wanted);
+        putBackEntries(m_selected, wanted);
         // The list is the disk as it was: close it rather than show rows that
         // are no longer lost.
         dialog.accept();
@@ -2321,19 +2340,50 @@ MainWindow::Open *MainWindow::editTarget() {
     return nullptr;
 }
 
+// Which partition `item` is in: ADE_WHOLE_IMAGE for a disk that is its own
+// volume, and for a hard disk's own row.
+static quint32 partitionOf(const QTreeWidgetItem *item) {
+    if (!item) return ADE_WHOLE_IMAGE;
+    const QVariant partition = item->data(0, RolePartition);
+    return partition.isValid() ? partition.toUInt() : ADE_WHOLE_IMAGE;
+}
+
+// Whether `item` is a partition's own row: the top of a volume, not an entry
+// in one, so it is neither deleted nor renamed.
+static bool isPartitionRow(const QTreeWidgetItem *item) {
+    return item && item->parent() && !item->parent()->parent() &&
+           partitionOf(item) != ADE_WHOLE_IMAGE;
+}
+
 quint32 MainWindow::directoryFor(const QTreeWidgetItem *item, const Open &open) const {
     if (!item) return 0;
-    // A partition of a hard disk is not something ADE writes into: it edits
-    // plain ADFs and hardfiles, whose file *is* the volume.
-    if (item->data(0, RolePartition).toUInt() != ADE_WHOLE_IMAGE) return 0;
     if (!item->data(0, RoleIsDir).toBool()) return directoryFor(item->parent(), open);
-    // The disk's own row carries no block; its directory is the root.
-    if (!item->parent()) return open.image.rootBlock();
+    if (!item->parent()) {
+        // A disk's own row: its directory is the root — unless it is a
+        // partitioned hard disk, whose volumes are in its partitions.
+        if (open.image.partitions()) return 0;
+        return open.image.rootBlock();
+    }
+    // A partition's row carries its rootblock, or nothing when it holds no
+    // volume ADE can mount.
     return item->data(0, RoleBlock).toUInt();
 }
 
-void MainWindow::addPath(Open &open, quint32 dir, const QString &path, int depth, int *made,
-                         QStringList *refused) {
+bool MainWindow::partitionFor(const QTreeWidgetItem *item, const Open &open,
+                              const QString &doing, quint32 *out) {
+    const quint32 partition = partitionOf(item);
+    if (partition == ADE_WHOLE_IMAGE && open.image.partitions()) {
+        emit errorOccurred(QStringLiteral("%1 is a partitioned hard disk: choose the partition "
+                                          "for %2 in the tree first.")
+                               .arg(open.name, doing));
+        return false;
+    }
+    *out = partition;
+    return true;
+}
+
+void MainWindow::addPath(Open &open, quint32 partition, quint32 dir, const QString &path,
+                         int depth, int *made, QStringList *refused) {
     const QFileInfo info(path);
     const QString name = info.fileName();
     QByteArray amiga;
@@ -2355,7 +2405,7 @@ void MainWindow::addPath(Open &open, quint32 dir, const QString &path, int depth
             refused->append(QStringLiteral("%1: folders nested too deeply").arg(name));
             return;
         }
-        const ade::EditResult r = open.image.makeDir(dir, amiga);
+        const ade::EditResult r = open.image.makeDir(partition, dir, amiga);
         if (!r.ok()) {
             refused->append(QStringLiteral("%1: %2").arg(name, r.message));
             return;
@@ -2365,7 +2415,7 @@ void MainWindow::addPath(Open &open, quint32 dir, const QString &path, int depth
             QDir::AllEntries | QDir::NoDotAndDotDot | QDir::Hidden | QDir::System,
             QDir::Name);
         for (const QFileInfo &child : children) {
-            addPath(open, r.block, child.filePath(), depth + 1, made, refused);
+            addPath(open, partition, r.block, child.filePath(), depth + 1, made, refused);
         }
         return;
     }
@@ -2374,7 +2424,7 @@ void MainWindow::addPath(Open &open, quint32 dir, const QString &path, int depth
         refused->append(QStringLiteral("%1: %2").arg(name, file.errorString()));
         return;
     }
-    const ade::EditResult r = open.image.addFile(dir, amiga, file.readAll());
+    const ade::EditResult r = open.image.addFile(partition, dir, amiga, file.readAll());
     if (!r.ok()) {
         refused->append(QStringLiteral("%1: %2").arg(name, r.message));
         return;
@@ -2411,16 +2461,17 @@ int MainWindow::addFiles(QTreeWidgetItem *target, const QStringList &paths) {
     const quint32 dir = directoryFor(target, *open);
     if (dir == 0) {
         emit errorOccurred(QStringLiteral(
-            "ADE copies files onto plain ADF and hardfile images only, not into a "
-            "partition of a hard disk."));
+            "Files are copied into a volume: on a hard disk, drop them on a partition or a "
+            "folder in one that ADE can read."));
         return 0;
     }
+    const quint32 partition = partitionOf(target);
     if (!mayOverwriteFreeData(*open, QStringLiteral("copying files there"))) return 0;
     int made = 0;
     QStringList refused;
     // One drop is one action, so one Undo takes all of it back (IMP-014).
     open->image.beginGroup();
-    for (const QString &path : paths) addPath(*open, dir, path, 0, &made, &refused);
+    for (const QString &path : paths) addPath(*open, partition, dir, path, 0, &made, &refused);
     open->image.endGroup();
     m_lastEdited = open->index;
     if (made > 0) reloadImage(*open);
@@ -2444,8 +2495,8 @@ bool MainWindow::makeFolder(QTreeWidgetItem *target, const QString &name) {
     const quint32 dir = directoryFor(target, *open);
     if (dir == 0) {
         emit errorOccurred(QStringLiteral(
-            "ADE makes folders on plain ADF and hardfile images only, not in a partition "
-            "of a hard disk."));
+            "A folder is made in a volume: on a hard disk, choose a partition or a folder "
+            "in one that ADE can read."));
         return false;
     }
     QByteArray amiga;
@@ -2456,7 +2507,7 @@ bool MainWindow::makeFolder(QTreeWidgetItem *target, const QString &name) {
         return false;
     }
     if (!mayOverwriteFreeData(*open, QStringLiteral("making a folder"))) return false;
-    const ade::EditResult r = open->image.makeDir(dir, amiga);
+    const ade::EditResult r = open->image.makeDir(partitionOf(target), dir, amiga);
     m_lastEdited = open->index;
     if (!r.ok()) {
         emit errorOccurred(QStringLiteral("Could not make %1: %2").arg(name, r.message));
@@ -2468,12 +2519,11 @@ bool MainWindow::makeFolder(QTreeWidgetItem *target, const QString &name) {
     return true;
 }
 
-// Whether `item` is an entry ADE can delete or rename: a row inside a plain
-// image's tree, not a disk's own row, a search hit or a row in a partition.
+// Whether `item` is an entry ADE can delete or rename: a row inside a disk's
+// tree, not a disk's own row, a partition's, or a search hit.
 static bool isEditableEntry(const QTreeWidgetItem *item, const QTreeWidget *tree) {
     return item && item->treeWidget() == tree && item->parent() &&
-           item->data(0, RoleBlock).isValid() &&
-           item->data(0, RolePartition).toUInt() == ADE_WHOLE_IMAGE;
+           item->data(0, RoleBlock).isValid() && !isPartitionRow(item);
 }
 
 bool MainWindow::deleteItem(QTreeWidgetItem *item) {
@@ -2485,7 +2535,7 @@ bool MainWindow::deleteItem(QTreeWidgetItem *item) {
     // something: a file, or an empty folder, comes back with Undo.
     if (folder) {
         const ade::Listing inside =
-            open->image.list(ADE_WHOLE_IMAGE, item->data(0, RoleBlock).toUInt());
+            open->image.list(partitionOf(item), item->data(0, RoleBlock).toUInt());
         if (inside && inside.count() > 0 && m_confirmDelete &&
             !m_confirmDelete(QStringLiteral("Delete the folder %1 and everything in it?\n\n"
                                             "Undo brings it back until you save the disk.")
@@ -2494,7 +2544,7 @@ bool MainWindow::deleteItem(QTreeWidgetItem *item) {
         }
     }
     const ade::EditResult r =
-        open->image.deleteEntry(item->data(0, RoleBlock).toUInt(), folder);
+        open->image.deleteEntry(partitionOf(item), item->data(0, RoleBlock).toUInt(), folder);
     m_lastEdited = open->index;
     if (!r.ok()) {
         emit errorOccurred(QStringLiteral("Could not delete %1: %2").arg(name, r.message));
@@ -2523,7 +2573,7 @@ bool MainWindow::makeLinkTo(QTreeWidgetItem *item, const QString &name) {
     if (!mayOverwriteFreeData(*open, QStringLiteral("making a link"))) return false;
     const QString target = item->text(ColName);
     const ade::EditResult r =
-        open->image.makeLink(item->data(0, RoleBlock).toUInt(), dir, amiga);
+        open->image.makeLink(partitionOf(item), item->data(0, RoleBlock).toUInt(), dir, amiga);
     m_lastEdited = open->index;
     if (!r.ok()) {
         emit errorOccurred(QStringLiteral("Could not link %1 to %2: %3").arg(name, target, r.message));
@@ -2536,34 +2586,49 @@ bool MainWindow::makeLinkTo(QTreeWidgetItem *item, const QString &name) {
 }
 
 QString MainWindow::putBackDeleted(QTreeWidgetItem *item, const QVector<quint32> &blocks) {
+    QVector<QPair<quint32, quint32>> entries;
+    const quint32 partition = partitionOf(item);
+    for (quint32 block : blocks) entries.append({partition, block});
+    return putBackEntries(item, entries);
+}
+
+QString MainWindow::putBackEntries(QTreeWidgetItem *item,
+                                   const QVector<QPair<quint32, quint32>> &entries) {
     Open *open = imageFor(item);
-    if (!open || blocks.isEmpty()) return QString();
-    QHash<quint32, QString> names;
+    if (!open || entries.isEmpty()) return QString();
+    using Key = QPair<quint32, quint32>;
+    QHash<Key, QString> names;
     {
         const ade::Image::Carve carve = open->image.carve();
-        for (size_t i = 0; i < carve.count(); ++i) names.insert(carve.block(i), carve.name(i));
+        for (size_t i = 0; i < carve.count(); ++i) {
+            const QString in = carve.partition(i);
+            const QString name = in.isEmpty() ? carve.name(i)
+                                              : QStringLiteral("%1:%2").arg(in, carve.name(i));
+            names.insert({partitionNamed(open->image, in), carve.block(i)}, name);
+        }
     }
-    const auto nameOf = [&names](quint32 block) {
-        return names.value(block, QStringLiteral("block %1").arg(block));
+    const auto nameOf = [&names](const Key &key) {
+        return names.value(key, QStringLiteral("block %1").arg(key.second));
     };
 
     // One Undo takes the lot off again. Retried until a pass puts nothing
     // back: a file's folder may be later in the list than the file.
-    QVector<quint32> left = blocks;
-    QHash<quint32, QString> why;
+    QVector<Key> left = entries;
+    QHash<Key, QString> why;
     QStringList back;
     open->image.beginGroup();
     for (bool progress = true; progress && !left.isEmpty();) {
         progress = false;
         for (int i = 0; i < left.size();) {
-            const ade::EditResult r = open->image.undeleteEntry(left.at(i));
+            const Key key = left.at(i);
+            const ade::EditResult r = open->image.undeleteEntry(key.first, key.second);
             if (r.ok()) {
-                back.append(nameOf(left.at(i)));
-                why.remove(left.at(i));
+                back.append(nameOf(key));
+                why.remove(key);
                 left.removeAt(i);
                 progress = true;
             } else {
-                why.insert(left.at(i), r.message);
+                why.insert(key, r.message);
                 ++i;
             }
         }
@@ -2578,8 +2643,8 @@ QString MainWindow::putBackDeleted(QTreeWidgetItem *item, const QVector<quint32>
                                 .arg(back.join(QStringLiteral(", ")), open->name);
     // Each refusal with its reason: "3 stayed deleted" alone would leave
     // somebody guessing which, and why.
-    for (quint32 block : std::as_const(left)) {
-        message += QStringLiteral("\n%1 stayed deleted: %2").arg(nameOf(block), why.value(block));
+    for (const Key &key : std::as_const(left)) {
+        message += QStringLiteral("\n%1 stayed deleted: %2").arg(nameOf(key), why.value(key));
     }
     if (left.isEmpty()) {
         statusBar()->showMessage(message);
@@ -2600,7 +2665,8 @@ bool MainWindow::renameItem(QTreeWidgetItem *item, const QString &name) {
         return false;
     }
     const QString old = item->text(ColName);
-    const ade::EditResult r = open->image.renameEntry(item->data(0, RoleBlock).toUInt(), amiga);
+    const ade::EditResult r =
+        open->image.renameEntry(partitionOf(item), item->data(0, RoleBlock).toUInt(), amiga);
     m_lastEdited = open->index;
     if (!r.ok()) {
         emit errorOccurred(QStringLiteral("Could not rename %1: %2").arg(old, r.message));
@@ -2615,7 +2681,9 @@ bool MainWindow::renameItem(QTreeWidgetItem *item, const QString &name) {
 QString MainWindow::repairDisk(QTreeWidgetItem *item) {
     Open *open = item ? imageFor(item) : editTarget();
     if (!open) return {};
-    const ade::EditResult r = open->image.repair(false);
+    quint32 partition = ADE_WHOLE_IMAGE;
+    if (!partitionFor(item, *open, QStringLiteral("a repair"), &partition)) return {};
+    const ade::EditResult r = open->image.repair(partition, false);
     m_lastEdited = open->index;
     if (!r.ok()) {
         emit errorOccurred(QStringLiteral("Could not repair %1: %2").arg(open->name, r.message));
@@ -2637,10 +2705,11 @@ int MainWindow::moveItems(QTreeWidgetItem *target, const QList<QTreeWidgetItem *
     const quint32 to = directoryFor(target, *open);
     if (to == 0) {
         emit errorOccurred(QStringLiteral(
-            "ADE moves entries on plain ADF and hardfile images only, not in a partition "
-            "of a hard disk."));
+            "Entries are moved into a folder of a volume: on a hard disk, a partition or a "
+            "folder in one that ADE can read."));
         return 0;
     }
+    const quint32 partition = partitionOf(target);
     // Blocks and names first: the rows are rebuilt after the first move.
     QList<QPair<quint32, QString>> moving;
     QStringList refused;
@@ -2648,6 +2717,12 @@ int MainWindow::moveItems(QTreeWidgetItem *target, const QList<QTreeWidgetItem *
         if (!isEditableEntry(row, m_tree)) continue;
         if (imageFor(row) != open) {
             refused.append(QStringLiteral("%1: on another disk; drag it out and in to copy it")
+                               .arg(row->text(ColName)));
+            continue;
+        }
+        if (partitionOf(row) != partition) {
+            refused.append(QStringLiteral("%1: in another partition; drag it out and in to "
+                                          "copy it")
                                .arg(row->text(ColName)));
             continue;
         }
@@ -2659,7 +2734,7 @@ int MainWindow::moveItems(QTreeWidgetItem *target, const QList<QTreeWidgetItem *
     int moved = 0;
     open->image.beginGroup();
     for (const auto &[block, name] : moving) {
-        const ade::EditResult r = open->image.moveEntry(block, to);
+        const ade::EditResult r = open->image.moveEntry(partition, block, to);
         if (r.ok()) {
             ++moved;
         } else {
@@ -2692,7 +2767,9 @@ bool MainWindow::formatDisk(QTreeWidgetItem *item, const QString &name) {
                                .arg(name));
         return false;
     }
-    const ade::EditResult r = open->image.format(amiga);
+    quint32 partition = ADE_WHOLE_IMAGE;
+    if (!partitionFor(item, *open, QStringLiteral("a format"), &partition)) return false;
+    const ade::EditResult r = open->image.format(partition, amiga);
     m_lastEdited = open->index;
     if (!r.ok()) {
         emit errorOccurred(QStringLiteral("Could not format %1: %2").arg(open->name, r.message));
@@ -2708,6 +2785,8 @@ bool MainWindow::formatDisk(QTreeWidgetItem *item, const QString &name) {
 QString MainWindow::wipeDisk(QTreeWidgetItem *item, bool freeBlocks) {
     Open *open = item ? imageFor(item) : editTarget();
     if (!open) return {};
+    quint32 partition = ADE_WHOLE_IMAGE;
+    if (!partitionFor(item, *open, QStringLiteral("a wipe"), &partition)) return {};
     // A disk whose free blocks hold a game is asked about in those terms;
     // the general question would only be the same answer asked twice.
     if (freeBlocks && open->image.freeBlocksHoldingData() > 0) {
@@ -2721,7 +2800,7 @@ QString MainWindow::wipeDisk(QTreeWidgetItem *item, bool freeBlocks) {
                            .arg(open->name))) {
         return {};
     }
-    const ade::EditResult r = open->image.wipe(true, freeBlocks);
+    const ade::EditResult r = open->image.wipe(partition, true, freeBlocks);
     m_lastEdited = open->index;
     if (!r.ok()) {
         emit errorOccurred(QStringLiteral("Could not wipe %1: %2").arg(open->name, r.message));
@@ -2887,13 +2966,17 @@ void MainWindow::reloadImage(Open &open) {
     }
     if (!root) return;
 
-    // Which folders were open, by block, so the tree comes back as it was.
-    // Blocks rather than names: a name can be added twice in two folders, a
-    // block is one place.
-    std::set<quint32> expanded;
+    // Which folders were open, by partition and block, so the tree comes
+    // back as it was. Blocks rather than names: a name can be added twice in
+    // two folders, a block is one place — in its partition, since on a hard
+    // disk every partition numbers its blocks from its own start.
+    std::set<std::pair<quint32, quint32>> expanded;
+    const auto key = [](const QTreeWidgetItem *item) {
+        return std::pair{partitionOf(item), item->data(0, RoleBlock).toUInt()};
+    };
     for (QTreeWidgetItemIterator it(root); *it; ++it) {
         if ((*it)->isExpanded() && (*it)->data(0, RoleIsDir).toBool()) {
-            expanded.insert((*it)->data(0, RoleBlock).toUInt());
+            expanded.insert(key(*it));
         }
     }
 
@@ -2917,22 +3000,36 @@ void MainWindow::reloadImage(Open &open) {
 
     root->setText(ColName, QStringLiteral("%1   %2").arg(open.name, describe(open)));
     root->setToolTip(ColName, rootToolTip(open));
-    if (open.image.hasVolume()) {
+    // A hard disk's volumes are its partitions', rebuilt as they were first
+    // built; anything else is its own volume.
+    const ade::Partitions partitions = open.image.partitions();
+    bool rebuilt = false;
+    if (partitions) {
+        for (size_t i = 0; i < partitions.count(); ++i) {
+            AdePartition partition{};
+            if (partitions.at(i, &partition)) {
+                addPartition(root, open, static_cast<quint32>(i), partition);
+            }
+        }
+        rebuilt = true;
+    } else if (open.image.hasVolume()) {
         populate(root, open, ADE_WHOLE_IMAGE, open.image.rootBlock());
         addKindRow(root, open);
+        rebuilt = true;
+    }
+    if (rebuilt) {
         root->setExpanded(true);
         // Breadth first: expanding a row populates it, and only then are its
-        // own children there to be expanded.
+        // own children there to be expanded. A partition's row comes back
+        // open already, and is descended into like any open folder.
         QList<QTreeWidgetItem *> pending{root};
         while (!pending.isEmpty()) {
             QTreeWidgetItem *item = pending.takeFirst();
             for (int i = 0; i < item->childCount(); ++i) {
                 QTreeWidgetItem *child = item->child(i);
-                if (child->data(0, RoleIsDir).toBool() &&
-                    expanded.count(child->data(0, RoleBlock).toUInt()) > 0) {
-                    child->setExpanded(true);
-                    pending.append(child);
-                }
+                if (!child->data(0, RoleIsDir).toBool()) continue;
+                if (expanded.count(key(child)) > 0) child->setExpanded(true);
+                if (child->isExpanded()) pending.append(child);
             }
         }
     }
@@ -2944,9 +3041,14 @@ void MainWindow::reloadImage(Open &open) {
 
 void MainWindow::updateEditActions() {
     Open *open = editTarget();
-    const bool plain = open && open->image.hasVolume() &&
-                       (!m_selected || m_selected->data(0, RolePartition).toUInt() ==
-                                           ADE_WHOLE_IMAGE);
+    // A disk that is its own volume, or — on a hard disk — a row inside a
+    // partition ADE can mount: somewhere an edit has a volume to go to.
+    const bool plain =
+        open && (open->image.partitions()
+                     ? m_selected && imageFor(m_selected) == open &&
+                           partitionOf(m_selected) != ADE_WHOLE_IMAGE &&
+                           directoryFor(m_selected, *open) != 0
+                     : open->image.hasVolume());
     if (m_newFolder) m_newFolder->setEnabled(plain);
     if (m_repair) m_repair->setEnabled(plain);
     if (m_format) m_format->setEnabled(plain);

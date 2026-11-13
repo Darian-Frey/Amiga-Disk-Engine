@@ -551,17 +551,32 @@ pub fn examine_partition(bytes: Vec<u8>, partition: Option<&str>) -> Health {
 /// originals handed back unchanged.
 #[must_use]
 pub fn examine_returning(bytes: Vec<u8>) -> (Health, Vec<u8>) {
-    examine_lent(bytes, &mut HashSet::new())
+    examine_lent(bytes, None, &mut HashSet::new())
 }
 
-/// [`examine_returning`], and every block the directory tree reaches.
-pub(crate) fn examine_in_use_returning(bytes: Vec<u8>) -> (Health, HashSet<u32>, Vec<u8>) {
+/// [`examine_returning`] for one partition of a device, named by drive name
+/// or index — what an edit session examines after editing that partition.
+#[must_use]
+pub fn examine_partition_returning(bytes: Vec<u8>, partition: Option<&str>) -> (Health, Vec<u8>) {
+    examine_lent(bytes, partition, &mut HashSet::new())
+}
+
+/// [`examine_partition_returning`], and every block the directory tree
+/// reaches, numbered within the partition.
+pub(crate) fn examine_in_use_returning(
+    bytes: Vec<u8>,
+    partition: Option<&str>,
+) -> (Health, HashSet<u32>, Vec<u8>) {
     let mut in_use = HashSet::new();
-    let (health, bytes) = examine_lent(bytes, &mut in_use);
+    let (health, bytes) = examine_lent(bytes, partition, &mut in_use);
     (health, in_use, bytes)
 }
 
-fn examine_lent(bytes: Vec<u8>, in_use: &mut HashSet<u32>) -> (Health, Vec<u8>) {
+fn examine_lent(
+    bytes: Vec<u8>,
+    partition: Option<&str>,
+    in_use: &mut HashSet<u32>,
+) -> (Health, Vec<u8>) {
     let head = bytes
         .get(..crate::inspect::HEAD_BYTES.min(bytes.len()))
         .unwrap_or(&[]);
@@ -572,10 +587,10 @@ fn examine_lent(bytes: Vec<u8>, in_use: &mut HashSet<u32>) -> (Health, Vec<u8>) 
             | ade_container::Kind::ExtendedAdf { .. }
             | ade_container::Kind::Scp
     ) {
-        let health = examine_core(bytes.clone(), None, in_use).0;
+        let health = examine_core(bytes.clone(), partition, in_use).0;
         return (health, bytes);
     }
-    examine_core(bytes, None, in_use)
+    examine_core(bytes, partition, in_use)
 }
 
 fn examine_into(bytes: Vec<u8>, partition: Option<&str>, in_use: &mut HashSet<u32>) -> Health {

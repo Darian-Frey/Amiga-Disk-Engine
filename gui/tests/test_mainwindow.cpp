@@ -107,7 +107,7 @@ private slots:
     void undoAndRedoRebuildTheTree();
     void closingWithUnsavedEditsAsksFirst();
     void aRefusedCopySaysWhyAndKeepsTheRest();
-    void aPartitionOfAHardDiskIsNotWrittenInto();
+    void aPartitionOfAHardDiskIsWrittenIntoAndTheDiskRowIsNot();
     void aProgramShowsItsCodeInTheAssemblyView();
     void theViewsBesideTheListingFollowTheCode();
     void theSegmentBarDrawsTheProgramAndGoesWhereItIsClicked();
@@ -2315,17 +2315,46 @@ void TestMainWindow::aRefusedCopySaysWhyAndKeepsTheRest() {
     QCOMPARE(fileOn(copy, {QStringLiteral("fine.txt")}), QByteArray("ok"));
 }
 
-void TestMainWindow::aPartitionOfAHardDiskIsNotWrittenInto() {
+void TestMainWindow::aPartitionOfAHardDiskIsWrittenIntoAndTheDiskRowIsNot() {
+    // F-038: a partition is edited like a floppy; the disk's own row, which
+    // is no volume, is refused with a reason rather than an edit landing in
+    // a partition nobody chose.
     MainWindow window;
     QStringList errors;
     QObject::connect(&window, &MainWindow::errorOccurred, &window,
                      [&errors](const QString &message) { errors << message; });
     window.openImage(m_device);
-    QTreeWidgetItem *partition = browser(window)->topLevelItem(0)->child(0);
-    QVERIFY(partition);
-    QVERIFY(!window.makeFolder(partition, QStringLiteral("Nope")));
+    auto *tree = browser(window);
+    QVERIFY(!window.makeFolder(tree->topLevelItem(0), QStringLiteral("Nowhere")));
     QCOMPARE(errors.size(), 1);
     QVERIFY2(errors.first().contains(QStringLiteral("partition")), qPrintable(errors.first()));
+    QCOMPARE(window.repairDisk(tree->topLevelItem(0)), QString());
+    QCOMPARE(errors.size(), 2);
+    QVERIFY2(errors.last().contains(QStringLiteral("choose the partition")),
+             qPrintable(errors.last()));
+
+    // In DH1: a folder, renamed. DH0 is untouched.
+    QVERIFY(window.makeFolder(tree->topLevelItem(0)->child(1), QStringLiteral("Docs")));
+    QTreeWidgetItem *docs = childNamed(tree->topLevelItem(0)->child(1), QStringLiteral("Docs"));
+    QVERIFY(docs);
+    QVERIFY(window.renameItem(docs, QStringLiteral("Papers")));
+    QVERIFY(childNamed(tree->topLevelItem(0)->child(1), QStringLiteral("Papers")));
+    QVERIFY(!childNamed(tree->topLevelItem(0)->child(0), QStringLiteral("Papers")));
+    QVERIFY(childNamed(tree->topLevelItem(0)->child(0), QStringLiteral("startup-sequence")));
+
+    // A partition's own row is not an entry to delete.
+    QVERIFY(!window.deleteItem(tree->topLevelItem(0)->child(1)));
+    QCOMPARE(window.repairDisk(tree->topLevelItem(0)->child(1)), QStringLiteral("nothing to repair"));
+
+    // Saved, the folder is in DH1 of the copy.
+    const QString copy = m_dir.filePath(QStringLiteral("edited-device.hdf"));
+    QVERIFY(window.saveImageAs(tree->topLevelItem(0), copy));
+    MainWindow again;
+    again.openImage(copy);
+    QTreeWidgetItem *reopened = browser(again)->topLevelItem(0);
+    QVERIFY(reopened);
+    QVERIFY(childNamed(reopened->child(1), QStringLiteral("Papers")));
+    QVERIFY(!childNamed(reopened->child(0), QStringLiteral("Papers")));
 }
 
 // --- The Assembly view (F-032) ---------------------------------------------

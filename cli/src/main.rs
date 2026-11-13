@@ -494,9 +494,8 @@ fn refuse_partition(args: &Args) -> Option<ExitCode> {
     args.partition.as_ref()?;
     let why = match args.command.as_str() {
         "check" | "ls" | "extract" | "disasm" | "annotate" | "decode" | "find" | "scan"
-        | "layout" | "carve" => return None,
-        "mkdir" | "put" | "rm" | "undelete" | "link" | "rename" | "mv" | "repair" | "format"
-        | "wipe" => "ADE does not yet edit inside a partition (ROADMAP §Phase 6)",
+        | "layout" | "carve" | "mkdir" | "put" | "rm" | "undelete" | "link" | "rename" | "mv"
+        | "repair" | "format" | "wipe" => return None,
         "specs" | "surface" | "info" | "identify" | "diff" | "consolidate" | "convert" => {
             "it describes or works on the image as a whole"
         }
@@ -579,7 +578,9 @@ fn options() -> Vec<String> {
             .to_owned(),
         "                    check, ls, extract, disasm, annotate, decode, find, scan, layout"
             .to_owned(),
-        "                    and carve; any other command refuses it".to_owned(),
+        "                    and carve, and every edit, which needs it on a partitioned disk;"
+            .to_owned(),
+        "                    any other command refuses it".to_owned(),
         "    --raw           convert writes raw MFM tracks (an extended ADF)".to_owned(),
         "                    disasm decodes a file that is not a program, as a guess".to_owned(),
         "    --functions     disasm: the functions found by following the code (D-021)".to_owned(),
@@ -649,6 +650,45 @@ fn edit_failed(context: &str, e: &ade_core::edit::EditError) -> ExitCode {
     })
 }
 
+/// Where an edit goes: the new image it is saved to, and on a partitioned
+/// hard disk the partition it is made in.
+#[derive(Clone, Copy)]
+struct Dest<'a> {
+    output: Option<&'a Path>,
+    partition: Option<&'a str>,
+}
+
+/// Open `image` for editing, in `partition` on a partitioned hard disk.
+///
+/// A device needs `--partition`: unlike a read, which may sensibly default to
+/// the first partition, an edit that quietly picked one would write to a
+/// volume nobody named. One given for an image without partitions is refused
+/// the same way, rather than ignored (BUG-028).
+fn open_for_editing(
+    image: &Path,
+    partition: Option<&str>,
+) -> Result<ade_core::edit::Session, ExitCode> {
+    let mut session = ade_core::edit::Session::open(image)
+        .map_err(|e| edit_failed(&image.display().to_string(), &e))?;
+    let names: Vec<String> = session.partitions().into_iter().map(|(n, _)| n).collect();
+    match partition {
+        Some(wanted) => session
+            .select_partition(wanted)
+            .map_err(|e| edit_failed(&image.display().to_string(), &e))?,
+        None if !names.is_empty() => {
+            eprintln!(
+                "ade: {} is a partitioned hard disk; say which partition to edit with \
+                 --partition (it has {})",
+                image.display(),
+                names.join(", ")
+            );
+            return Err(ExitCode::from(EXIT_USAGE));
+        }
+        None => {}
+    }
+    Ok(session)
+}
+
 /// Open `image` for editing, apply `change`, and save to `output` (D-018).
 ///
 /// There is no in-place form: `--output` is required and must not exist, and
@@ -656,9 +696,10 @@ fn edit_failed(context: &str, e: &ade_core::edit::EditError) -> ExitCode {
 /// command that can overwrite its input is one typo from destroying it.
 fn edit_and_save(
     image: &Path,
-    output: Option<&Path>,
+    output: Dest<'_>,
     change: impl FnOnce(&mut ade_core::edit::Session) -> Result<String, ade_core::edit::EditError>,
 ) -> ExitCode {
+    let Dest { output, partition } = output;
     let Some(output) = output else {
         eprintln!(
             "ade: --output=<new image> is required; ADE never writes into the image it \
@@ -666,9 +707,9 @@ fn edit_and_save(
         );
         return ExitCode::from(EXIT_USAGE);
     };
-    let mut session = match ade_core::edit::Session::open(image) {
+    let mut session = match open_for_editing(image, partition) {
         Ok(s) => s,
-        Err(e) => return edit_failed(&image.display().to_string(), &e),
+        Err(code) => return code,
     };
     let done = match change(&mut session) {
         Ok(done) => done,
@@ -697,7 +738,10 @@ fn edit_command(args: &Args) -> ExitCode {
         return ExitCode::from(EXIT_USAGE);
     }
     let p = |n: usize| args.positional.get(n).map_or("", String::as_str);
-    let output = args.output.as_deref();
+    let output = Dest {
+        output: args.output.as_deref(),
+        partition: args.partition.as_deref(),
+    };
     match (args.command.as_str(), args.positional.len()) {
         ("mkdir", 2) => make_dir(Path::new(p(0)), p(1), args.overwrite_free_data, output),
         ("rm", 2) => remove(Path::new(p(0)), p(1), args.all, output),
@@ -737,7 +781,7 @@ fn edit_command(args: &Args) -> ExitCode {
 /// `ade rm`: delete a file, a soft link or an empty directory; with `all`, a
 /// directory and everything in it. The blocks are freed and left as they
 /// were, as AmigaDOS leaves them, so `ade carve` can still find the file.
-fn remove(image: &Path, path: &str, all: bool, output: Option<&Path>) -> ExitCode {
+fn remove(image: &Path, path: &str, all: bool, output: Dest<'_>) -> ExitCode {
     edit_and_save(image, output, |session| {
         let block = session.entry(path)?;
         let what = path.trim_end_matches('/');
@@ -757,7 +801,7 @@ fn remove(image: &Path, path: &str, all: bool, output: Option<&Path>) -> ExitCod
 /// `ade undelete`: put a deleted entry back (F-012), named by its header's
 /// block as `ade carve` lists it, or by its name when only one deleted entry
 /// has it.
-fn undelete(image: &Path, which: &str, output: Option<&Path>) -> ExitCode {
+fn undelete(image: &Path, which: &str, output: Dest<'_>) -> ExitCode {
     use ade_core::edit::EditError;
     use ade_core::layers::filesystem::edit::EditError as FsEditError;
     let refuse = |why: String| EditError::Refused(FsEditError::NotRestorable(why));
@@ -812,7 +856,8 @@ fn undelete(image: &Path, which: &str, output: Option<&Path>) -> ExitCode {
 /// `ade repair`: rebuild the bitmap and refile misplaced entries, saving to
 /// `output` only when something changed. Exits 1 when something that needed
 /// repair was left, as `check` does for a fault.
-fn repair(image: &Path, free_orphans: bool, output: Option<&Path>) -> ExitCode {
+fn repair(image: &Path, free_orphans: bool, output: Dest<'_>) -> ExitCode {
+    let Dest { output, partition } = output;
     let Some(output) = output else {
         eprintln!(
             "ade: --output=<new image> is required; ADE never writes into the image it \
@@ -820,9 +865,9 @@ fn repair(image: &Path, free_orphans: bool, output: Option<&Path>) -> ExitCode {
         );
         return ExitCode::from(EXIT_USAGE);
     };
-    let mut session = match ade_core::edit::Session::open(image) {
+    let mut session = match open_for_editing(image, partition) {
         Ok(s) => s,
-        Err(e) => return edit_failed(&image.display().to_string(), &e),
+        Err(code) => return code,
     };
     let done = match session.repair(free_orphans) {
         Ok(done) => done,
@@ -856,7 +901,7 @@ fn repair(image: &Path, free_orphans: bool, output: Option<&Path>) -> ExitCode {
 }
 
 /// `ade mv`: move an entry into another directory, keeping its name.
-fn move_entry(image: &Path, path: &str, folder: &str, output: Option<&Path>) -> ExitCode {
+fn move_entry(image: &Path, path: &str, folder: &str, output: Dest<'_>) -> ExitCode {
     edit_and_save(image, output, |session| {
         let block = session.entry(path)?;
         let to = session.directory(folder)?;
@@ -875,7 +920,7 @@ fn move_entry(image: &Path, path: &str, folder: &str, output: Option<&Path>) -> 
 }
 
 /// `ade format`: a quick format in place, keeping the name unless given one.
-fn format_in_place(image: &Path, name: Option<&str>, output: Option<&Path>) -> ExitCode {
+fn format_in_place(image: &Path, name: Option<&str>, output: Dest<'_>) -> ExitCode {
     let amiga = match name.map(ade_core::edit::amiga_name).transpose() {
         Ok(a) => a,
         Err(c) => {
@@ -899,7 +944,7 @@ fn wipe(
     slack: bool,
     free: bool,
     overwrite_free_data: bool,
-    output: Option<&Path>,
+    output: Dest<'_>,
 ) -> ExitCode {
     if !slack && !free {
         eprintln!("ade: wipe needs --slack, --free or both, to say what to zero");
@@ -914,7 +959,7 @@ fn wipe(
 }
 
 /// `ade rename`: give an entry a new name in the directory it is in.
-fn rename(image: &Path, path: &str, name: &str, output: Option<&Path>) -> ExitCode {
+fn rename(image: &Path, path: &str, name: &str, output: Dest<'_>) -> ExitCode {
     let Ok(amiga) = ade_core::edit::amiga_name(name) else {
         eprintln!("ade: {name:?}: an Amiga name is Latin-1, and this has a character outside it");
         return ExitCode::from(EXIT_USAGE);
@@ -927,12 +972,7 @@ fn rename(image: &Path, path: &str, name: &str, output: Option<&Path>) -> ExitCo
 }
 
 /// `ade mkdir`: make one directory, whose parent must already exist.
-fn make_dir(
-    image: &Path,
-    path: &str,
-    overwrite_free_data: bool,
-    output: Option<&Path>,
-) -> ExitCode {
+fn make_dir(image: &Path, path: &str, overwrite_free_data: bool, output: Dest<'_>) -> ExitCode {
     let (parent, name) = split_last(path);
     let Ok(amiga) = ade_core::edit::amiga_name(name) else {
         eprintln!("ade: {name:?}: an Amiga name is Latin-1, and this has a character outside it");
@@ -958,7 +998,7 @@ fn make_link(
     target: &str,
     path: &str,
     overwrite_free_data: bool,
-    output: Option<&Path>,
+    output: Dest<'_>,
 ) -> ExitCode {
     let (parent, name) = split_last(path);
     let Ok(amiga) = ade_core::edit::amiga_name(name) else {
@@ -990,7 +1030,7 @@ fn put(
     file: &Path,
     dest: Option<&str>,
     overwrite_free_data: bool,
-    output: Option<&Path>,
+    output: Dest<'_>,
 ) -> ExitCode {
     let data = match std::fs::read(file) {
         Ok(d) => d,

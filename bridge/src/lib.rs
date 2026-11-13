@@ -2445,6 +2445,7 @@ fn refresh(image: &mut AdeImage) {
 /// Run an edit through the handle's session, starting one if needed.
 fn edit(
     image: *mut AdeImage,
+    partition: u32,
     out_block: *mut u32,
     out_message: *mut *mut c_char,
     change: impl FnOnce(&mut ade_core::edit::Session) -> Result<u32, ade_core::edit::EditError>,
@@ -2470,6 +2471,25 @@ fn edit(
         let Some(session) = image.session.as_mut() else {
             return AdeResult::Internal;
         };
+        // The partition the edit is made in, named on every call as the
+        // reading calls name it, so a front end's idea of where it is cannot
+        // drift from the session's.
+        let chosen = if partition == ADE_WHOLE_IMAGE {
+            match session.partition() {
+                Some(_) => Err(ade_core::edit::EditError::NotEditable(
+                    "this is a partitioned hard disk: pass the index of the partition to \
+                     edit, not ADE_WHOLE_IMAGE"
+                        .to_owned(),
+                )),
+                None => Ok(()),
+            }
+        } else {
+            session.select_partition_at(partition as usize)
+        };
+        if let Err(e) = chosen {
+            set_message(out_message, &e.to_string());
+            return edit_code(&e);
+        }
         match change(session) {
             Ok(block) => {
                 if !out_block.is_null() {
@@ -2515,6 +2535,7 @@ unsafe fn borrowed<'a>(bytes: AdeBytes) -> Option<&'a [u8]> {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ade_edit_mkdir(
     image: *mut AdeImage,
+    partition: u32,
     parent: u32,
     name: AdeBytes,
     out_block: *mut u32,
@@ -2524,7 +2545,9 @@ pub unsafe extern "C" fn ade_edit_mkdir(
     let Some(name) = (unsafe { borrowed(name) }) else {
         return AdeResult::NullArgument;
     };
-    edit(image, out_block, out_message, |s| s.make_dir(parent, name))
+    edit(image, partition, out_block, out_message, |s| {
+        s.make_dir(parent, name)
+    })
 }
 
 /// Make a hard link called `name` in the directory at `parent`, to the file
@@ -2535,6 +2558,7 @@ pub unsafe extern "C" fn ade_edit_mkdir(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ade_edit_link(
     image: *mut AdeImage,
+    partition: u32,
     object: u32,
     parent: u32,
     name: AdeBytes,
@@ -2545,7 +2569,7 @@ pub unsafe extern "C" fn ade_edit_link(
     let Some(name) = (unsafe { borrowed(name) }) else {
         return AdeResult::NullArgument;
     };
-    edit(image, out_block, out_message, |s| {
+    edit(image, partition, out_block, out_message, |s| {
         s.make_link(object, parent, name)
     })
 }
@@ -2557,6 +2581,7 @@ pub unsafe extern "C" fn ade_edit_link(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ade_edit_add_file(
     image: *mut AdeImage,
+    partition: u32,
     parent: u32,
     name: AdeBytes,
     data: AdeBytes,
@@ -2567,7 +2592,7 @@ pub unsafe extern "C" fn ade_edit_add_file(
     let (Some(name), Some(data)) = (unsafe { borrowed(name) }, unsafe { borrowed(data) }) else {
         return AdeResult::NullArgument;
     };
-    edit(image, out_block, out_message, |s| {
+    edit(image, partition, out_block, out_message, |s| {
         s.add_file(parent, name, data)
     })
 }
@@ -2582,11 +2607,12 @@ pub unsafe extern "C" fn ade_edit_add_file(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ade_edit_delete(
     image: *mut AdeImage,
+    partition: u32,
     block: u32,
     all: bool,
     out_message: *mut *mut c_char,
 ) -> AdeResult {
-    edit(image, std::ptr::null_mut(), out_message, |s| {
+    edit(image, partition, std::ptr::null_mut(), out_message, |s| {
         if all {
             s.delete_tree(block).map(|_| block)
         } else {
@@ -2605,10 +2631,11 @@ pub unsafe extern "C" fn ade_edit_delete(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ade_edit_undelete(
     image: *mut AdeImage,
+    partition: u32,
     block: u32,
     out_message: *mut *mut c_char,
 ) -> AdeResult {
-    edit(image, std::ptr::null_mut(), out_message, |s| {
+    edit(image, partition, std::ptr::null_mut(), out_message, |s| {
         s.undelete(block).map(|()| block)
     })
 }
@@ -2620,6 +2647,7 @@ pub unsafe extern "C" fn ade_edit_undelete(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ade_edit_rename(
     image: *mut AdeImage,
+    partition: u32,
     block: u32,
     name: AdeBytes,
     out_message: *mut *mut c_char,
@@ -2628,7 +2656,7 @@ pub unsafe extern "C" fn ade_edit_rename(
     let Some(name) = (unsafe { borrowed(name) }) else {
         return AdeResult::NullArgument;
     };
-    edit(image, std::ptr::null_mut(), out_message, |s| {
+    edit(image, partition, std::ptr::null_mut(), out_message, |s| {
         s.rename(block, name).map(|()| block)
     })
 }
@@ -2641,11 +2669,12 @@ pub unsafe extern "C" fn ade_edit_rename(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ade_edit_move(
     image: *mut AdeImage,
+    partition: u32,
     block: u32,
     to: u32,
     out_message: *mut *mut c_char,
 ) -> AdeResult {
-    edit(image, std::ptr::null_mut(), out_message, |s| {
+    edit(image, partition, std::ptr::null_mut(), out_message, |s| {
         s.move_entry(block, to).map(|()| block)
     })
 }
@@ -2661,6 +2690,7 @@ pub unsafe extern "C" fn ade_edit_move(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ade_edit_format(
     image: *mut AdeImage,
+    partition: u32,
     name: AdeBytes,
     out_message: *mut *mut c_char,
 ) -> AdeResult {
@@ -2668,7 +2698,7 @@ pub unsafe extern "C" fn ade_edit_format(
     let Some(name) = (unsafe { borrowed(name) }) else {
         return AdeResult::NullArgument;
     };
-    edit(image, std::ptr::null_mut(), out_message, |s| {
+    edit(image, partition, std::ptr::null_mut(), out_message, |s| {
         s.format((!name.is_empty()).then_some(name)).map(|()| 0)
     })
 }
@@ -2685,6 +2715,7 @@ pub unsafe extern "C" fn ade_edit_format(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ade_edit_wipe(
     image: *mut AdeImage,
+    partition: u32,
     slack: bool,
     free: bool,
     out_report: *mut *mut c_char,
@@ -2698,7 +2729,7 @@ pub unsafe extern "C" fn ade_edit_wipe(
         return AdeResult::Refused;
     }
     let mut report = Vec::new();
-    let result = edit(image, std::ptr::null_mut(), out_message, |s| {
+    let result = edit(image, partition, std::ptr::null_mut(), out_message, |s| {
         report = s.wipe(slack, free)?.lines();
         Ok(0)
     });
@@ -2722,12 +2753,13 @@ pub unsafe extern "C" fn ade_edit_wipe(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ade_edit_repair(
     image: *mut AdeImage,
+    partition: u32,
     free_orphans: bool,
     out_report: *mut *mut c_char,
     out_message: *mut *mut c_char,
 ) -> AdeResult {
     let mut report = String::new();
-    let result = edit(image, std::ptr::null_mut(), out_message, |s| {
+    let result = edit(image, partition, std::ptr::null_mut(), out_message, |s| {
         let done = s.repair(free_orphans)?;
         report = done.lines().join("\n");
         Ok(0)

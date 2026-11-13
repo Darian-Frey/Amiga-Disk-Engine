@@ -143,8 +143,12 @@ impl From<FsEditError> for EditError {
 /// of history, where a whole-image snapshot was 500 MB.
 #[derive(Debug, Clone, Default)]
 struct Step {
-    /// Each changed chunk: its byte offset, and the version it holds.
+    /// Each changed chunk: its byte offset on the image, and the version it
+    /// holds.
     chunks: Vec<(usize, Vec<u8>)>,
+    /// The areas — the image, or partitions of a device — the step wrote
+    /// in, by index: what to examine again after undoing or redoing it.
+    areas: std::collections::BTreeSet<usize>,
     /// When the image changed length — which no edit does, but a step must
     /// not be wrong if one ever did — the other whole image instead.
     whole: Option<Vec<u8>>,
@@ -159,17 +163,28 @@ impl Step {
     /// bytes each — and return the step that takes them back: the blocks
     /// they replaced, as they were. No copy of the image, and no comparing
     /// it afterwards (IMP-023).
-    fn make(bytes: &mut [u8], writes: &Writes, block_size: usize) -> Self {
+    ///
+    /// `bytes` is the area the writes are numbered in — the image, or one
+    /// partition's part of it — at byte `offset` of the image, and `area` its
+    /// index; the step records image offsets, so it can be undone whatever
+    /// area is being edited by then.
+    fn make(
+        bytes: &mut [u8],
+        writes: &Writes,
+        block_size: usize,
+        (offset, area): (usize, usize),
+    ) -> Self {
         let mut chunks = Vec::with_capacity(writes.len());
         for (&block, raw) in writes {
             let at = (block as usize).saturating_mul(block_size);
             if let Some(there) = bytes.get_mut(at..at.saturating_add(raw.len())) {
-                chunks.push((at, there.to_vec()));
+                chunks.push((offset.saturating_add(at), there.to_vec()));
                 there.copy_from_slice(raw);
             }
         }
         Self {
             chunks,
+            areas: std::collections::BTreeSet::from([area]),
             whole: None,
         }
     }
@@ -181,6 +196,7 @@ impl Step {
         if before.len() != after.len() {
             return Self {
                 chunks: Vec::new(),
+                areas: std::collections::BTreeSet::from([0]),
                 whole: Some(before),
             };
         }
@@ -193,6 +209,7 @@ impl Step {
             .collect();
         Self {
             chunks,
+            areas: std::collections::BTreeSet::from([0]),
             whole: None,
         }
     }
@@ -220,6 +237,7 @@ impl Step {
             *self = later;
             return;
         }
+        self.areas.extend(later.areas.iter().copied());
         let held: std::collections::HashSet<usize> =
             self.chunks.iter().map(|(at, _)| *at).collect();
         self.chunks.extend(
@@ -238,10 +256,43 @@ impl Step {
     }
 }
 
+/// One place an edit can land: the image itself, or one partition of a
+/// partitioned device (D-024).
+#[derive(Debug, Clone)]
+struct Area {
+    /// The partition's drive name; `None` for the image itself.
+    name: Option<String>,
+    /// Where it starts on the image, in bytes.
+    offset: usize,
+    /// Its own shape: blocks numbered from its start.
+    geometry: Geometry,
+    /// Its health state while another area is selected; `None` while it is
+    /// the one selected, or when its volume does not mount and so cannot be
+    /// edited.
+    saved: Option<AreaState>,
+    /// Whether its volume mounts.
+    mounts: bool,
+}
+
+/// What a session tracks about one area's health between edits.
+#[derive(Debug, Clone)]
+struct AreaState {
+    baseline: HashMap<&'static str, usize>,
+    unsound: Option<String>,
+    free_holding_data: usize,
+    free_data: FreeData,
+}
+
 /// A disk open for editing.
 pub struct Session {
     bytes: Vec<u8>,
+    /// The selected area's shape. Every edit is planned in it.
     geometry: Geometry,
+    /// Where the selected area starts on the image, in bytes.
+    offset: usize,
+    /// Every place an edit can land, and which is selected.
+    areas: Vec<Area>,
+    current: usize,
     /// The file it was opened from, which is never written.
     origin: Option<PathBuf>,
     /// Where this session last saved, which may be saved over again.
@@ -303,32 +354,78 @@ impl Session {
     /// allocation could land on data, and refusing is the only safe answer
     /// until the bitmap is repaired.
     pub fn from_bytes(bytes: Vec<u8>) -> Result<Self, EditError> {
-        let Some((_, geometry)) = crate::inspect::plain_volume_geometry(&bytes) else {
+        if let Some((_, geometry)) = crate::inspect::plain_volume_geometry(&bytes) {
+            let whole = Area {
+                name: None,
+                offset: 0,
+                geometry,
+                saved: None,
+                mounts: true,
+            };
+            return Self::assemble(bytes, vec![whole], 0);
+        }
+        let (inspection, bytes) = crate::inspect::inspect_returning(bytes);
+        if !matches!(
+            inspection.detection.kind,
+            ade_container::sniff::Kind::RigidDisk
+        ) || inspection.partitions.is_empty()
+        {
             return Err(EditError::NotEditable(
-                "ADE edits plain ADF and unpartitioned hardfile images; convert this one \
-                 to ADF first"
+                "ADE edits plain ADF images, hardfiles, and partitioned hard disk images; \
+                 convert this one to ADF first"
                     .to_owned(),
             ));
-        };
-        let (report, bytes) = health::examine_returning(bytes);
-        if report.examined.is_none() {
-            return Err(EditError::NotEditable(
-                "there is no volume on this image that ADE can mount".to_owned(),
-            ));
         }
-        Ok(Self {
+        let faults = table_faults(&inspection, bytes.len() as u64);
+        if !faults.is_empty() {
+            return Err(EditError::NotEditable(format!(
+                "the partition table is not sound, so ADE will not write to this disk: {}",
+                faults.join("; ")
+            )));
+        }
+        let areas: Vec<Area> = inspection
+            .partitions
+            .iter()
+            .map(|p| {
+                let geometry = u32::try_from(p.blocks)
+                    .ok()
+                    .and_then(|blocks| Geometry::new(blocks, 1, 1, 512, p.reserved).ok());
+                Area {
+                    name: Some(p.name.clone()),
+                    offset: usize::try_from(p.first_block.saturating_mul(512))
+                        .unwrap_or(usize::MAX),
+                    mounts: p.volume_name.is_some() && p.block_size == 512 && geometry.is_some(),
+                    geometry: geometry.unwrap_or(Geometry::DD_FLOPPY),
+                    saved: None,
+                }
+            })
+            .collect();
+        let Some(first) = areas.iter().position(|a| a.mounts) else {
+            return Err(EditError::NotEditable(
+                "no partition on this disk holds a volume ADE can mount".to_owned(),
+            ));
+        };
+        Self::assemble(bytes, areas, first)
+    }
+
+    /// A session over `bytes` with `current` of `areas` selected.
+    fn assemble(bytes: Vec<u8>, areas: Vec<Area>, current: usize) -> Result<Self, EditError> {
+        let Some(area) = areas.get(current) else {
+            return Err(EditError::NotEditable("no area to edit".to_owned()));
+        };
+        let (geometry, offset) = (area.geometry, area.offset);
+        let mut session = Self {
             bytes,
             geometry,
+            offset,
+            areas,
+            current,
             origin: None,
             destination: None,
-            unsound: unsound(&report),
-            free_holding_data: free_holding_data(&report),
-            free_data: if free_holding_data(&report) > 0 {
-                FreeData::Protected
-            } else {
-                FreeData::Unprotected
-            },
-            baseline: problems(&report),
+            unsound: None,
+            free_holding_data: 0,
+            free_data: FreeData::Unprotected,
+            baseline: HashMap::new(),
             undo: Vec::new(),
             redo: Vec::new(),
             dirty: false,
@@ -337,7 +434,175 @@ impl Session {
             group_snapshot: false,
             origin_digest: None,
             backup: None,
-        })
+        };
+        let report = session.examine(current);
+        if report.examined.is_none() {
+            return Err(EditError::NotEditable(
+                "there is no volume on this image that ADE can mount".to_owned(),
+            ));
+        }
+        session.load(&AreaState::of(&report, None));
+        Ok(session)
+    }
+
+    /// Examine area `index` — on a device, that partition alone; the table
+    /// is held to D-024's checks when the session opens, and no edit can
+    /// write outside the partition it was planned in.
+    fn examine(&mut self, index: usize) -> health::Health {
+        let name = self.areas.get(index).and_then(|a| a.name.clone());
+        let (report, bytes) =
+            health::examine_partition_returning(std::mem::take(&mut self.bytes), name.as_deref());
+        self.bytes = bytes;
+        report
+    }
+
+    /// As [`Self::examine`] for the selected area, with the blocks in use.
+    fn examine_in_use(&mut self) -> (health::Health, std::collections::HashSet<u32>) {
+        let name = self.areas.get(self.current).and_then(|a| a.name.clone());
+        let (report, in_use, bytes) =
+            health::examine_in_use_returning(std::mem::take(&mut self.bytes), name.as_deref());
+        self.bytes = bytes;
+        (report, in_use)
+    }
+
+    fn load(&mut self, state: &AreaState) {
+        self.baseline.clone_from(&state.baseline);
+        self.unsound.clone_from(&state.unsound);
+        self.free_holding_data = state.free_holding_data;
+        self.free_data = state.free_data;
+    }
+
+    fn state(&self) -> AreaState {
+        AreaState {
+            baseline: self.baseline.clone(),
+            unsound: self.unsound.clone(),
+            free_holding_data: self.free_holding_data,
+            free_data: self.free_data,
+        }
+    }
+
+    /// The partitions of a partitioned device, by drive name, and whether
+    /// each holds a volume ADE can edit. Empty for an unpartitioned image.
+    #[must_use]
+    pub fn partitions(&self) -> Vec<(String, bool)> {
+        self.areas
+            .iter()
+            .filter_map(|a| a.name.clone().map(|n| (n, a.mounts)))
+            .collect()
+    }
+
+    /// The partition later edits go to, on a partitioned device.
+    #[must_use]
+    pub fn partition(&self) -> Option<&str> {
+        self.areas.get(self.current).and_then(|a| a.name.as_deref())
+    }
+
+    /// Send later edits, lookups and repairs to the partition `wanted` —
+    /// by drive name, ignoring case, or by index — on a partitioned device.
+    /// Block numbers are then that partition's, counted from its start.
+    /// History stays the device's: Undo takes back the last edit wherever it
+    /// was made.
+    ///
+    /// # Errors
+    /// [`EditError::NotEditable`] on an image with no partitions, for a
+    /// partition the device does not have, or one holding no volume ADE can
+    /// mount. The selection is unchanged.
+    pub fn select_partition(&mut self, wanted: &str) -> Result<(), EditError> {
+        if self.partition().is_none() {
+            return Err(EditError::NotEditable(format!(
+                "this image has no partitions, so no partition {wanted:?}"
+            )));
+        }
+        let index = self
+            .areas
+            .iter()
+            .position(|a| {
+                a.name
+                    .as_deref()
+                    .is_some_and(|n| n.eq_ignore_ascii_case(wanted))
+            })
+            .or_else(|| {
+                wanted
+                    .parse::<usize>()
+                    .ok()
+                    .filter(|i| *i < self.areas.len())
+            })
+            .ok_or_else(|| {
+                let names: Vec<String> = self.areas.iter().filter_map(|a| a.name.clone()).collect();
+                EditError::NotEditable(format!(
+                    "no partition {wanted:?}; this device has {}",
+                    names.join(", ")
+                ))
+            })?;
+        self.select_partition_at(index)
+    }
+
+    /// As [`Self::select_partition`], by the partition's place in the table
+    /// — the index the C ABI and [`crate::inspect_bytes`] number partitions
+    /// by.
+    ///
+    /// # Errors
+    /// As [`Self::select_partition`].
+    pub fn select_partition_at(&mut self, index: usize) -> Result<(), EditError> {
+        if self.partition().is_none() {
+            return Err(EditError::NotEditable(
+                "this image has no partitions to select".to_owned(),
+            ));
+        }
+        if index == self.current {
+            return Ok(());
+        }
+        let Some(target) = self.areas.get(index) else {
+            return Err(EditError::NotEditable(format!(
+                "no partition {index}; this device has {}",
+                self.areas.len()
+            )));
+        };
+        let wanted = index.to_string();
+        if !target.mounts {
+            return Err(EditError::NotEditable(format!(
+                "partition {} holds no volume ADE can mount",
+                target.name.as_deref().unwrap_or(&wanted)
+            )));
+        }
+        let state = if let Some(state) = target.saved.clone() {
+            state
+        } else {
+            let report = self.examine(index);
+            if report.examined.is_none() {
+                return Err(EditError::NotEditable(format!(
+                    "partition {} holds no volume ADE can mount",
+                    target_name(&self.areas, index)
+                )));
+            }
+            AreaState::of(&report, None)
+        };
+        let previous = self.state();
+        if let Some(area) = self.areas.get_mut(self.current) {
+            area.saved = Some(previous);
+        }
+        if let Some(area) = self.areas.get_mut(index) {
+            area.saved = None;
+            self.geometry = area.geometry;
+            self.offset = area.offset;
+        }
+        self.current = index;
+        self.load(&state);
+        Ok(())
+    }
+
+    /// The selected area's bytes: the image, or one partition's part of it.
+    fn part(&self) -> &[u8] {
+        let len = usize::try_from(self.geometry.total_bytes()).unwrap_or(usize::MAX);
+        let end = self.offset.saturating_add(len).min(self.bytes.len());
+        self.bytes.get(self.offset.min(end)..end).unwrap_or(&[])
+    }
+
+    fn part_mut(&mut self) -> &mut [u8] {
+        let len = usize::try_from(self.geometry.total_bytes()).unwrap_or(usize::MAX);
+        let end = self.offset.saturating_add(len).min(self.bytes.len());
+        let start = self.offset.min(end);
+        self.bytes.get_mut(start..end).unwrap_or(&mut [])
     }
 
     /// The image as it now stands.
@@ -410,7 +675,7 @@ impl Session {
     /// The session's own bytes as blocks a volume can be mounted on — a draft
     /// with nothing written, so reading needs no copy of the image (IMP-023).
     fn view(&self) -> Draft<'_> {
-        Draft::new(&self.bytes, self.geometry)
+        Draft::new(self.part(), self.geometry)
     }
 
     /// Delete the entry at `block`: a file, a soft link, or an empty
@@ -560,9 +825,7 @@ impl Session {
     /// [`EditError::Lookup`] if the volume cannot be read. A refused repair
     /// leaves the session as it was.
     pub fn repair(&mut self, free_orphans: bool) -> Result<Repaired, EditError> {
-        let (report, in_use, bytes) =
-            health::examine_in_use_returning(std::mem::take(&mut self.bytes));
-        self.bytes = bytes;
+        let (report, in_use) = self.examine_in_use();
         let view = self.view();
         let volume = Volume::mount(&view).map_err(EditError::Lookup)?;
         let walk = volume.walk(volume.root()).map_err(EditError::Lookup)?;
@@ -575,7 +838,7 @@ impl Session {
             )
             .collect();
         let mut done = Repaired::default();
-        let mut draft = Draft::new(&self.bytes, self.geometry);
+        let mut draft = Draft::new(self.part(), self.geometry);
 
         if let Some(bitmap) = &report.bitmap {
             let wrong = bitmap.referenced_but_free > 0
@@ -731,9 +994,7 @@ impl Session {
         let mut done = Wipe::default();
         let mut in_use_for_free = None;
         if free {
-            let (report, in_use, bytes) =
-                health::examine_in_use_returning(std::mem::take(&mut self.bytes));
-            self.bytes = bytes;
+            let (report, in_use) = self.examine_in_use();
             let view = self.view();
             let volume = Volume::mount(&view).map_err(EditError::Lookup)?;
             let walk = volume.walk(volume.root()).map_err(EditError::Lookup)?;
@@ -746,7 +1007,7 @@ impl Session {
             in_use_for_free = Some(in_use);
         }
         let writes = {
-            let mut draft = Draft::new(&self.bytes, self.geometry);
+            let mut draft = Draft::new(self.part(), self.geometry);
             if let Some(in_use) = &in_use_for_free {
                 done.free = Some(ade_filesystem::wipe::free_space_in(
                     &mut draft,
@@ -852,7 +1113,7 @@ impl Session {
             return Err(EditError::Unsound(format!("{why}; repair the disk first")));
         }
         let (block, writes) = {
-            let mut draft = Draft::new(&self.bytes, self.geometry);
+            let mut draft = Draft::new(self.part(), self.geometry);
             let block = change(&mut draft)?;
             (block, draft.into_writes())
         };
@@ -869,9 +1130,9 @@ impl Session {
     /// verdict.
     fn commit(&mut self, writes: &Writes, allowed: &[&str]) -> Result<(), EditError> {
         let block_size = self.geometry.block_size() as usize;
-        let mut step = Step::make(&mut self.bytes, writes, block_size);
-        let (report, bytes) = health::examine_returning(std::mem::take(&mut self.bytes));
-        self.bytes = bytes;
+        let at = (self.offset, self.current);
+        let mut step = Step::make(self.part_mut(), writes, block_size, at);
+        let report = self.examine(self.current);
         match self.judge(&report, allowed) {
             Ok(after) => {
                 self.record(step, &report, after);
@@ -1023,8 +1284,9 @@ impl Session {
             return false;
         };
         step.apply(&mut self.bytes);
+        let touched = step.areas.clone();
         self.redo.push(step);
-        self.settle();
+        self.settle(&touched);
         true
     }
 
@@ -1035,19 +1297,28 @@ impl Session {
             return false;
         };
         step.apply(&mut self.bytes);
+        let touched = step.areas.clone();
         self.push_undo(step);
-        self.settle();
+        self.settle(&touched);
         true
     }
 
     /// After moving through history: the baseline follows the bytes, and the
     /// disk counts as changed — a save may already hold a different state.
-    fn settle(&mut self) {
-        let (report, bytes) = health::examine_returning(std::mem::take(&mut self.bytes));
-        self.bytes = bytes;
-        self.baseline = problems(&report);
-        self.unsound = unsound(&report);
-        self.free_holding_data = free_holding_data(&report);
+    ///
+    /// Each area the step touched is examined again; one not selected keeps
+    /// what it found for when it is.
+    fn settle(&mut self, touched: &std::collections::BTreeSet<usize>) {
+        for &index in touched {
+            let report = self.examine(index);
+            if index == self.current {
+                let state = AreaState::of(&report, Some(self.free_data));
+                self.load(&state);
+            } else if let Some(area) = self.areas.get_mut(index) {
+                let consent = area.saved.as_ref().map(|s| s.free_data);
+                area.saved = Some(AreaState::of(&report, consent));
+            }
+        }
         self.dirty = true;
     }
 
@@ -1158,6 +1429,87 @@ pub fn amiga_name(host: &str) -> Result<Vec<u8>, char> {
 ///
 /// Counted rather than listed because a code is what stays the same across
 /// an edit — the message names blocks, and blocks move.
+impl AreaState {
+    /// What `report` says, keeping a consent to overwrite free data given
+    /// earlier while there is still free data to overwrite.
+    fn of(report: &health::Health, earlier: Option<FreeData>) -> Self {
+        let holding = free_holding_data(report);
+        let free_data = match earlier {
+            _ if holding == 0 => FreeData::Unprotected,
+            Some(FreeData::Allowed) => FreeData::Allowed,
+            _ => FreeData::Protected,
+        };
+        Self {
+            baseline: problems(report),
+            unsound: unsound(report),
+            free_holding_data: holding,
+            free_data,
+        }
+    }
+}
+
+fn target_name(areas: &[Area], index: usize) -> String {
+    areas
+        .get(index)
+        .and_then(|a| a.name.clone())
+        .unwrap_or_default()
+}
+
+/// What is wrong with a device's partition table, by D-024 part 3: an edit
+/// is only trusted on a disk whose table says unambiguously where each
+/// partition is. Empty when it does.
+fn table_faults(inspection: &crate::inspect::Inspection, image_bytes: u64) -> Vec<String> {
+    let mut faults: Vec<String> = inspection.partition_faults.clone();
+    let blocks = image_bytes / 512;
+    let reserved_end = if let Some(rdb) = &inspection.rdb {
+        if !rdb.checksum_valid {
+            faults.push("the RDSK block's checksum does not verify".to_owned());
+        }
+        if rdb.block_size != 512 {
+            faults.push(format!(
+                "the device's blocks are {} bytes; ADE writes 512-byte blocks",
+                rdb.block_size
+            ));
+        }
+        u64::from(rdb.high_rdsk_block)
+    } else {
+        faults.push("there is no RDSK block".to_owned());
+        0
+    };
+    let parts = &inspection.partitions;
+    for (i, p) in parts.iter().enumerate() {
+        if !p.checksum_valid {
+            faults.push(format!("{}'s PART block checksum does not verify", p.name));
+        }
+        if p.blocks == 0 {
+            faults.push(format!("{} has no blocks", p.name));
+        }
+        let end = p.first_block.saturating_add(p.blocks);
+        if end > blocks {
+            faults.push(format!(
+                "{} ends at block {end}, past the disk's {blocks}",
+                p.name
+            ));
+        }
+        if p.first_block <= reserved_end {
+            faults.push(format!(
+                "{} starts at block {}, inside the partition table's blocks (to {reserved_end})",
+                p.name, p.first_block
+            ));
+        }
+        for q in parts.iter().skip(i.saturating_add(1)) {
+            let q_end = q.first_block.saturating_add(q.blocks);
+            if p.first_block < q_end && q.first_block < end {
+                faults.push(format!("{} and {} overlap", p.name, q.name));
+            }
+            if p.name.eq_ignore_ascii_case(&q.name) {
+                faults.push(format!("two partitions are named {}", p.name));
+            }
+        }
+    }
+    faults
+}
+
 fn problems(report: &health::Health) -> HashMap<&'static str, usize> {
     let mut out: HashMap<&'static str, usize> = HashMap::new();
     for f in report
@@ -1323,7 +1675,6 @@ fn unwalked(report: &health::Health, walk: &ade_filesystem::volume::Walk) -> Opt
     })
 }
 
-/// Why a disk in this condition may not be edited, if it may not.
 /// Whether a session guards free blocks that hold data (IMP-019).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum FreeData {
@@ -1341,6 +1692,7 @@ fn free_holding_data(report: &health::Health) -> usize {
     report.bitmap.as_ref().map_or(0, |b| b.free_holding_data)
 }
 
+/// Why a disk in this condition may not be edited, if it may not.
 fn unsound(report: &health::Health) -> Option<String> {
     let bitmap = report.bitmap.as_ref()?;
     (bitmap.referenced_but_free > 0).then(|| {
