@@ -38,11 +38,11 @@ use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
 use ade_block::Geometry;
-use ade_filesystem::edit::{self as fs_edit, EditError as FsEditError};
+use ade_filesystem::edit::{self as fs_edit, Draft, EditError as FsEditError, Writes};
 use ade_filesystem::entry::EntryKind;
 use ade_filesystem::format::Stamp;
 use ade_filesystem::repair;
-use ade_filesystem::volume::FsError;
+use ade_filesystem::volume::{FsError, Volume};
 pub use ade_filesystem::wipe::Wiped;
 
 use crate::health::{self, Severity};
@@ -150,12 +150,33 @@ struct Step {
     whole: Option<Vec<u8>>,
 }
 
-/// The granularity history is kept in: one 512-byte block.
+/// The granularity [`Step::between`] compares in: one 512-byte block.
+#[cfg(test)]
 const CHUNK: usize = 512;
 
 impl Step {
+    /// Make `writes` in `bytes` — block number to new contents, `block_size`
+    /// bytes each — and return the step that takes them back: the blocks
+    /// they replaced, as they were. No copy of the image, and no comparing
+    /// it afterwards (IMP-023).
+    fn make(bytes: &mut [u8], writes: &Writes, block_size: usize) -> Self {
+        let mut chunks = Vec::with_capacity(writes.len());
+        for (&block, raw) in writes {
+            let at = (block as usize).saturating_mul(block_size);
+            if let Some(there) = bytes.get_mut(at..at.saturating_add(raw.len())) {
+                chunks.push((at, there.to_vec()));
+                there.copy_from_slice(raw);
+            }
+        }
+        Self {
+            chunks,
+            whole: None,
+        }
+    }
+
     /// The step from `before` to `after`: every chunk that differs, holding
     /// `before`'s version.
+    #[cfg(test)]
     fn between(before: Vec<u8>, after: &[u8]) -> Self {
         if before.len() != after.len() {
             return Self {
@@ -289,7 +310,7 @@ impl Session {
                     .to_owned(),
             ));
         };
-        let report = health::examine(bytes.clone());
+        let (report, bytes) = health::examine_returning(bytes);
         if report.examined.is_none() {
             return Err(EditError::NotEditable(
                 "there is no volume on this image that ADE can mount".to_owned(),
@@ -355,9 +376,8 @@ impl Session {
     /// # Errors
     /// [`EditError::Lookup`] if it does not resolve, or is not a directory.
     pub fn directory(&self, path: &str) -> Result<u32, EditError> {
-        let image = crate::Image::from_bytes(self.bytes.clone())
-            .map_err(|e| EditError::NotEditable(e.to_string()))?;
-        let volume = image.volume().map_err(EditError::Lookup)?;
+        let view = self.view();
+        let volume = Volume::mount(&view).map_err(EditError::Lookup)?;
         let entry = volume.lookup(path).map_err(EditError::Lookup)?;
         if !entry.kind.is_directory() {
             return Err(EditError::Lookup(FsError::NotADirectory {
@@ -375,10 +395,22 @@ impl Session {
     /// # Errors
     /// [`EditError::Lookup`] if it does not resolve.
     pub fn entry(&self, path: &str) -> Result<u32, EditError> {
-        let image = crate::Image::from_bytes(self.bytes.clone())
-            .map_err(|e| EditError::NotEditable(e.to_string()))?;
-        let volume = image.volume().map_err(EditError::Lookup)?;
+        let view = self.view();
+        let volume = Volume::mount(&view).map_err(EditError::Lookup)?;
         Ok(volume.lookup(path).map_err(EditError::Lookup)?.block)
+    }
+
+    /// Every deleted file and directory on the disk, as [`crate::carve`]
+    /// finds and grades them — read in place, without a copy of the image.
+    #[must_use]
+    pub fn deleted(&self) -> Vec<crate::carve::Carved> {
+        crate::carve::carve_source(&self.view())
+    }
+
+    /// The session's own bytes as blocks a volume can be mounted on — a draft
+    /// with nothing written, so reading needs no copy of the image (IMP-023).
+    fn view(&self) -> Draft<'_> {
+        Draft::new(&self.bytes, self.geometry)
     }
 
     /// Delete the entry at `block`: a file, a soft link, or an empty
@@ -390,7 +422,7 @@ impl Session {
     pub fn delete(&mut self, block: u32) -> Result<(), EditError> {
         let geometry = self.geometry;
         let when = self.now();
-        self.edit(|bytes| fs_edit::delete(bytes, geometry, block, when).map(|()| block))
+        self.edit(|bytes| fs_edit::delete_in(bytes, geometry, block, when).map(|()| block))
             .map(|_| ())
     }
 
@@ -410,9 +442,9 @@ impl Session {
     /// # Errors
     /// See [`EditError`]. A refused edit leaves the session as it was.
     pub fn undelete(&mut self, block: u32) -> Result<(), EditError> {
-        if let Ok(image) = crate::Image::from_bytes(self.bytes.clone()) {
-            let found = crate::carve::carve(&image);
-            if let Some(c) = found.iter().find(|c| c.block == block)
+        {
+            let view = self.view();
+            if let Some(c) = crate::carve::carve_one(&view, block)
                 && let crate::carve::Evidence::Partial { good, bad } = c.evidence
             {
                 return Err(EditError::Refused(FsEditError::NotRestorable(format!(
@@ -425,7 +457,7 @@ impl Session {
         }
         let geometry = self.geometry;
         let when = self.now();
-        self.edit(|bytes| fs_edit::undelete(bytes, geometry, block, when).map(|()| block))
+        self.edit(|bytes| fs_edit::undelete_in(bytes, geometry, block, when).map(|()| block))
             .map(|_| ())
     }
 
@@ -472,9 +504,8 @@ impl Session {
     /// `block` last. Hard links to directories are not followed: they are
     /// entries to delete, not trees to descend (AV-001).
     fn deletion_order(&self, block: u32) -> Result<Vec<u32>, EditError> {
-        let image = crate::Image::from_bytes(self.bytes.clone())
-            .map_err(|e| EditError::NotEditable(e.to_string()))?;
-        let volume = image.volume().map_err(EditError::Lookup)?;
+        let view = self.view();
+        let volume = Volume::mount(&view).map_err(EditError::Lookup)?;
         let mut order = Vec::new();
         let mut seen = std::collections::HashSet::new();
         let mut stack: Vec<(u32, bool)> = vec![(block, false)];
@@ -504,7 +535,7 @@ impl Session {
     pub fn rename(&mut self, block: u32, name: &[u8]) -> Result<(), EditError> {
         let geometry = self.geometry;
         let when = self.now();
-        self.edit(|bytes| fs_edit::rename(bytes, geometry, block, name, when).map(|()| block))
+        self.edit(|bytes| fs_edit::rename_in(bytes, geometry, block, name, when).map(|()| block))
             .map(|_| ())
     }
 
@@ -532,9 +563,8 @@ impl Session {
         let (report, in_use, bytes) =
             health::examine_in_use_returning(std::mem::take(&mut self.bytes));
         self.bytes = bytes;
-        let image = crate::Image::from_bytes(self.bytes.clone())
-            .map_err(|e| EditError::NotEditable(e.to_string()))?;
-        let volume = image.volume().map_err(EditError::Lookup)?;
+        let view = self.view();
+        let volume = Volume::mount(&view).map_err(EditError::Lookup)?;
         let walk = volume.walk(volume.root()).map_err(EditError::Lookup)?;
         let directories: Vec<(String, u32)> = std::iter::once((String::new(), volume.root()))
             .chain(
@@ -544,8 +574,8 @@ impl Session {
                     .map(|(path, e)| (path.clone(), e.block)),
             )
             .collect();
-        let mut next = self.bytes.clone();
         let mut done = Repaired::default();
+        let mut draft = Draft::new(&self.bytes, self.geometry);
 
         if let Some(bitmap) = &report.bitmap {
             let wrong = bitmap.referenced_but_free > 0
@@ -558,8 +588,10 @@ impl Session {
             if wrong {
                 let outcome = match unwalked(&report, &walk) {
                     Some(why) => Err(why),
-                    None => repair::rebuild_bitmap(&mut next, self.geometry, &in_use, free_orphans)
-                        .map_err(|e| e.to_string()),
+                    None => {
+                        repair::rebuild_bitmap_in(&mut draft, self.geometry, &in_use, free_orphans)
+                            .map_err(|e| e.to_string())
+                    }
                 };
                 match outcome {
                     Ok(r) if !r.is_empty() => done.bitmap = Some(r),
@@ -583,7 +615,7 @@ impl Session {
                 } else {
                     format!("{dir_path}/{name}")
                 };
-                match fs_edit::refile(&mut next, self.geometry, m.block) {
+                match fs_edit::refile_in(&mut draft, self.geometry, m.block) {
                     Ok(()) => done.refiled.push(path),
                     Err(e) => done
                         .declined
@@ -592,12 +624,14 @@ impl Session {
             }
         }
 
+        let writes = draft.into_writes();
+        drop(volume);
+        drop(view);
         if !done.is_empty() {
             // Orphaned blocks are allowed to appear: a bitmap block that
             // failed its checksum hid what it marked, and the repaired one
             // shows it. Everything else is held to the edit's standard.
-            let (report, next) = health::examine_returning(next);
-            self.keep(next, &report, &["orphaned-blocks"])?;
+            self.commit(&writes, &["orphaned-blocks"])?;
         }
         Ok(done)
     }
@@ -610,7 +644,7 @@ impl Session {
     pub fn move_entry(&mut self, block: u32, to: u32) -> Result<(), EditError> {
         let geometry = self.geometry;
         let when = self.now();
-        self.edit(|bytes| fs_edit::move_entry(bytes, geometry, block, to, when).map(|()| block))
+        self.edit(|bytes| fs_edit::move_entry_in(bytes, geometry, block, to, when).map(|()| block))
             .map(|_| ())
     }
 
@@ -629,9 +663,8 @@ impl Session {
     /// volume, one too large for ADE's bitmap, or a name AmigaDOS would not
     /// accept — the existing name included, when it is damaged.
     pub fn format(&mut self, name: Option<&[u8]>) -> Result<(), EditError> {
-        let image = crate::Image::from_bytes(self.bytes.clone())
-            .map_err(|e| EditError::NotEditable(e.to_string()))?;
-        let volume = image.volume().map_err(EditError::Lookup)?;
+        let view = self.view();
+        let volume = Volume::mount(&view).map_err(EditError::Lookup)?;
         let Some(dostype) = volume.dostype() else {
             return Err(EditError::NotEditable(
                 "the bootblock carries no dostype, so there is no filesystem to format with"
@@ -647,14 +680,13 @@ impl Session {
         // cannot disagree with what `blank_named` laid out.
         let mut blocks: Vec<u32> = (0..self.geometry.reserved()).collect();
         {
-            let image = crate::Image::from_bytes(blank.clone())
-                .map_err(|e| EditError::NotEditable(e.to_string()))?;
-            let fresh = image.volume().map_err(EditError::Lookup)?;
+            let blank_view = Draft::new(&blank, self.geometry);
+            let fresh = Volume::mount(&blank_view).map_err(EditError::Lookup)?;
             blocks.push(fresh.root());
             // Every bitmap block and the `bm_ext` chain listing those past
             // the rootblock's 25 — a large hardfile's map is mostly there.
             let map = ade_filesystem::bitmap::Bitmap::read(
-                image.source(),
+                &blank_view,
                 fresh.geometry(),
                 fresh.rootblock(),
             )
@@ -665,18 +697,16 @@ impl Session {
             }
         }
         let bsize = self.geometry.block_size() as usize;
-        let mut next = self.bytes.clone();
-        for b in blocks {
-            let at = (b as usize).saturating_mul(bsize);
-            if let (Some(dst), Some(src)) = (
-                next.get_mut(at..at.saturating_add(bsize)),
-                blank.get(at..at.saturating_add(bsize)),
-            ) {
-                dst.copy_from_slice(src);
-            }
-        }
-        let (report, next) = health::examine_returning(next);
-        self.keep(next, &report, &[])
+        let writes: Writes = blocks
+            .into_iter()
+            .filter_map(|b| {
+                let at = (b as usize).saturating_mul(bsize);
+                blank
+                    .get(at..at.saturating_add(bsize))
+                    .map(|raw| (b, raw.to_vec()))
+            })
+            .collect();
+        self.commit(&writes, &[])
     }
 
     /// Zero every file's slack — the bytes after its last one, in its last
@@ -698,15 +728,14 @@ impl Session {
         if free {
             self.free_data_allowed()?;
         }
-        let mut next = self.bytes.clone();
         let mut done = Wipe::default();
+        let mut in_use_for_free = None;
         if free {
             let (report, in_use, bytes) =
                 health::examine_in_use_returning(std::mem::take(&mut self.bytes));
             self.bytes = bytes;
-            let image = crate::Image::from_bytes(self.bytes.clone())
-                .map_err(|e| EditError::NotEditable(e.to_string()))?;
-            let volume = image.volume().map_err(EditError::Lookup)?;
+            let view = self.view();
+            let volume = Volume::mount(&view).map_err(EditError::Lookup)?;
             let walk = volume.walk(volume.root()).map_err(EditError::Lookup)?;
             if let Some(why) = unwalked(&report, &walk) {
                 return Err(EditError::Unsound(why.replace(
@@ -714,18 +743,24 @@ impl Session {
                     "a block in use could be wiped",
                 )));
             }
-            done.free = Some(ade_filesystem::wipe::free_space(
-                &mut next,
-                self.geometry,
-                &in_use,
-            )?);
+            in_use_for_free = Some(in_use);
         }
-        if slack {
-            done.slack = Some(ade_filesystem::wipe::slack(&mut next, self.geometry)?);
-        }
+        let writes = {
+            let mut draft = Draft::new(&self.bytes, self.geometry);
+            if let Some(in_use) = &in_use_for_free {
+                done.free = Some(ade_filesystem::wipe::free_space_in(
+                    &mut draft,
+                    self.geometry,
+                    in_use,
+                )?);
+            }
+            if slack {
+                done.slack = Some(ade_filesystem::wipe::slack_in(&mut draft, self.geometry)?);
+            }
+            draft.into_writes()
+        };
         if done.blocks() > 0 {
-            let (report, next) = health::examine_returning(next);
-            self.keep(next, &report, &[])?;
+            self.commit(&writes, &[])?;
         }
         Ok(done)
     }
@@ -738,7 +773,7 @@ impl Session {
         self.free_data_allowed()?;
         let geometry = self.geometry;
         let when = self.now();
-        self.edit(|bytes| fs_edit::make_dir(bytes, geometry, parent, name, when))
+        self.edit(|bytes| fs_edit::make_dir_in(bytes, geometry, parent, name, when))
     }
 
     /// Make a hard link called `name` in the directory at `parent`, to the
@@ -751,7 +786,7 @@ impl Session {
         self.free_data_allowed()?;
         let geometry = self.geometry;
         let when = self.now();
-        self.edit(|bytes| fs_edit::make_link(bytes, geometry, object, parent, name, when))
+        self.edit(|bytes| fs_edit::make_link_in(bytes, geometry, object, parent, name, when))
     }
 
     /// Add a file holding `data` to the directory at `parent`.
@@ -762,7 +797,7 @@ impl Session {
         self.free_data_allowed()?;
         let geometry = self.geometry;
         let when = self.now();
-        self.edit(|bytes| fs_edit::add_file(bytes, geometry, parent, name, data, when))
+        self.edit(|bytes| fs_edit::add_file_in(bytes, geometry, parent, name, data, when))
     }
 
     /// On a volume with no entries, how many blocks the bitmap marks free
@@ -807,29 +842,70 @@ impl Session {
         self.clock.unwrap_or_else(crate::create::now)
     }
 
-    /// Run one edit on a copy, keep it only if the result is no less healthy.
+    /// Plan one edit on a draft, and keep it only if the result is no less
+    /// healthy.
     fn edit(
         &mut self,
-        change: impl FnOnce(&mut [u8]) -> Result<u32, FsEditError>,
+        change: impl FnOnce(&mut Draft<'_>) -> Result<u32, FsEditError>,
     ) -> Result<u32, EditError> {
         if let Some(why) = &self.unsound {
             return Err(EditError::Unsound(format!("{why}; repair the disk first")));
         }
-        let mut next = self.bytes.clone();
-        let block = change(&mut next)?;
-        let (report, next) = health::examine_returning(next);
-        self.keep(next, &report, &[])?;
+        let (block, writes) = {
+            let mut draft = Draft::new(&self.bytes, self.geometry);
+            let block = change(&mut draft)?;
+            (block, draft.into_writes())
+        };
+        self.commit(&writes, &[])?;
         Ok(block)
     }
 
-    /// Keep `next` as the image, unless `report` finds a warning or error it
-    /// has more of than the image had — other than the codes in `allowed`.
-    fn keep(
-        &mut self,
-        next: Vec<u8>,
+    /// Make `writes` in the image, in place, keeping the blocks they replace;
+    /// examine the result; and keep it only if it finds no warning or error
+    /// the image did not already have — other than the codes in `allowed` —
+    /// or else put those blocks back. The kept blocks are the edit's step of
+    /// history. No copy of the image is made (IMP-023): the health check
+    /// borrows it, and nothing else reads it between the write and the
+    /// verdict.
+    fn commit(&mut self, writes: &Writes, allowed: &[&str]) -> Result<(), EditError> {
+        let block_size = self.geometry.block_size() as usize;
+        let mut step = Step::make(&mut self.bytes, writes, block_size);
+        let (report, bytes) = health::examine_returning(std::mem::take(&mut self.bytes));
+        self.bytes = bytes;
+        match self.judge(&report, allowed) {
+            Ok(after) => {
+                self.record(step, &report, after);
+                Ok(())
+            }
+            Err(refused) => {
+                step.apply(&mut self.bytes);
+                Err(refused)
+            }
+        }
+    }
+
+    /// The problems `report` finds, by code, if it finds none the image did
+    /// not already have — other than the codes in `allowed`.
+    fn judge(
+        &self,
         report: &health::Health,
         allowed: &[&str],
-    ) -> Result<(), EditError> {
+    ) -> Result<HashMap<&'static str, usize>, EditError> {
+        // A session only opens a disk with a volume it can mount, so a result
+        // without one is a volume the edit destroyed. The health report says
+        // so as `no-volume`, information rather than a warning — a quarter of
+        // real disks have no AmigaDOS volume — so the count below would not
+        // see it (BUG-029).
+        if report.examined.is_none() {
+            let why = report
+                .findings
+                .iter()
+                .find(|f| f.code == "no-volume")
+                .map_or_else(String::new, |f| format!(": {}", f.message));
+            return Err(EditError::WouldDamage(vec![format!(
+                "the edit leaves no volume ADE can mount{why}"
+            )]));
+        }
         let after = problems(report);
         let mut new: Vec<String> = report
             .findings
@@ -850,9 +926,12 @@ impl Session {
         if !new.is_empty() {
             return Err(EditError::WouldDamage(new));
         }
+        Ok(after)
+    }
 
-        let previous = std::mem::replace(&mut self.bytes, next);
-        let step = Step::between(previous, &self.bytes);
+    /// Keep an edit that passed: its step goes on the history, and the
+    /// baseline and the rest follow `report`.
+    fn record(&mut self, step: Step, report: &health::Health, after: HashMap<&'static str, usize>) {
         // Inside a group every edit joins one step, so the whole group comes
         // off with one Undo; a block the group already changed keeps the
         // version from before the group.
@@ -868,7 +947,6 @@ impl Session {
         self.unsound = unsound(report);
         self.free_holding_data = free_holding_data(report);
         self.dirty = true;
-        Ok(())
     }
 
     fn push_undo(&mut self, step: Step) {
@@ -1366,7 +1444,36 @@ fn write_atomically(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     reason = "tests build their own buffers"
 )]
 mod tests {
-    use super::{CHUNK, Step};
+    use super::{CHUNK, Session, Step, Writes};
+    use ade_block::Geometry;
+    use ade_filesystem::dostype::Dostype;
+    use ade_filesystem::format::{self, Stamp};
+
+    #[test]
+    fn a_refused_write_is_put_back_exactly_with_no_copy_kept() {
+        // IMP-023: an edit is made in place and its replaced blocks kept; a
+        // write the health check objects to must come out again, leaving the
+        // image as it was and nothing on the history.
+        let when = Stamp {
+            days: 17_000,
+            mins: 1,
+            ticks: 0,
+        };
+        let dostype = Dostype::from_raw(0x444F_5301).unwrap();
+        let blank = format::blank(Geometry::DD_FLOPPY, dostype, "Refuse", when).unwrap();
+        let mut s = Session::from_bytes(blank.clone()).unwrap();
+        // Noise over the rootblock: the volume no longer mounts as it did.
+        let mut writes = Writes::new();
+        writes.insert(880, vec![0xA5; 512]);
+        writes.insert(1000, vec![0x5A; 512]);
+        assert!(s.commit(&writes, &[]).is_err());
+        assert!(
+            s.bytes() == blank.as_slice(),
+            "every written block put back"
+        );
+        assert!(!s.can_undo() && s.history_bytes() == 0);
+        assert!(!s.is_dirty());
+    }
 
     #[test]
     fn a_step_holds_only_what_changed_and_is_its_own_inverse() {

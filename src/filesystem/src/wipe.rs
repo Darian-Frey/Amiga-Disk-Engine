@@ -22,7 +22,7 @@ use ade_endian::{put_u32, u32_at};
 use crate::{
     bitmap::Bitmap,
     dostype::FileSystem,
-    edit::{EditError, Slice, apply},
+    edit::{EditError, apply},
     entry::{EntryKind, T_DATA},
     volume::{FsError, Volume},
 };
@@ -44,9 +44,12 @@ pub struct Wiped {
 /// [`EditError::Fs`] when the volume cannot be mounted or walked. A file that
 /// cannot be accounted for is skipped and listed, not an error. The image is
 /// unchanged whenever one is returned.
-pub fn slack(image: &mut [u8], geometry: Geometry) -> Result<Wiped, EditError> {
+pub fn slack_in(
+    image: &mut crate::edit::Draft<'_>,
+    geometry: Geometry,
+) -> Result<Wiped, EditError> {
     let (wiped, writes) = {
-        let source = Slice { image, geometry };
+        let source = image.view();
         let volume = Volume::mount(&source)?;
         let ofs = volume
             .dostype()
@@ -145,13 +148,13 @@ pub fn slack(image: &mut [u8], geometry: Geometry) -> Result<Wiped, EditError> {
 /// checksum, does not cover the volume or points outside it: a free map ADE
 /// distrusts is how a wipe lands on live data. The image is unchanged
 /// whenever one is returned.
-pub fn free_space<S: BuildHasher>(
-    image: &mut [u8],
+pub fn free_space_in<S: BuildHasher>(
+    image: &mut crate::edit::Draft<'_>,
     geometry: Geometry,
     in_use: &HashSet<u32, S>,
 ) -> Result<Wiped, EditError> {
     let (wiped, writes) = {
-        let source = Slice { image, geometry };
+        let source = image.view();
         let volume = Volume::mount(&source)?;
         let bitmap = Bitmap::read(&source, &geometry, volume.rootblock())?;
         if !bitmap.flagged_valid
@@ -193,8 +196,40 @@ pub fn free_space<S: BuildHasher>(
     Ok(wiped)
 }
 
-fn read(source: &Slice<'_>, block: u32) -> Result<Vec<u8>, EditError> {
-    let mut raw = vec![0u8; source.geometry.block_size() as usize];
+fn read(source: &dyn ade_block::BlockSource, block: u32) -> Result<Vec<u8>, EditError> {
+    let mut raw = vec![0u8; source.geometry().block_size() as usize];
     ade_block::read_at(source, BlockIndex(u64::from(block)), &mut raw).map_err(FsError::Block)?;
     Ok(raw)
+}
+
+/// [`slack_in`] on an image's bytes: planned on a draft, then written.
+///
+/// # Errors
+/// As [`slack_in`]; the image is unchanged whenever one is returned.
+pub fn slack(image: &mut [u8], geometry: Geometry) -> Result<Wiped, EditError> {
+    let (out, writes) = {
+        let mut draft = crate::edit::Draft::new(image, geometry);
+        let out = slack_in(&mut draft, geometry)?;
+        (out, draft.into_writes())
+    };
+    crate::edit::apply_writes(image, geometry, &writes);
+    Ok(out)
+}
+
+/// [`free_space_in`] on an image's bytes: planned on a draft, then written.
+///
+/// # Errors
+/// As [`free_space_in`]; the image is unchanged whenever one is returned.
+pub fn free_space<S: BuildHasher>(
+    image: &mut [u8],
+    geometry: Geometry,
+    in_use: &HashSet<u32, S>,
+) -> Result<Wiped, EditError> {
+    let (out, writes) = {
+        let mut draft = crate::edit::Draft::new(image, geometry);
+        let out = free_space_in(&mut draft, geometry, in_use)?;
+        (out, draft.into_writes())
+    };
+    crate::edit::apply_writes(image, geometry, &writes);
+    Ok(out)
 }

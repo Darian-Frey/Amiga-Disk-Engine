@@ -251,6 +251,19 @@ pub(crate) fn attribute(image: &crate::Image) -> (BTreeMap<u64, Owned>, bool) {
     (out, mounted)
 }
 
+/// What each block of a volume on `source` is — the image of a floppy or a
+/// plain hardfile, read in place. For a caller holding bytes, not an image.
+pub(crate) fn attribute_source(source: &dyn ade_block::BlockSource) -> BTreeMap<u64, Owned> {
+    let area = crate::inspect::Area {
+        source: crate::inspect::AreaSource::Whole(source),
+        partition: None,
+        first_block: 0,
+    };
+    let mut out = BTreeMap::new();
+    attribute_area(&area, 0, false, &mut out);
+    out
+}
+
 /// One partition's map in its own numbering, block 0 its first: what a
 /// partition is when it is looked at alone, as a floppy is (BUG-028). The
 /// map, and whether its volume mounted.

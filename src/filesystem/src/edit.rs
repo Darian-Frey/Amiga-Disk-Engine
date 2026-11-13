@@ -212,15 +212,15 @@ pub fn check_name(name: &[u8]) -> Result<(), EditError> {
 ///
 /// # Errors
 /// [`EditError`]; the image is unchanged whenever one is returned.
-pub fn make_dir(
-    image: &mut [u8],
+pub fn make_dir_in(
+    image: &mut Draft<'_>,
     geometry: Geometry,
     parent: u32,
     name: &[u8],
     when: Stamp,
 ) -> Result<u32, EditError> {
     let plan = {
-        let source = Slice { image, geometry };
+        let source = image.view();
         let mut plan = Plan::new(&source, parent, name)?;
         // On a dircache volume a directory has a cache chain from the moment
         // it exists — empty, but there — as AmigaDOS's `MakeDir` makes it;
@@ -251,8 +251,8 @@ pub fn make_dir(
 ///
 /// # Errors
 /// [`EditError`]; the image is unchanged whenever one is returned.
-pub fn add_file(
-    image: &mut [u8],
+pub fn add_file_in(
+    image: &mut Draft<'_>,
     geometry: Geometry,
     parent: u32,
     name: &[u8],
@@ -261,7 +261,7 @@ pub fn add_file(
 ) -> Result<u32, EditError> {
     let size = u32::try_from(data.len()).map_err(|_| EditError::TooLarge { len: data.len() })?;
     let plan = {
-        let source = Slice { image, geometry };
+        let source = image.view();
         let mut plan = Plan::new(&source, parent, name)?;
 
         let filesystem = plan.volume.filesystem();
@@ -364,14 +364,14 @@ pub fn add_file(
 /// [`EditError::NotRemovable`] for the root, or a directory with anything in
 /// it; otherwise as [`make_dir`]. The image is unchanged whenever one is
 /// returned.
-pub fn delete(
-    image: &mut [u8],
+pub fn delete_in(
+    image: &mut Draft<'_>,
     geometry: Geometry,
     block: u32,
     when: Stamp,
 ) -> Result<(), EditError> {
     {
-        let source = Slice { image, geometry };
+        let source = image.view();
         let (entry, _) = removable_for_rename(&source, block)?;
         if matches!(entry.kind, EntryKind::HardLinkFile | EntryKind::HardLinkDir) {
             return delete_link(image, geometry, block, when);
@@ -391,7 +391,7 @@ pub fn delete(
         }
     }
     let writes = {
-        let source = Slice { image, geometry };
+        let source = image.view();
         let (entry, parent) = removable(&source, block)?;
         let mut plan = Plan::open(&source, parent)?;
         let blocks = match entry.kind {
@@ -438,13 +438,13 @@ pub fn delete(
 /// measured: AmigaDOS's `Delete` of a link changes exactly that, the
 /// directory, and the bitmap.
 fn delete_link(
-    image: &mut [u8],
+    image: &mut Draft<'_>,
     geometry: Geometry,
     block: u32,
     when: Stamp,
 ) -> Result<(), EditError> {
     let writes = {
-        let source = Slice { image, geometry };
+        let source = image.view();
         let (link, parent) = removable_for_rename(&source, block)?;
         let mut plan = Plan::open(&source, parent)?;
         plan.unhook(&link)?;
@@ -470,19 +470,16 @@ fn delete_link(
 /// datestamp, protection and comment stay; the link's block is freed. On a
 /// dircache volume the link's record becomes the object's.
 fn delete_promoting(
-    image: &mut [u8],
+    image: &mut Draft<'_>,
     geometry: Geometry,
     block: u32,
     when: Stamp,
 ) -> Result<(), EditError> {
-    // Two directories, so two plans, as a move has; on a copy, kept only when
+    // Two directories, so two plans, as a move has: the second reads the
+    // draft, which shows the first's writes; nothing reaches the image unless
     // both work.
-    let mut work = image.to_vec();
     let (object, head) = {
-        let source = Slice {
-            image: &work,
-            geometry,
-        };
+        let source = image.view();
         let (object, from) = removable_for_rename(&source, block)?;
         let volume = Volume::mount(&source)?;
         let head = volume
@@ -504,14 +501,11 @@ fn delete_promoting(
         }
         plan.touch(when)?;
         let writes = plan.finish();
-        apply(&mut work, geometry, &writes);
+        apply(image, geometry, &writes);
         (object, head)
     };
     let writes = {
-        let source = Slice {
-            image: &work,
-            geometry,
-        };
+        let source = image.view();
         let mut plan = Plan::open(&source, head.parent)?;
         plan.unlink(head.block)?;
         let mut raw = plan.read(block)?;
@@ -554,8 +548,7 @@ fn delete_promoting(
         plan.release(&[head.block]);
         plan.finish()
     };
-    apply(&mut work, geometry, &writes);
-    image.copy_from_slice(&work);
+    apply(image, geometry, &writes);
     Ok(())
 }
 
@@ -575,8 +568,8 @@ fn delete_promoting(
 /// [`EditError::NotRemovable`] for an object that cannot be linked to, and
 /// why; otherwise as [`make_dir`]. The image is unchanged whenever one is
 /// returned.
-pub fn make_link(
-    image: &mut [u8],
+pub fn make_link_in(
+    image: &mut Draft<'_>,
     geometry: Geometry,
     object: u32,
     parent: u32,
@@ -584,7 +577,7 @@ pub fn make_link(
     when: Stamp,
 ) -> Result<u32, EditError> {
     let plan = {
-        let source = Slice { image, geometry };
+        let source = image.view();
         let mut plan = Plan::new(&source, parent, name)?;
         let refuse = |why: String| Err(EditError::NotRemovable(why));
         let root = plan.volume.root();
@@ -698,14 +691,14 @@ pub fn make_link(
 /// # Errors
 /// [`EditError::NotRestorable`] for each refusal above; otherwise as
 /// [`make_dir`]. The image is unchanged whenever one is returned.
-pub fn undelete(
-    image: &mut [u8],
+pub fn undelete_in(
+    image: &mut Draft<'_>,
     geometry: Geometry,
     block: u32,
     when: Stamp,
 ) -> Result<(), EditError> {
     let writes = {
-        let source = Slice { image, geometry };
+        let source = image.view();
         let (entry, parent) = restorable(&source, block)?;
         let mut plan = Plan::new(&source, parent, &entry.name)?;
         let used = plan.blocks_used_elsewhere(block)?;
@@ -837,8 +830,8 @@ fn restorable(
 /// [`EditError::NotRemovable`] for the root; [`EditError::Exists`] when
 /// another entry has the name; otherwise as [`make_dir`]. The image is
 /// unchanged whenever one is returned.
-pub fn rename(
-    image: &mut [u8],
+pub fn rename_in(
+    image: &mut Draft<'_>,
     geometry: Geometry,
     block: u32,
     name: &[u8],
@@ -846,7 +839,7 @@ pub fn rename(
 ) -> Result<(), EditError> {
     check_name(name)?;
     let writes = {
-        let source = Slice { image, geometry };
+        let source = image.view();
         let (_, parent) = removable_for_rename(&source, block)?;
         let mut plan = Plan::open(&source, parent)?;
         // Taken by anything but this entry: changing only a name's case is a
@@ -903,21 +896,18 @@ pub fn rename(
 /// there; [`EditError::Exists`] when the destination has the name; otherwise
 /// as [`make_dir`] for either directory. The image is unchanged whenever one
 /// is returned.
-pub fn move_entry(
-    image: &mut [u8],
+pub fn move_entry_in(
+    image: &mut Draft<'_>,
     geometry: Geometry,
     block: u32,
     to: u32,
     when: Stamp,
 ) -> Result<(), EditError> {
-    // Two directories, so two plans, the second built on the first's result.
-    // Both run on a copy, which is only copied back when both have worked.
-    let mut work = image.to_vec();
+    // Two directories, so two plans, the second built on the first's result:
+    // it reads the draft, which shows the first's writes, and nothing reaches
+    // the image unless both work.
     let (entry, record) = {
-        let source = Slice {
-            image: &work,
-            geometry,
-        };
+        let source = image.view();
         let (entry, from) = removable_for_rename(&source, block)?;
         if from == to {
             return Err(EditError::NotNeeded(format!(
@@ -958,14 +948,11 @@ pub fn move_entry(
         }
         plan.touch(when)?;
         let writes = plan.finish();
-        apply(&mut work, geometry, &writes);
+        apply(image, geometry, &writes);
         (entry, record)
     };
     let writes = {
-        let source = Slice {
-            image: &work,
-            geometry,
-        };
+        let source = image.view();
         let mut plan = Plan::new(&source, to, &entry.name)?;
         let mut raw = plan.read(block)?;
         let _ = put_back(&mut raw, 12, to);
@@ -997,8 +984,7 @@ pub fn move_entry(
         plan.touch(when)?;
         plan.finish()
     };
-    apply(&mut work, geometry, &writes);
-    image.copy_from_slice(&work);
+    apply(image, geometry, &writes);
     Ok(())
 }
 
@@ -1016,9 +1002,9 @@ pub fn move_entry(
 /// choice for whoever owns the disk — or when a block the move would reseal
 /// already fails its checksum, since resealing it would hide that. Otherwise
 /// as [`rename`]. The image is unchanged whenever one is returned.
-pub fn refile(image: &mut [u8], geometry: Geometry, block: u32) -> Result<(), EditError> {
+pub fn refile_in(image: &mut Draft<'_>, geometry: Geometry, block: u32) -> Result<(), EditError> {
     let writes = {
-        let source = Slice { image, geometry };
+        let source = image.view();
         let (entry, parent) = removable_for_rename(&source, block)?;
         // No block is taken or freed, so the bitmap is not consulted — and a
         // disk whose bitmap needs repair can still have its entries refiled.
@@ -1129,6 +1115,245 @@ fn removable_for_rename(
         )));
     }
     Ok((entry, parent))
+}
+
+/// [`make_dir_in`] on an image's bytes: planned on a draft, then written.
+///
+/// # Errors
+/// As [`make_dir_in`]; the image is unchanged whenever one is returned.
+pub fn make_dir(
+    image: &mut [u8],
+    geometry: Geometry,
+    parent: u32,
+    name: &[u8],
+    when: Stamp,
+) -> Result<u32, EditError> {
+    let (out, writes) = {
+        let mut draft = Draft::new(image, geometry);
+        let out = make_dir_in(&mut draft, geometry, parent, name, when)?;
+        (out, draft.into_writes())
+    };
+    apply_writes(image, geometry, &writes);
+    Ok(out)
+}
+
+/// [`add_file_in`] on an image's bytes: planned on a draft, then written.
+///
+/// # Errors
+/// As [`add_file_in`]; the image is unchanged whenever one is returned.
+pub fn add_file(
+    image: &mut [u8],
+    geometry: Geometry,
+    parent: u32,
+    name: &[u8],
+    data: &[u8],
+    when: Stamp,
+) -> Result<u32, EditError> {
+    let (out, writes) = {
+        let mut draft = Draft::new(image, geometry);
+        let out = add_file_in(&mut draft, geometry, parent, name, data, when)?;
+        (out, draft.into_writes())
+    };
+    apply_writes(image, geometry, &writes);
+    Ok(out)
+}
+
+/// [`delete_in`] on an image's bytes: planned on a draft, then written.
+///
+/// # Errors
+/// As [`delete_in`]; the image is unchanged whenever one is returned.
+pub fn delete(
+    image: &mut [u8],
+    geometry: Geometry,
+    block: u32,
+    when: Stamp,
+) -> Result<(), EditError> {
+    let writes = {
+        let mut draft = Draft::new(image, geometry);
+        delete_in(&mut draft, geometry, block, when)?;
+        draft.into_writes()
+    };
+    apply_writes(image, geometry, &writes);
+    Ok(())
+}
+
+/// [`make_link_in`] on an image's bytes: planned on a draft, then written.
+///
+/// # Errors
+/// As [`make_link_in`]; the image is unchanged whenever one is returned.
+pub fn make_link(
+    image: &mut [u8],
+    geometry: Geometry,
+    object: u32,
+    parent: u32,
+    name: &[u8],
+    when: Stamp,
+) -> Result<u32, EditError> {
+    let (out, writes) = {
+        let mut draft = Draft::new(image, geometry);
+        let out = make_link_in(&mut draft, geometry, object, parent, name, when)?;
+        (out, draft.into_writes())
+    };
+    apply_writes(image, geometry, &writes);
+    Ok(out)
+}
+
+/// [`undelete_in`] on an image's bytes: planned on a draft, then written.
+///
+/// # Errors
+/// As [`undelete_in`]; the image is unchanged whenever one is returned.
+pub fn undelete(
+    image: &mut [u8],
+    geometry: Geometry,
+    block: u32,
+    when: Stamp,
+) -> Result<(), EditError> {
+    let writes = {
+        let mut draft = Draft::new(image, geometry);
+        undelete_in(&mut draft, geometry, block, when)?;
+        draft.into_writes()
+    };
+    apply_writes(image, geometry, &writes);
+    Ok(())
+}
+
+/// [`rename_in`] on an image's bytes: planned on a draft, then written.
+///
+/// # Errors
+/// As [`rename_in`]; the image is unchanged whenever one is returned.
+pub fn rename(
+    image: &mut [u8],
+    geometry: Geometry,
+    block: u32,
+    name: &[u8],
+    when: Stamp,
+) -> Result<(), EditError> {
+    let writes = {
+        let mut draft = Draft::new(image, geometry);
+        rename_in(&mut draft, geometry, block, name, when)?;
+        draft.into_writes()
+    };
+    apply_writes(image, geometry, &writes);
+    Ok(())
+}
+
+/// [`move_entry_in`] on an image's bytes: planned on a draft, then written.
+///
+/// # Errors
+/// As [`move_entry_in`]; the image is unchanged whenever one is returned.
+pub fn move_entry(
+    image: &mut [u8],
+    geometry: Geometry,
+    block: u32,
+    to: u32,
+    when: Stamp,
+) -> Result<(), EditError> {
+    let writes = {
+        let mut draft = Draft::new(image, geometry);
+        move_entry_in(&mut draft, geometry, block, to, when)?;
+        draft.into_writes()
+    };
+    apply_writes(image, geometry, &writes);
+    Ok(())
+}
+
+/// [`refile_in`] on an image's bytes: planned on a draft, then written.
+///
+/// # Errors
+/// As [`refile_in`]; the image is unchanged whenever one is returned.
+pub fn refile(image: &mut [u8], geometry: Geometry, block: u32) -> Result<(), EditError> {
+    let writes = {
+        let mut draft = Draft::new(image, geometry);
+        refile_in(&mut draft, geometry, block)?;
+        draft.into_writes()
+    };
+    apply_writes(image, geometry, &writes);
+    Ok(())
+}
+
+/// Block writes a plan has decided, by block number: what an edit is.
+pub type Writes = BTreeMap<u32, Vec<u8>>;
+
+/// An image's bytes, borrowed, with the writes an edit has planned so far
+/// laid over them — read as the image will be once they are made.
+///
+/// Every edit plans on a draft and nothing else: it reads through the draft,
+/// records its writes in it, and a second plan — a move's second directory,
+/// say — reads the first's writes without a copy of the image being made.
+/// The caller takes the writes with [`Self::into_writes`] and decides whether
+/// to make them: an edit session saves the blocks they replace first, which
+/// is both its rollback and its Undo (D-024 part 7, IMP-023).
+pub struct Draft<'a> {
+    image: &'a [u8],
+    geometry: Geometry,
+    writes: Writes,
+}
+
+impl<'a> Draft<'a> {
+    /// A draft of `image`, nothing yet written.
+    #[must_use]
+    pub fn new(image: &'a [u8], geometry: Geometry) -> Self {
+        Self {
+            image,
+            geometry,
+            writes: BTreeMap::new(),
+        }
+    }
+
+    /// The writes planned, block number to new contents.
+    #[must_use]
+    pub fn into_writes(self) -> Writes {
+        self.writes
+    }
+
+    /// A read view: the image with the writes so far laid over it.
+    pub(crate) fn view(&self) -> View<'_, 'a> {
+        View { draft: self }
+    }
+
+    pub(crate) fn record(&mut self, writes: &Writes) {
+        for (&block, raw) in writes {
+            self.writes.insert(block, raw.clone());
+        }
+    }
+}
+
+impl BlockSource for Draft<'_> {
+    fn geometry(&self) -> &Geometry {
+        &self.geometry
+    }
+
+    fn read_block(&self, block: ValidBlock, out: &mut [u8]) -> Result<(), BlockError> {
+        if let Some(raw) = u32::try_from(block.index())
+            .ok()
+            .and_then(|b| self.writes.get(&b))
+        {
+            out.copy_from_slice(raw);
+            return Ok(());
+        }
+        Slice {
+            image: self.image,
+            geometry: self.geometry,
+        }
+        .read_block(block, out)
+    }
+}
+
+/// A [`Draft`] borrowed for reading, so a plan can hold it while the draft
+/// is not being written.
+#[derive(Clone, Copy)]
+pub(crate) struct View<'d, 'a> {
+    draft: &'d Draft<'a>,
+}
+
+impl BlockSource for View<'_, '_> {
+    fn geometry(&self) -> &Geometry {
+        self.draft.geometry()
+    }
+
+    fn read_block(&self, block: ValidBlock, out: &mut [u8]) -> Result<(), BlockError> {
+        self.draft.read_block(block, out)
+    }
 }
 
 /// A volume's bytes, read as blocks.
@@ -1820,8 +2045,15 @@ fn encode_record(r: &Record) -> Vec<u8> {
     out
 }
 
-/// Copy a finished plan into the image.
-pub(crate) fn apply(image: &mut [u8], geometry: Geometry, writes: &BTreeMap<u32, Vec<u8>>) {
+/// Record a finished plan in the draft: later plans read it, and the caller
+/// takes the whole of it with [`Draft::into_writes`].
+pub(crate) fn apply(image: &mut Draft<'_>, _geometry: Geometry, writes: &Writes) {
+    image.record(writes);
+}
+
+/// Copy planned writes into an image's bytes: block number to its new
+/// contents, as [`Draft::into_writes`] returns them.
+pub fn apply_writes(image: &mut [u8], geometry: Geometry, writes: &Writes) {
     let bsize = geometry.block_size() as usize;
     for (&block, raw) in writes {
         let Some(at) = (block as usize).checked_mul(bsize) else {

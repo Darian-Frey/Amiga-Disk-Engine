@@ -14,6 +14,17 @@ _None._
 
 ## Fixed
 
+### BUG-029 An edit that left the volume unmountable would have been kept
+**Severity:** medium
+**Status:** fixed
+**Found:** 2026-11-13, writing a test for IMP-023 that hands the edit session's `commit` writes of noise over the rootblock: the session kept them. **Fixed** the same day.
+**Where:** [src/api/src/edit.rs](../src/api/src/edit.rs), the check every edit passes before it is kept — `keep` until IMP-023, `judge` after.
+
+**What is wrong.** An edit is kept only if the health report finds no warning or error the disk did not already have. A volume that no longer mounts is reported as `no-volume`, which is *information* — a quarter of real disks have no AmigaDOS volume, and saying so is not a fault — so an edit that destroyed the volume outright passed the check. No edit ADE plans has done this, which is why nothing caught it; the check exists for the day one does.
+
+**The fix.** A session opens only a disk whose volume mounts (`Session::from_bytes` refuses any other), so a result with no volume is one the edit destroyed: refused as `WouldDamage`, naming why the volume does not mount, and put back. `a_refused_write_is_put_back_exactly_with_no_copy_kept` writes noise over the rootblock and requires the refusal, the image back byte for byte, and nothing on the history.
+
+
 ### BUG-028 `--partition` is accepted and ignored by `find`, `scan`, `layout`, `specs` and `carve` — even a partition that does not exist
 **Severity:** medium
 **Status:** fixed

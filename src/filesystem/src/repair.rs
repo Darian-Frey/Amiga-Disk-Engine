@@ -26,7 +26,7 @@ use ade_endian::{put_u32, u32_at};
 use crate::{
     bitmap::Bitmap,
     dostype::Mode,
-    edit::{EditError, Slice, apply, put_back, seal},
+    edit::{EditError, apply, put_back, seal},
     rootblock::BITMAP_VALID,
     volume::{FsError, Volume},
 };
@@ -71,14 +71,14 @@ impl BitmapRepair {
 /// rootblock that already fails its checksum — setting it would reseal the
 /// block and hide that; [`EditError::BitmapUntrusted`] when the bitmap does
 /// not cover the volume. The image is unchanged whenever one is returned.
-pub fn rebuild_bitmap<S: BuildHasher>(
-    image: &mut [u8],
+pub fn rebuild_bitmap_in<S: BuildHasher>(
+    image: &mut crate::edit::Draft<'_>,
     geometry: Geometry,
     in_use: &HashSet<u32, S>,
     free_orphans: bool,
 ) -> Result<BitmapRepair, EditError> {
     let (repair, writes) = {
-        let source = Slice { image, geometry };
+        let source = image.view();
         let volume = Volume::mount(&source)?;
         if volume
             .dostype()
@@ -244,8 +244,27 @@ fn remap(raw: &[u8], first: usize, geometry: &Geometry, used: &HashSet<u32>) -> 
     out
 }
 
-fn read(source: &Slice<'_>, block: u32) -> Result<Vec<u8>, EditError> {
-    let mut raw = vec![0u8; source.geometry.block_size() as usize];
+fn read(source: &dyn ade_block::BlockSource, block: u32) -> Result<Vec<u8>, EditError> {
+    let mut raw = vec![0u8; source.geometry().block_size() as usize];
     ade_block::read_at(source, BlockIndex(u64::from(block)), &mut raw).map_err(FsError::Block)?;
     Ok(raw)
+}
+
+/// [`rebuild_bitmap_in`] on an image's bytes: planned on a draft, then written.
+///
+/// # Errors
+/// As [`rebuild_bitmap_in`]; the image is unchanged whenever one is returned.
+pub fn rebuild_bitmap<S: BuildHasher>(
+    image: &mut [u8],
+    geometry: Geometry,
+    in_use: &HashSet<u32, S>,
+    free_orphans: bool,
+) -> Result<BitmapRepair, EditError> {
+    let (out, writes) = {
+        let mut draft = crate::edit::Draft::new(image, geometry);
+        let out = rebuild_bitmap_in(&mut draft, geometry, in_use, free_orphans)?;
+        (out, draft.into_writes())
+    };
+    crate::edit::apply_writes(image, geometry, &writes);
+    Ok(out)
 }

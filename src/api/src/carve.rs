@@ -153,6 +153,36 @@ fn carve_area(
     }
 }
 
+/// [`carve`] a volume read in place from `source` — a floppy or a plain
+/// hardfile's bytes, without an [`crate::Image`] made of them. What an edit
+/// session carves its own disk with (IMP-023).
+#[must_use]
+pub fn carve_source(source: &dyn ade_block::BlockSource) -> Vec<Carved> {
+    let claimed = crate::layout::attribute_source(source);
+    let area = crate::inspect::Area {
+        source: crate::inspect::AreaSource::Whole(source),
+        partition: None,
+        first_block: 0,
+    };
+    let mut out = Vec::new();
+    carve_area(&area, &claimed, 0, &mut out);
+    out
+}
+
+/// The header at `block` of `source`, if it is a file or directory header
+/// at all, graded as [`carve`] grades one — without carving anything else.
+/// For an edit deciding whether a deleted entry is still its own (F-012).
+#[must_use]
+pub fn carve_one(source: &dyn ade_block::BlockSource, block: u32) -> Option<Carved> {
+    let raw = read(source, block)?;
+    let entry = Entry::parse(&raw, block).ok()?;
+    if !entry.looks_like_an_entry() || !matches!(entry.kind, EntryKind::File | EntryKind::Directory)
+    {
+        return None;
+    }
+    Some(examine(source, &entry, None))
+}
+
 /// One block of `source`, whole, or `None` past its end.
 fn read(source: &dyn ade_block::BlockSource, block: u32) -> Option<Vec<u8>> {
     let mut raw = vec![0u8; source.geometry().block_size() as usize];

@@ -11,8 +11,12 @@ Effort vocabulary: trivial | small | medium | large.
 
 ## Suggested
 
+_None._
+
+## Applied
+
 ### IMP-023 An edit still copies the whole image once, to be able to refuse itself
-**Status:** suggested
+**Status:** applied
 **Effort:** medium
 **Found:** 2026-11-13, implementing D-024 part 7. History now keeps the blocks each edit changed, and the health check borrows the image instead of copying it — a `put` on a 500 MB hardfile went from 2.05 GB peak to 1.03 GB. What is left is one copy: the session makes each edit on `next`, a copy of the image, so that an edit the health check objects to leaves the session untouched.
 
@@ -24,8 +28,7 @@ Effort vocabulary: trivial | small | medium | large.
 
 **Trade-offs.** Touches every edit function, including the two that work on a scratch copy internally (`move_entry`, deleting a linked object), which would need their two plans merged into one. The health check would examine the image in place, so a refusal has to restore it before anything else reads it — which is true of the session today only because nothing else holds it.
 
-
-## Applied
+**Applied 2026-11-13, as proposed.** Every filesystem edit plans on a **`Draft`** — the image's bytes, borrowed, with the writes planned so far laid over them — and returns those writes; the session makes them in place, keeping the blocks they replace, examines the result, and on a refusal puts those blocks back. The kept blocks are the edit's step of history, so rollback and Undo are one list and nothing is diffed. A two-directory edit (a move, deleting a linked object) and a repair's chain of refiles plan their later steps on the same draft, which shows the earlier ones' writes — the scratch copies they made are gone. Each `…_in` function takes a draft; the old names remain as wrappers that draft and then write, so no caller changed meaning. Lookups mount the volume on the session's own bytes through an empty draft instead of an `Image` copied for the purpose, and undelete carves in place (`Session::deleted`, `carve_source`, `carve_one`). **On a 500 MB hardfile every edit command — `put`, `mkdir`, `rm`, `undelete`, `rename`, `mv`, `link`, `repair`, `format`, `wipe` — now peaks at 516 MB, one copy, where a `put` took 2.05 GB this morning; a `put` takes 1.7 s where it took 2.9.** Outputs match the previous build's but for datestamps. Writing a test for the refusal path found **BUG-029** — an edit leaving the volume unmountable would have been kept — fixed with it.
 
 ### IMP-022 An AmigaDOS run that times out says only that it did; the screen that would say why is gone
 **Status:** applied

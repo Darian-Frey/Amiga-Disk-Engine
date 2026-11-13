@@ -762,9 +762,7 @@ fn undelete(image: &Path, which: &str, output: Option<&Path>) -> ExitCode {
     use ade_core::layers::filesystem::edit::EditError as FsEditError;
     let refuse = |why: String| EditError::Refused(FsEditError::NotRestorable(why));
     edit_and_save(image, output, |session| {
-        let found = ade_core::Image::from_bytes(session.bytes().to_vec())
-            .map(|i| ade_core::carve::carve(&i))
-            .unwrap_or_default();
+        let found = session.deleted();
         let carved = if let Ok(block) = which.parse::<u32>() {
             found
                 .into_iter()
