@@ -211,7 +211,7 @@ Neither run is the F-001 bar, which requires a fuzz corpus rather than well-form
 - [ ] **Scale.** Edits and Undo that do not copy the whole image: per-block change sets rather than whole-disk snapshots, and reading large images without holding them whole (IMP-005's open question). Measured against a multi-gigabyte hardfile before it is called done.
 - [ ] **The window.** Partitions as editable as floppies — drop files onto a partition, its Map and Recover lost files — and a partition-table view to create and edit partitions, as HDToolBox does on an Amiga.
 
-**Decisions needed before code:**
+**Decisions needed before code** — *drafted 2026-11-13 as [D-024](DECISIONS.md#d-024-writing-to-hard-disk-images-partitions-and-partition-tables-on-d-018s-terms-checked-by-amigados-where-adflib-is-stricter-than-the-format), **Accepted 2026-11-13**; the questions below are settled there:*
 - **Writing an RDB** reverses part of D-004's deferral of F-018's editing half; a new entry should set its terms, as D-018 did for writing into a volume.
 - **Resizing a partition with data in it** — move, refuse, or only grow into free space after it.
 - **C-002** — whether sizes past 4 GB (TD64 / NSD) mean anything for an image file, before anything is built for them.

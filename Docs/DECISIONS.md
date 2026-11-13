@@ -95,7 +95,7 @@ Rationale, in short:
 **Recorded:** 2026-08-21
 **Status:** Accepted
 **Authors:** Claude (primary auditor)
-**Related:** F-001, F-010, F-019, F-025, D-018, ROADMAP.md
+**Related:** F-001, F-010, F-019, F-025, D-018, D-024, ROADMAP.md
 
 > **Discharged in two steps.** Creating a *new* disk was permitted on these terms by F-019 (2026-08-29) and widened by F-025. Writing *into* an existing one — the case this entry is actually about — is settled by **[D-018](#d-018-writes-into-an-existing-disk-are-buffered-saved-explicitly-and-never-over-the-file-they-came-from)** (2026-09-01), which keeps the safety property by never writing over the file an image was opened from.
 
@@ -534,7 +534,7 @@ Roughly 20% of corpus disks yield reportable text after filtering, and 91% of th
 **Recorded:** 2026-09-01
 **Status:** Accepted; part 2 amended by D-020 (2026-10-23)
 **Authors:** Darian-Frey (decision); Claude (analysis)
-**Related:** D-004, D-002, D-010, AV-002, C-006, F-019, F-025, IMP-010, F-031
+**Related:** D-004, D-002, D-010, AV-002, C-006, F-019, F-025, IMP-010, F-031, D-024
 
 > **Implemented 2026-10-11 as F-031** — making a directory and adding a file, from the CLI, the C ABI and the window. All four parts hold as written; part 4's "mounts under ADFlib" is enforced by the test suite, since D-002 keeps the oracle out of anything that ships, and at run time each edit is kept only if `ade check` finds nothing new.
 
@@ -616,7 +616,7 @@ But `create` is the easy case. It **makes a new file**, so the damage D-004 exis
 **Recorded:** 2026-10-23
 **Status:** Accepted
 **Authors:** Darian-Frey (decision); Claude (analysis)
-**Related:** D-018, D-004, F-031, IMP-010
+**Related:** D-018, D-004, F-031, IMP-010, D-024
 
 **Context.** D-018 part 2 made every save of an opened disk a Save As: the file a disk was opened from is never written. In use, from the window: *"if I open a disk and edit it then click save it should ask me to confirm I want to save the edits and if I click yes it should then save it like normal."* That is the expectation every other editor sets, and the file dialog on every Save of an opened disk was being met as a fault. D-018's reversal condition for part 2 is exactly this — in-place saving asked for by somebody who understands the cost — and requires it be explicit, never a default.
 
@@ -725,3 +725,71 @@ Unchanged: Save As always makes a new file and still refuses the opened one and 
 **Consequences.** `src/api/tests/amigados.rs` holds the harness and its first tests: an ADE-formatted disk does not boot (BUG-023's regression), AmigaDOS reads what ADE writes — accented names found by its own hash lookup — and ADE reads what AmigaDOS writes. F-012, hard links and C-005 gain a route to real material; each uses it as its own piece of work.
 
 **Reversal conditions.** If FS-UAE's scripted boot proves flaky over time — runs that pass and fail with no change — the tests become opt-in behind a further variable rather than running whenever configured. Part 1 does not loosen: the day ADE starts an emulator in a shipping path is the GUI candidate's own decision.
+
+---
+
+### D-024 Writing to hard disk images: partitions and partition tables, on D-018's terms, checked by AmigaDOS where ADFlib is stricter than the format
+**Decided:** 2026-11-13
+**Recorded:** 2026-11-13
+**Status:** Accepted
+**Authors:** Darian-Frey (decision); Claude (analysis)
+**Related:** D-004, D-018, D-020, D-023, D-002, F-018, F-038, C-002, C-005, AV-002, BUG-023, BUG-027, BUG-028, IMP-005, ROADMAP §Phase 6
+
+**Context.** Phase 6 (F-038) asks for hard disk images handled as fully as floppies: every edit inside each partition of an RDB disk, and partition tables created and edited. F-018's editing half has been deferred by D-004 since 2026-08-28. D-018 set the terms for writing into a disk, with floppies in mind; read against hard disks, three of its assumptions no longer hold, and this entry settles them rather than stretching D-018 to fit.
+
+**Where things stand, 2026-11-13.**
+- *Reading* partitioned disks is proven. Every command and view reads partitions correctly since BUG-027 and BUG-028 were fixed. RDB parsing agrees with ADFlib on generated devices and holds on Amiga Forever's three Workbench hard disks. AmigaDOS in FS-UAE is a second oracle (D-023), and mounts and writes hardfiles ADE makes up to its limit of a little under 1 GB unpartitioned.
+- *Writing* stops at unpartitioned hardfiles. Every edit is refused on an RDB disk, and nothing writes a partition table.
+- *Scale*: an edit copies the whole image and Undo keeps whole-image snapshots — about four copies at peak; a `put` on a 500 MB hardfile takes 2 GB of memory, and `ade create` now makes volumes up to 4 GB.
+
+**How D-004 and D-018 read against this.**
+- **D-004** permits a write path once its read path is proven. For partitions it is, by the evidence above; this entry cites it rather than amending it.
+- **D-018 parts 1–3** — edits buffered in memory, never saved silently over the opened file (as amended by D-020), saves atomic — hold for hard disks unchanged as rules. Part 1's *implementation* does not scale, and part 3's stated cost ("at most 50 MB for a hard disk ADE can make") is out of date: an atomic save needs free space equal to the image, now up to 4 GB, and D-020's `.orig` as much again.
+- **D-018 part 4** requires every write to pass `ade check` *and* mount under ADFlib. For partitioned disks that cannot be met as written. ADFlib refuses any RDB device without a filesystem stored in the RDB (`FSHD` and `LSEG` blocks), which FAQ §6.5 says is not needed (SPEC §The oracle is stricter than the format here). ADE cannot write one: the only FFS binary to put there is Commodore's, which ADE may not ship. Read literally, part 4 would mean ADE can never create a valid partitioned disk. And `ade check` examines one partition at a time, so "passes check" needs defining for a disk of several.
+
+**Options, per question.**
+
+*1. The oracle for partitioned disks.*
+- A. ADFlib only, as part 4 says. Rejected: it refuses every RDB disk ADE could make, for a reason the format does not give.
+- B. ADE's own health report only. Rejected: a writer checked only by its own reader is what D-002 exists to avoid, and BUG-023 and BUG-025 were both invisible to every reader ADE had.
+- C. **AmigaDOS in FS-UAE (D-023) where ADFlib is stricter than the format; ADFlib wherever it accepts the disk.** Chosen. Kickstart 2.0 and later carry FFS in ROM, so a partitioned disk with no filesystem in its RDB mounts on a real Amiga, and AmigaDOS reading and writing every partition ADE wrote is a stronger check than ADFlib's, not a weaker one.
+
+*2. What "passes the health check" means for a disk of several partitions.*
+- **Every partition's health report, plus checks on the table itself** — chosen; there is no lesser answer that would catch a write into the wrong partition.
+
+*3. Resizing a partition that holds files.*
+- A. Move the data to fit. Rejected: the highest-risk write a disk tool can make — every block of a volume relocated, its pointers rewritten — for a feature HDToolBox itself never offered.
+- B. Refuse every resize. Rejected as needlessly strict: growing into unused space touches no data.
+- C. **Grow a partition only into unused cylinders after it, and only when its filesystem is extended to match; delete whole partitions; refuse to shrink or move one that holds data, with the reason.** Chosen. It is HDToolBox's own model, where a partition is resized by reformatting.
+
+*4. Undo at the sizes a hard disk has.*
+- A. Keep whole-image snapshots and cap image size. Rejected: it caps the feature at whatever memory a machine has.
+- B. **Per-block change sets — each edit records the blocks it replaced — under the same rules: buffered, undoable, nothing written until a save.** Chosen. A rule-preserving change of implementation, not of policy.
+
+*5. D-020's `.orig` backup on a multi-gigabyte disk.*
+- A. Drop the backup above some size. Rejected: D-020 makes the backup the only thing between a confirmed wrong edit and a lost disk, and says it may become a setting but not be removed.
+- B. **Keep it; say its size in the confirmation; refuse to start a save whose temporary file and backup will not both fit, rather than fail part-way.** Chosen.
+
+**Decision.** Writing to hard disk images — inside partitions, and to partition tables — is permitted on D-018's terms as amended by D-020, with these additions:
+
+1. **D-004 is satisfied for partitions** by the read-side evidence above. Writes to a partition table ship only after its reader is proven on the same footing: ADFlib on generated devices, the real RDB disks on hand, and AmigaDOS reading what ADE wrote.
+2. **The oracle (D-018 part 4) for a partitioned disk** is AmigaDOS in FS-UAE where ADFlib refuses a structure the format allows, and ADFlib wherever it accepts the disk. For RDB writes this is checked by the local test suite, as D-023 runs it; CI keeps ADFlib on generated devices.
+3. **An edit to a partitioned disk is kept only if** every partition's health report finds nothing new *and* the table is sound: the `RDSK` and every `PART` checksum valid; every partition inside the disk and inside the cylinders the RDB reserves for partitions; no two partitions overlapping; drive names unique; the `PART` chain ending with -1 and not looping. A table edit that would leave any of these false is refused before it is made.
+4. **ADE does not write a filesystem into the RDB** (`FSHD`/`LSEG`). A partition names its dostype and relies on the FFS in Kickstart's ROM (2.0 and later), and every surface that creates a partitioned disk says so. Writing a filesystem ADE may not ship is out; one supplied by the user is a separate question for its own entry.
+5. **Partition tables:** create; add a partition in unused cylinders; delete a partition (its volume goes with it, buffered and undoable like any edit); rename; change boot priority, the bootable flag and the dostype; reformat one partition without touching the others; grow one into unused cylinders after it, extending its filesystem. Shrinking or moving a partition that holds data is refused, with the reason.
+6. **Partition boot blocks** are written as a floppy's are since BUG-023: the dostype and zeros, never a checksum over code (AV-002). Bootblock editing stays declined.
+7. **Scale:** edits record per-block change sets rather than whole-image snapshots before anything in this entry is offered for images over 1 GB, and Undo and the dirty state work from them. D-018 part 1's rule is unchanged.
+8. **Saving:** D-018 part 3 and D-020 unchanged, except that a save first checks there is room for the temporary file and, when saving over the opened file, the `.orig` too, and refuses rather than starts if there is not; and the confirmation names the backup's size.
+
+**Consequences.**
+- The edit commands, the ABI's `ade_edit_*` calls and the window's edit actions take a partition, as the read side does since BUG-028; the window's edits are enabled on partition rows.
+- New table-editing surfaces: `ade partition …` subcommands (shape to be designed), ABI calls, and a partition-table view in the window.
+- `ade create` gains a partitioned form.
+- The emulator harness gains RDB images: AmigaDOS mounts each partition ADE wrote, reads and writes it, and makes disks with `Format` for ADE to read. HDToolBox cannot be scripted, so disks it makes are checked by hand when wanted, not in the suite.
+- D-018's part 3 text about "at most 50 MB" is superseded by this entry's part 8.
+
+**Reversal conditions.**
+- **Part 2** returns to ADFlib alone if a version of ADFlib, or another independent reader, accepts an RDB with no filesystem in it; or if the FS-UAE harness proves flaky under D-023's own reversal condition, in which case partitioned writes stop being offered until another oracle exists — they do not fall back to ADE checking itself.
+- **Part 4** reopens if a user wants to supply a filesystem binary for ADE to place in the RDB; that is its own entry.
+- **Part 5's refusal to shrink or move** loosens only with a decision entry and a test that relocates every block of a full partition and has AmigaDOS read every file after.
+- **Part 7** has no reversal: a hard disk feature that needs several copies of the disk in memory is not ready.
