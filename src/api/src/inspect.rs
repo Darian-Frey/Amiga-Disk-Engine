@@ -1607,6 +1607,66 @@ impl Image {
     }
 }
 
+impl Image {
+    /// The partition `wanted` names — by drive name, any case (`dh1`), or by
+    /// index (`1`) — as an [`Area`], or why there is none: no partition
+    /// table, or no such partition, naming the ones there are. The same
+    /// rules and words as every command taking `--partition=` (BUG-028).
+    pub(crate) fn area(&self, wanted: &str) -> Result<Area<'_>, String> {
+        let (parts, _) = self.partitions().map_err(|e| e.to_string())?;
+        if parts.is_empty() {
+            return Err(format!("no partition table, so no partition {wanted:?}"));
+        }
+        let found = parts
+            .iter()
+            .find(|p| p.name_lossy().eq_ignore_ascii_case(wanted))
+            .or_else(|| wanted.parse::<usize>().ok().and_then(|i| parts.get(i)))
+            .ok_or_else(|| {
+                let names: Vec<String> = parts.iter().map(Partition::name_lossy).collect();
+                format!(
+                    "no partition {wanted:?}; this device has {}",
+                    names.join(", ")
+                )
+            })?;
+        let window = self.partition_window(found).map_err(|e| e.to_string())?;
+        Ok(Area {
+            first_block: window.start(),
+            source: AreaSource::Partition(window),
+            partition: Some(found.name_lossy()),
+        })
+    }
+}
+
+impl Image {
+    /// Every byte of the partition `wanted` names, and its block size — what
+    /// a scan of one partition reads (BUG-028).
+    ///
+    /// # Errors
+    /// No partition table, or no partition `wanted` names.
+    pub fn partition_bytes(&self, wanted: &str) -> Result<(Vec<u8>, u32), String> {
+        let area = self.area(wanted)?;
+        let size = area.source.get().geometry().block_size();
+        Ok((area_bytes(&area), size))
+    }
+}
+
+/// Every byte of an [`Area`], in its own order — what a search of one
+/// partition reads.
+pub(crate) fn area_bytes(area: &Area<'_>) -> Vec<u8> {
+    let source = area.source.get();
+    let size = source.geometry().block_size() as usize;
+    let total = source.geometry().total_blocks();
+    let mut out = Vec::with_capacity(size.saturating_mul(usize::try_from(total).unwrap_or(0)));
+    let mut block = vec![0u8; size];
+    for b in 0..total {
+        if ade_block::read_at(source, ade_block::BlockIndex(b), &mut block).is_err() {
+            break;
+        }
+        out.extend_from_slice(&block);
+    }
+    out
+}
+
 /// One place on an image that can hold a volume: see [`Image::areas`].
 pub(crate) struct Area<'a> {
     /// Its blocks, numbered from its own start.

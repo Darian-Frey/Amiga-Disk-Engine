@@ -161,6 +161,25 @@ impl Layout {
         }
     }
 
+    /// Map one partition of a device alone, in its own numbering — block 0
+    /// its first, owners its own paths — as a floppy is mapped (BUG-028).
+    ///
+    /// # Errors
+    /// No partition table, or no partition `wanted` names: by drive name or
+    /// by index.
+    pub fn of_partition(image: &crate::Image, wanted: &str) -> Result<Self, String> {
+        let (owners, mounted, area) = attribute_partition(image, wanted)?;
+        let geometry = area.source.get().geometry();
+        let block_size = geometry.block_size();
+        let blocks = geometry.total_blocks();
+        Ok(Self {
+            spans: coalesce(&owners, blocks, block_size),
+            block_size,
+            blocks,
+            mounted,
+        })
+    }
+
     /// The map as JSON (F-015).
     #[must_use]
     pub fn to_json(&self) -> Value {
@@ -227,20 +246,43 @@ pub(crate) fn attribute(image: &crate::Image) -> (BTreeMap<u64, Owned>, bool) {
     // place on the image, its owners named with the partition.
     let mut mounted = false;
     for area in image.areas() {
-        mounted |= attribute_area(&area, &mut out);
+        mounted |= attribute_area(&area, area.first_block, true, &mut out);
     }
     (out, mounted)
 }
 
+/// One partition's map in its own numbering, block 0 its first: what a
+/// partition is when it is looked at alone, as a floppy is (BUG-028). The
+/// map, and whether its volume mounted.
+///
+/// # Errors
+/// No partition table, or no partition `wanted` names.
+pub(crate) fn attribute_partition<'a>(
+    image: &'a crate::Image,
+    wanted: &str,
+) -> Result<(BTreeMap<u64, Owned>, bool, crate::inspect::Area<'a>), String> {
+    let area = image.area(wanted)?;
+    let mut out = BTreeMap::new();
+    let mounted = attribute_area(&area, 0, false, &mut out);
+    Ok((out, mounted, area))
+}
+
 /// What each block of one [`Area`](crate::inspect::Area) is, entered in
-/// `out` at its place on the image. Whether its volume mounted.
-fn attribute_area(area: &crate::inspect::Area<'_>, out: &mut BTreeMap<u64, Owned>) -> bool {
+/// `out` from block `offset` — its place on the image, or 0 to map it alone
+/// — with owners named with the partition when `prefixed`. Whether its
+/// volume mounted.
+fn attribute_area(
+    area: &crate::inspect::Area<'_>,
+    offset: u64,
+    prefixed: bool,
+    out: &mut BTreeMap<u64, Owned>,
+) -> bool {
     let source = area.source.get();
     let geometry = source.geometry();
-    let at = |block: u64| area.first_block.saturating_add(block);
-    let named = |path: &str| match &area.partition {
-        Some(p) => format!("{p}:{path}"),
-        None => path.to_owned(),
+    let at = |block: u64| offset.saturating_add(block);
+    let named = |path: &str| match (&area.partition, prefixed) {
+        (Some(p), true) => format!("{p}:{path}"),
+        _ => path.to_owned(),
     };
 
     // The bootblock does not depend on the volume mounting. C-008 keeps the

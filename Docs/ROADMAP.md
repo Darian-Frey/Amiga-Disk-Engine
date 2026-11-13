@@ -196,7 +196,7 @@ Neither run is the F-001 bar, which requires a fuzz corpus rather than well-form
   | `carve`; the window's Recover lost files | *was* wrong — every live file reported lost (**BUG-027**); **fixed 2026-11-13**: every partition carved through its own numbering |
   | `find` | runs over the whole device; hits attributed to their partition's files since BUG-027's fix |
   | `layout`; the window's Map, its region colours and the damage drawn on it | map every partition and the partition table since BUG-027's fix |
-  | `find`, `scan`, `layout`, `specs`, `carve` | **accept `--partition` and ignore it**, even one that does not exist (**BUG-028**) |
+  | `find`, `scan`, `layout`, `specs`, `carve` | *accepted `--partition` and ignored it* (**BUG-028**); **fixed 2026-11-13**: `find`, `scan`, `layout` and `carve` answer for the partition named, and every command that cannot honour the flag refuses it |
   | `scan`, `specs`, `diff`, `surface`, `identify` | whole-device by nature; `specs` reports *no standard floppy* where a partition's facts would serve |
   | `disasm` with no path (the boot code) | *does not begin with an AmigaDOS bootblock* — the partition's own boot blocks are not read |
   | Every edit — `mkdir`, `put`, `rm`, `undelete`, `link`, `rename`, `mv`, `repair`, `format`, `wipe` — and the ABI's `ade_edit_*`, none of which take a partition | **refused**, with the reason; the window disables them on partition rows |

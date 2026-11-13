@@ -10,18 +10,21 @@ Severity vocabulary: low | medium | high.
 
 ## Open
 
+_None._
+
+## Fixed
+
 ### BUG-028 `--partition` is accepted and ignored by `find`, `scan`, `layout`, `specs` and `carve` — even a partition that does not exist
 **Severity:** medium
-**Status:** open
-**Found:** 2026-11-13, the same audit: each of the five prints exactly the same with `--partition=0` as without it, and `--partition=9` on a one-partition disk exits 0.
+**Status:** fixed
+**Found:** 2026-11-13, the same audit: each of the five prints exactly the same with `--partition=0` as without it, and `--partition=9` on a one-partition disk exits 0. **Fixed** 2026-11-13.
 **Where:** [cli/src/main.rs](../cli/src/main.rs): the five commands never read `args.partition`, and the argument parser takes the flag for every command.
 
 **What is wrong.** A flag a command does not honour, accepted silently, is BUG-007's shape: a script cannot tell an ignored option from one that worked, and here the ignored option is the one that decides which volume the answer is about. A partition that does not exist should be an error on every command, as it is on `ls` and `extract`.
 
 **Correct behaviour.** Each command either honours `--partition` — which is BUG-027's fix — or refuses it with the reason; never accepts it and does something else.
 
-
-## Fixed
+**The fix.** `find`, `scan`, `layout` and `carve` honour `--partition`: each answers for that partition alone, in its own numbering — block 0 its first, files by their paths within it — as for a floppy (`Search::of_partition`, `Image::partition_bytes`, `Layout::of_partition`, `carve_partition`, through one resolver, `Image::area`, with the same name-or-index rules and the same message as `ls`). Without `--partition` they cover every partition of a device (BUG-027). Every other command refuses the flag before it runs, exit 2, saying why — the edits because ADE does not edit inside a partition yet, `specs`, `info`, `convert` and the like because they work on the image as a whole. A partition that is not there is exit 2 with *no partition "DH9"; this device has DH0, DH1* on every command that takes the flag but `check`, which by design reports it in the health report as `no-such-partition` and exits non-zero. `--help` lists the commands that take it. `cli/tests/partitions.rs` holds both halves; removing the refusal fails it.
 
 ### BUG-027 On a partitioned disk, `carve` and Recover lost files call every live file lost, and `find` and `layout` see no volume
 **Severity:** high

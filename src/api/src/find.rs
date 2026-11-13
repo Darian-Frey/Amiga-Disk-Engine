@@ -62,10 +62,37 @@ impl Search {
         Self::over(image, &bytes, pattern)
     }
 
+    /// Search one partition of a device alone: its own bytes, its offsets
+    /// and blocks counted from its start, its files named by their paths
+    /// within it — as a floppy is searched (BUG-028).
+    ///
+    /// # Errors
+    /// No partition table, or no partition `wanted` names.
+    pub fn of_partition(
+        image: &crate::Image,
+        wanted: &str,
+        pattern: &Pattern,
+    ) -> Result<Self, String> {
+        let (map, _, area) = crate::layout::attribute_partition(image, wanted)?;
+        let bytes = crate::inspect::area_bytes(&area);
+        let block_size = area.source.get().geometry().block_size();
+        Ok(Self::attributed(&bytes, pattern, block_size, &map))
+    }
+
     /// The shared body: search `bytes`, attribute through `image`.
     fn over(image: &crate::Image, bytes: &[u8], pattern: &Pattern) -> Self {
         let block_size = image.geometry().block_size();
         let map = crate::layout::attribute(image).0;
+        Self::attributed(bytes, pattern, block_size, &map)
+    }
+
+    /// Search `bytes` and name each hit from `map`.
+    fn attributed(
+        bytes: &[u8],
+        pattern: &Pattern,
+        block_size: u32,
+        map: &std::collections::BTreeMap<u64, crate::layout::Owned>,
+    ) -> Self {
         let matches = search(bytes, pattern, block_size)
             .into_iter()
             .map(|at| {

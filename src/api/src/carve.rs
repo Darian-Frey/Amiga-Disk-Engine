@@ -102,32 +102,55 @@ pub fn carve(image: &crate::Image) -> Vec<Carved> {
     let (claimed, _) = crate::layout::attribute(image);
     let mut out = Vec::new();
     for area in image.areas() {
-        let source = area.source.get();
-        let total = source.geometry().total_blocks();
-        let reserved = u64::from(source.geometry().reserved());
-        for block in reserved..total {
-            if claimed.contains_key(&area.first_block.saturating_add(block)) {
-                continue;
-            }
-            let Ok(number) = u32::try_from(block) else {
-                continue;
-            };
-            let Some(raw) = read(source, number) else {
-                continue;
-            };
-            let Ok(entry) = Entry::parse(&raw, number) else {
-                continue;
-            };
-            if !entry.looks_like_an_entry() {
-                continue;
-            }
-            if !matches!(entry.kind, EntryKind::File | EntryKind::Directory) {
-                continue;
-            }
-            out.push(examine(source, &entry, area.partition.clone()));
-        }
+        carve_area(&area, &claimed, area.first_block, &mut out);
     }
     out
+}
+
+/// [`carve`] one partition of a device alone, its block numbers its own
+/// (BUG-028).
+///
+/// # Errors
+/// No partition table, or no partition `wanted` names.
+pub fn carve_partition(image: &crate::Image, wanted: &str) -> Result<Vec<Carved>, String> {
+    let (claimed, _, area) = crate::layout::attribute_partition(image, wanted)?;
+    let mut out = Vec::new();
+    carve_area(&area, &claimed, 0, &mut out);
+    Ok(out)
+}
+
+/// Every header in `area` that `claimed` does not reach, `claimed` keyed
+/// from block `offset`.
+fn carve_area(
+    area: &crate::inspect::Area<'_>,
+    claimed: &std::collections::BTreeMap<u64, crate::layout::Owned>,
+    offset: u64,
+    out: &mut Vec<Carved>,
+) {
+    let source = area.source.get();
+    let total = source.geometry().total_blocks();
+    let reserved = u64::from(source.geometry().reserved());
+    for block in reserved..total {
+        if claimed.contains_key(&offset.saturating_add(block)) {
+            continue;
+        }
+        let Ok(number) = u32::try_from(block) else {
+            continue;
+        };
+        let Some(raw) = read(source, number) else {
+            continue;
+        };
+        let Ok(entry) = Entry::parse(&raw, number) else {
+            continue;
+        };
+        if !entry.looks_like_an_entry() {
+            continue;
+        }
+        if !matches!(entry.kind, EntryKind::File | EntryKind::Directory) {
+            continue;
+        }
+        out.push(examine(source, &entry, area.partition.clone()));
+    }
 }
 
 /// One block of `source`, whole, or `None` past its end.

@@ -349,6 +349,14 @@ fn main() -> ExitCode {
     if let Some(refused) = refuse_standard_output(&args) {
         return refused;
     }
+    if let Some(refused) = refuse_partition(&args) {
+        return refused;
+    }
+    dispatch(&args)
+}
+
+/// Run the command `args` names, once it has passed every refusal.
+fn dispatch(args: &Args) -> ExitCode {
     let p = |n: usize| args.positional.get(n).map_or("", String::as_str);
 
     match (args.command.as_str(), args.positional.len()) {
@@ -383,30 +391,40 @@ fn main() -> ExitCode {
             args.format,
             args.partition.as_deref(),
         ),
-        ("extract", 2 | 3) => extract(&args),
+        ("extract", 2 | 3) => extract(args),
         ("convert", 2) => convert(Path::new(p(0)), Path::new(p(1)), args.raw, args.format),
-        ("create", 1) => create(&args),
+        ("create", 1) => create(args),
         (
             "mkdir" | "put" | "rm" | "undelete" | "link" | "rename" | "repair" | "mv" | "format"
             | "wipe",
             _,
-        ) => edit_command(&args),
-        ("disasm", 1 | 2) => disasm(&args),
-        ("annotate", 2 | 3) => annotate(&args),
-        ("decode", 2) => decode(&args),
-        ("scan", 1) => scan(Path::new(p(0)), args.format),
+        ) => edit_command(args),
+        ("disasm", 1 | 2) => disasm(args),
+        ("annotate", 2 | 3) => annotate(args),
+        ("decode", 2) => decode(args),
+        ("scan", 1) => scan(Path::new(p(0)), args.format, args.partition.as_deref()),
         ("find", 2) => find(
             Path::new(p(0)),
             p(1),
             args.format,
-            args.text,
-            args.ignore_case,
+            (args.text, args.ignore_case),
+            args.partition.as_deref(),
         ),
-        ("layout", 1) => layout(Path::new(p(0)), args.format),
+        ("layout", 1) => layout(Path::new(p(0)), args.format, args.partition.as_deref()),
         ("specs", 1) => specs(Path::new(p(0)), args.format),
         ("surface", 1) => surface(Path::new(p(0)), args.format),
-        ("carve", 1) => carve(Path::new(p(0)), args.format, None),
-        ("carve", 2) if args.all => carve(Path::new(p(0)), args.format, Some(Path::new(p(1)))),
+        ("carve", 1) => carve(
+            Path::new(p(0)),
+            args.format,
+            None,
+            args.partition.as_deref(),
+        ),
+        ("carve", 2) if args.all => carve(
+            Path::new(p(0)),
+            args.format,
+            Some(Path::new(p(1))),
+            args.partition.as_deref(),
+        ),
         ("formats", 0) => formats(args.format),
         ("batch", n) if n >= 1 => batch(
             &args.positional,
@@ -466,6 +484,25 @@ fn refuse_standard_output(args: &Args) -> Option<ExitCode> {
         "ade: `-` means standard output, and {what}, which cannot go there; name a file or \
          folder (`./-` for one called -)"
     );
+    Some(ExitCode::from(EXIT_USAGE))
+}
+
+/// `--partition` on a command that would not honour it, refused rather than
+/// taken and ignored (BUG-028): a script must be able to tell an option that
+/// did nothing from one that chose the volume its answer is about.
+fn refuse_partition(args: &Args) -> Option<ExitCode> {
+    args.partition.as_ref()?;
+    let why = match args.command.as_str() {
+        "check" | "ls" | "extract" | "disasm" | "annotate" | "decode" | "find" | "scan"
+        | "layout" | "carve" => return None,
+        "mkdir" | "put" | "rm" | "undelete" | "link" | "rename" | "mv" | "repair" | "format"
+        | "wipe" => "ADE does not yet edit inside a partition (ROADMAP §Phase 6)",
+        "specs" | "surface" | "info" | "identify" | "diff" | "consolidate" | "convert" => {
+            "it describes or works on the image as a whole"
+        }
+        _ => "it takes no partition",
+    };
+    eprintln!("ade: {} does not take --partition: {why}", args.command);
     Some(ExitCode::from(EXIT_USAGE))
 }
 
@@ -538,7 +575,11 @@ fn options() -> Vec<String> {
         "OPTIONS:".to_owned(),
         "    --format=text   human-readable (default); layout is not stable".to_owned(),
         "    --format=json   machine-readable; field names and fault codes are stable".to_owned(),
-        "    --partition=P   which partition of a hard disk, by name (DH0) or index (0)".to_owned(),
+        "    --partition=P   which partition of a hard disk, by name (DH0) or index (0):"
+            .to_owned(),
+        "                    check, ls, extract, disasm, annotate, decode, find, scan, layout"
+            .to_owned(),
+        "                    and carve; any other command refuses it".to_owned(),
         "    --raw           convert writes raw MFM tracks (an extended ADF)".to_owned(),
         "                    disasm decodes a file that is not a program, as a guess".to_owned(),
         "    --functions     disasm: the functions found by following the code (D-021)".to_owned(),
@@ -2393,7 +2434,7 @@ fn create(args: &Args) -> ExitCode {
 /// The whole image, not just its files: what a directory entry calls a thing
 /// and what the bytes are do not always agree, and on a damaged disk the
 /// interesting content is frequently in space nothing points at any more.
-fn scan(path: &Path, format: Format) -> ExitCode {
+fn scan(path: &Path, format: Format, partition: Option<&str>) -> ExitCode {
     let bytes = match std::fs::read(path) {
         Ok(b) => b,
         Err(e) => {
@@ -2401,11 +2442,28 @@ fn scan(path: &Path, format: Format) -> ExitCode {
             return ExitCode::from(EXIT_UNREADABLE);
         }
     };
+    // One partition's bytes alone, offsets from its start, when one is named
+    // (BUG-028).
+    let (bytes, chosen) = match partition {
+        None => (bytes, None),
+        Some(wanted) => match Image::from_bytes(bytes)
+            .map_err(|e| e.to_string())
+            .and_then(|image| image.partition_bytes(wanted))
+        {
+            Ok((bytes, size)) => (bytes, Some(size)),
+            Err(e) => {
+                eprintln!("ade: {}: {e}", path.display());
+                return ExitCode::from(EXIT_USAGE);
+            }
+        },
+    };
     // The volume's own block size where there is one, so an offset can be
     // named as the block everything else in ADE speaks in.
-    let block_size = ade_core::inspect_bytes(bytes.clone())
-        .geometry
-        .map_or(512, |g| g.block_size());
+    let block_size = chosen.unwrap_or_else(|| {
+        ade_core::inspect_bytes(bytes.clone())
+            .geometry
+            .map_or(512, |g| g.block_size())
+    });
     let found = ade_core::scan::Scan::of(&bytes, block_size);
 
     let mut out = std::io::stdout().lock();
@@ -2506,7 +2564,7 @@ fn unpack(path: &Path, dest: &Path, format: Format, partition: Option<&str>) -> 
 }
 
 /// Recover files nothing in the directory tree points at (F-030).
-fn carve(path: &Path, format: Format, dest: Option<&Path>) -> ExitCode {
+fn carve(path: &Path, format: Format, dest: Option<&Path>, partition: Option<&str>) -> ExitCode {
     let image = match Image::open(path) {
         Ok(i) => i,
         Err(e) => {
@@ -2514,7 +2572,18 @@ fn carve(path: &Path, format: Format, dest: Option<&Path>) -> ExitCode {
             return ExitCode::from(EXIT_UNREADABLE);
         }
     };
-    let found = ade_core::carve::carve(&image);
+    // One partition alone when one is named (BUG-028); otherwise every
+    // partition of a device, each in its own numbering (BUG-027).
+    let found = match partition {
+        None => ade_core::carve::carve(&image),
+        Some(wanted) => match ade_core::carve::carve_partition(&image, wanted) {
+            Ok(found) => found,
+            Err(e) => {
+                eprintln!("ade: {}: {e}", path.display());
+                return ExitCode::from(EXIT_USAGE);
+            }
+        },
+    };
 
     let mut out = std::io::stdout().lock();
     if format == Format::Json {
@@ -2748,7 +2817,7 @@ fn specs(path: &Path, format: Format) -> ExitCode {
 }
 
 /// Map what occupies each block of an image (F-022).
-fn layout(path: &Path, format: Format) -> ExitCode {
+fn layout(path: &Path, format: Format, partition: Option<&str>) -> ExitCode {
     let image = match ade_core::Image::open(path) {
         Ok(i) => i,
         Err(e) => {
@@ -2756,7 +2825,17 @@ fn layout(path: &Path, format: Format) -> ExitCode {
             return ExitCode::from(EXIT_UNREADABLE);
         }
     };
-    let map = ade_core::layout::Layout::of(&image);
+    // One partition alone, in its own numbering, when one is named (BUG-028).
+    let map = match partition {
+        None => ade_core::layout::Layout::of(&image),
+        Some(wanted) => match ade_core::layout::Layout::of_partition(&image, wanted) {
+            Ok(map) => map,
+            Err(e) => {
+                eprintln!("ade: {}: {e}", path.display());
+                return ExitCode::from(EXIT_USAGE);
+            }
+        },
+    };
 
     let mut out = std::io::stdout().lock();
     if format == Format::Json {
@@ -2806,7 +2885,13 @@ fn layout(path: &Path, format: Format) -> ExitCode {
 }
 
 /// Search an image for text or hex, and say what owns each hit (F-021).
-fn find(path: &Path, pattern: &str, format: Format, text: bool, ignore_case: bool) -> ExitCode {
+fn find(
+    path: &Path,
+    pattern: &str,
+    format: Format,
+    (text, ignore_case): (bool, bool),
+    partition: Option<&str>,
+) -> ExitCode {
     use ade_core::layers::object::find::Pattern;
 
     let pattern = match Pattern::parse(pattern, text, ignore_case) {
@@ -2823,7 +2908,23 @@ fn find(path: &Path, pattern: &str, format: Format, text: bool, ignore_case: boo
             return ExitCode::from(EXIT_UNREADABLE);
         }
     };
-    let found = ade_core::find::Search::run(&bytes, &pattern);
+    // One partition alone, in its own numbering, when one is named
+    // (BUG-028); otherwise the whole image, every partition of a device.
+    let found = match partition {
+        None => ade_core::find::Search::run(&bytes, &pattern),
+        Some(wanted) => {
+            let searched = Image::from_bytes(bytes)
+                .map_err(|e| e.to_string())
+                .and_then(|image| ade_core::find::Search::of_partition(&image, wanted, &pattern));
+            match searched {
+                Ok(found) => found,
+                Err(e) => {
+                    eprintln!("ade: {}: {e}", path.display());
+                    return ExitCode::from(EXIT_USAGE);
+                }
+            }
+        }
+    };
 
     let mut out = std::io::stdout().lock();
     if format == Format::Json {

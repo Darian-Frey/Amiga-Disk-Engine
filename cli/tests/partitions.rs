@@ -267,3 +267,102 @@ fn checking_an_absent_partition_is_an_error() {
     // Nothing was examined, so no tree figures should be reported at all.
     assert!(!out.contains("contents"), "{out}");
 }
+
+/// Run `ade` with `args`, where `@` stands for a fresh device image.
+fn run_at(name: &str, args: &[&str]) -> (i32, String, String) {
+    let path = std::env::temp_dir().join(format!("ade-part-{name}-{}.hdf", std::process::id()));
+    fs::write(&path, device()).expect("write fixture");
+    let shown = path.to_str().unwrap().to_owned();
+    let args: Vec<&str> = args
+        .iter()
+        .map(|a| if *a == "@" { shown.as_str() } else { a })
+        .collect();
+    let out = Command::new(ade()).args(&args).output().expect("run ade");
+    let _ = fs::remove_file(&path);
+    (
+        out.status.code().unwrap_or(-1),
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+        String::from_utf8_lossy(&out.stderr).into_owned(),
+    )
+}
+
+#[test]
+fn find_scan_layout_and_carve_answer_for_the_partition_named() {
+    // BUG-028: each took --partition and did the same thing without it. Each
+    // now answers for that partition alone, in its own numbering, as for a
+    // floppy — and a partition that is not there is an error.
+    let (code, out, err) = run_at(
+        "find-p",
+        &["find", "@", "hello from DH0", "--partition=dh0"],
+    );
+    assert_eq!(code, 0, "{err}");
+    assert!(
+        out.contains("startup") && !out.contains("DH0:startup"),
+        "{out}"
+    );
+    // Searched in DH1, the text in DH0 is not there.
+    let (code, out, _) = run_at(
+        "find-p1",
+        &["find", "@", "hello from DH0", "--partition=DH1"],
+    );
+    // `find` exits 1 when nothing matches, as grep does.
+    assert_eq!(code, 1);
+    assert!(out.contains("0 matches"), "{out}");
+
+    // DH1 is cylinders 31-63 of 4 heads x 32 sectors: 33 x 128 = 4,224 blocks.
+    let (code, out, err) = run_at("layout-p", &["layout", "@", "--partition=1"]);
+    assert_eq!(code, 0, "{err}");
+    assert!(out.contains("4224 blocks"), "{out}");
+    assert!(
+        !out.contains("partition table"),
+        "one partition alone has no table: {out}"
+    );
+
+    // Nothing to carve: exit 1, as `find` with nothing found.
+    let (code, out, err) = run_at("carve-p", &["carve", "@", "--partition=DH1"]);
+    assert_eq!(code, 1, "{err}");
+    assert!(out.contains("0 orphaned headers"), "{out}");
+
+    let (code, _, err) = run_at("scan-p", &["scan", "@", "--partition=DH0"]);
+    assert_eq!(code, 0, "{err}");
+
+    for command in [
+        vec!["find", "@", "x", "--partition=DH9"],
+        vec!["scan", "@", "--partition=DH9"],
+        vec!["layout", "@", "--partition=DH9"],
+        vec!["carve", "@", "--partition=DH9"],
+    ] {
+        let (code, _, err) = run_at("absent", &command);
+        assert_eq!(code, 2, "{command:?}: {err}");
+        assert!(
+            err.contains("no partition \"DH9\"; this device has DH0, DH1"),
+            "{err}"
+        );
+    }
+}
+
+#[test]
+fn a_command_that_cannot_honour_partition_refuses_it() {
+    for (command, why) in [
+        (vec!["specs", "@", "--partition=DH0"], "as a whole"),
+        (vec!["info", "@", "--partition=DH0"], "as a whole"),
+        (
+            vec![
+                "mkdir",
+                "@",
+                "X",
+                "--partition=DH0",
+                "--output=/nonexistent/x.hdf",
+            ],
+            "Phase 6",
+        ),
+        (vec!["batch", "@", "--partition=DH0"], "takes no partition"),
+    ] {
+        let (code, _, err) = run_at("refused", &command);
+        assert_eq!(code, 2, "{command:?}: {err}");
+        assert!(
+            err.contains("does not take --partition") && err.contains(why),
+            "{err}"
+        );
+    }
+}
