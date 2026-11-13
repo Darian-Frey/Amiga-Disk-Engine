@@ -552,6 +552,25 @@ impl Session {
         if index == self.current {
             return Ok(());
         }
+        let state = self.state_of(index)?;
+        let previous = self.state();
+        if let Some(area) = self.areas.get_mut(self.current) {
+            area.saved = Some(previous);
+        }
+        if let Some(area) = self.areas.get_mut(index) {
+            area.saved = None;
+            self.geometry = area.geometry;
+            self.offset = area.offset;
+        }
+        self.current = index;
+        self.load(&state);
+        Ok(())
+    }
+
+    /// What partition `index` — not the selected one — is known to be like,
+    /// examining it the first time it is asked about and keeping the answer
+    /// for when it is selected.
+    fn state_of(&mut self, index: usize) -> Result<AreaState, EditError> {
         let Some(target) = self.areas.get(index) else {
             return Err(EditError::NotEditable(format!(
                 "no partition {index}; this device has {}",
@@ -565,30 +584,21 @@ impl Session {
                 target.name.as_deref().unwrap_or(&wanted)
             )));
         }
-        let state = if let Some(state) = target.saved.clone() {
-            state
-        } else {
-            let report = self.examine(index);
-            if report.examined.is_none() {
-                return Err(EditError::NotEditable(format!(
-                    "partition {} holds no volume ADE can mount",
-                    target_name(&self.areas, index)
-                )));
-            }
-            AreaState::of(&report, None)
-        };
-        let previous = self.state();
-        if let Some(area) = self.areas.get_mut(self.current) {
-            area.saved = Some(previous);
+        if let Some(state) = target.saved.clone() {
+            return Ok(state);
         }
+        let report = self.examine(index);
+        if report.examined.is_none() {
+            return Err(EditError::NotEditable(format!(
+                "partition {} holds no volume ADE can mount",
+                target_name(&self.areas, index)
+            )));
+        }
+        let state = AreaState::of(&report, None);
         if let Some(area) = self.areas.get_mut(index) {
-            area.saved = None;
-            self.geometry = area.geometry;
-            self.offset = area.offset;
+            area.saved = Some(state.clone());
         }
-        self.current = index;
-        self.load(&state);
-        Ok(())
+        Ok(state)
     }
 
     /// The selected area's bytes: the image, or one partition's part of it.
@@ -1083,6 +1093,56 @@ impl Session {
         if self.free_data == FreeData::Protected {
             self.free_data = FreeData::Allowed;
         }
+    }
+
+    /// As [`Self::free_blocks_holding_data`], for partition `index` of a
+    /// partitioned disk, whichever is selected — so a front end can ask about
+    /// the partition an edit is about to go to before making it (IMP-024).
+    ///
+    /// # Errors
+    /// As [`Self::select_partition_at`], whose refusals it shares; nothing is
+    /// selected.
+    pub fn free_blocks_holding_data_in(&mut self, index: usize) -> Result<usize, EditError> {
+        if self.partition().is_none() {
+            return Err(EditError::NotEditable(
+                "this image has no partitions".to_owned(),
+            ));
+        }
+        if index == self.current {
+            return Ok(self.free_blocks_holding_data());
+        }
+        let state = self.state_of(index)?;
+        Ok(if state.free_data == FreeData::Unprotected {
+            0
+        } else {
+            state.free_holding_data
+        })
+    }
+
+    /// As [`Self::allow_overwriting_free_data`], for partition `index` of a
+    /// partitioned disk, whichever is selected. Allowing it for one partition
+    /// does not allow it for another.
+    ///
+    /// # Errors
+    /// As [`Self::free_blocks_holding_data_in`].
+    pub fn allow_overwriting_free_data_in(&mut self, index: usize) -> Result<(), EditError> {
+        if self.partition().is_none() {
+            return Err(EditError::NotEditable(
+                "this image has no partitions".to_owned(),
+            ));
+        }
+        if index == self.current {
+            self.allow_overwriting_free_data();
+            return Ok(());
+        }
+        let mut state = self.state_of(index)?;
+        if state.free_data == FreeData::Protected {
+            state.free_data = FreeData::Allowed;
+        }
+        if let Some(area) = self.areas.get_mut(index) {
+            area.saved = Some(state);
+        }
+        Ok(())
     }
 
     fn free_data_allowed(&self) -> Result<(), EditError> {

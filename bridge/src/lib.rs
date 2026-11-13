@@ -281,9 +281,10 @@ pub struct AdeImage {
     /// Groups opened before the first edit created the session; handed to it
     /// when it is (IMP-014).
     group_depth: u32,
-    /// Whether writing over free blocks that hold data was allowed before
-    /// the first edit created the session; handed to it when it is.
-    overwrite_free_data: bool,
+    /// The partitions — `ADE_WHOLE_IMAGE` for a disk that is its own volume
+    /// — where writing over free blocks that hold data has been allowed,
+    /// handed to the session each time an edit selects one (IMP-024).
+    free_data_allowed: std::collections::HashSet<u32>,
 }
 
 /// A directory listing or a whole-volume walk, owned by the caller until freed.
@@ -442,7 +443,7 @@ pub unsafe extern "C" fn ade_image_open(
             path,
             session: None,
             group_depth: 0,
-            overwrite_free_data: false,
+            free_data_allowed: std::collections::HashSet::new(),
         }))
     })
 }
@@ -2442,6 +2443,18 @@ fn refresh(image: &mut AdeImage) {
     image.identified = None;
 }
 
+/// Start the handle's edit session if it has none.
+fn ensure_session(image: &mut AdeImage) -> Result<(), ade_core::edit::EditError> {
+    if image.session.is_none() {
+        let mut s = ade_core::edit::Session::open(&image.path)?;
+        for _ in 0..image.group_depth {
+            s.begin_group();
+        }
+        image.session = Some(s);
+    }
+    Ok(())
+}
+
 /// Run an edit through the handle's session, starting one if needed.
 fn edit(
     image: *mut AdeImage,
@@ -2451,23 +2464,11 @@ fn edit(
     change: impl FnOnce(&mut ade_core::edit::Session) -> Result<u32, ade_core::edit::EditError>,
 ) -> AdeResult {
     with_image_mut(image, AdeResult::NullArgument, |image| {
-        if image.session.is_none() {
-            match ade_core::edit::Session::open(&image.path) {
-                Ok(mut s) => {
-                    for _ in 0..image.group_depth {
-                        s.begin_group();
-                    }
-                    if image.overwrite_free_data {
-                        s.allow_overwriting_free_data();
-                    }
-                    image.session = Some(s);
-                }
-                Err(e) => {
-                    set_message(out_message, &e.to_string());
-                    return edit_code(&e);
-                }
-            }
+        if let Err(e) = ensure_session(image) {
+            set_message(out_message, &e.to_string());
+            return edit_code(&e);
         }
+        let allowed = image.free_data_allowed.contains(&partition);
         let Some(session) = image.session.as_mut() else {
             return AdeResult::Internal;
         };
@@ -2489,6 +2490,9 @@ fn edit(
         if let Err(e) = chosen {
             set_message(out_message, &e.to_string());
             return edit_code(&e);
+        }
+        if allowed {
+            session.allow_overwriting_free_data();
         }
         match change(session) {
             Ok(block) => {
@@ -2776,32 +2780,76 @@ pub unsafe extern "C" fn ade_edit_repair(
 /// and wiping free blocks are refused until
 /// [`ade_edit_allow_overwriting_free_data`] is called; a front end asks first.
 ///
-/// # Safety
-/// `image` must be a live handle or null.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn ade_image_free_blocks_holding_data(image: *const AdeImage) -> usize {
-    with_image(image, 0, |i| {
-        i.session.as_ref().map_or(
-            i.free_holding_data,
-            ade_core::edit::Session::free_blocks_holding_data,
-        )
-    })
-}
-
-/// Allow edits to write over free blocks that hold data, for as long as the
-/// handle is open: the person has said the disk is being reused, and what a
-/// loader read from those blocks is given up.
+/// `partition` is the one the edit is about to go to, as the edit calls take
+/// it (IMP-024): `ADE_WHOLE_IMAGE` for a disk that is its own volume — zero
+/// for it on a partitioned disk, which is no volume — and on a partitioned
+/// disk the partition's index; zero for one that cannot be edited.
 ///
 /// # Safety
 /// `image` must be a live handle or null.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn ade_edit_allow_overwriting_free_data(image: *mut AdeImage) -> AdeResult {
-    with_image_mut(image, AdeResult::NullArgument, |i| {
-        i.overwrite_free_data = true;
-        if let Some(s) = i.session.as_mut() {
-            s.allow_overwriting_free_data();
+pub unsafe extern "C" fn ade_image_free_blocks_holding_data(
+    image: *mut AdeImage,
+    partition: u32,
+) -> usize {
+    with_image_mut(image, 0, |i| {
+        if partition == ADE_WHOLE_IMAGE {
+            if !i.inspection.partitions.is_empty() {
+                return 0;
+            }
+            return i.session.as_ref().map_or(
+                i.free_holding_data,
+                ade_core::edit::Session::free_blocks_holding_data,
+            );
         }
-        AdeResult::Ok
+        if ensure_session(i).is_err() {
+            return 0;
+        }
+        i.session
+            .as_mut()
+            .and_then(|s| s.free_blocks_holding_data_in(partition as usize).ok())
+            .unwrap_or(0)
+    })
+}
+
+/// Allow edits in `partition` to write over free blocks that hold data, for
+/// as long as the handle is open: the person has said that volume is being
+/// reused, and what a loader read from those blocks is given up. Allowing it
+/// for one partition does not allow it for another. `partition` as for
+/// [`ade_image_free_blocks_holding_data`]; one that cannot be edited is
+/// `ADE_REFUSED`.
+///
+/// # Safety
+/// `image` must be a live handle or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ade_edit_allow_overwriting_free_data(
+    image: *mut AdeImage,
+    partition: u32,
+) -> AdeResult {
+    with_image_mut(image, AdeResult::NullArgument, |i| {
+        if partition == ADE_WHOLE_IMAGE {
+            if !i.inspection.partitions.is_empty() {
+                return AdeResult::Refused;
+            }
+            i.free_data_allowed.insert(partition);
+            if let Some(s) = i.session.as_mut() {
+                s.allow_overwriting_free_data();
+            }
+            return AdeResult::Ok;
+        }
+        if let Err(e) = ensure_session(i) {
+            return edit_code(&e);
+        }
+        let Some(session) = i.session.as_mut() else {
+            return AdeResult::Internal;
+        };
+        match session.allow_overwriting_free_data_in(partition as usize) {
+            Ok(()) => {
+                i.free_data_allowed.insert(partition);
+                AdeResult::Ok
+            }
+            Err(e) => edit_code(&e),
+        }
     })
 }
 

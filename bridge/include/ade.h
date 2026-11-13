@@ -942,11 +942,16 @@ AdeResult ade_edit_repair(AdeImage *image, uint32_t partition, bool free_orphans
  * for NULL. While it is not 0, ade_edit_mkdir, ade_edit_add_file and a wipe
  * of free blocks are ADE_REFUSED until ade_edit_allow_overwriting_free_data
  * says writing over them is meant -- for as long as the handle is open. A
- * front end asks the person first. On a partitioned disk both are about the
- * partition of the last edit: try the edit, and on ADE_REFUSED ask, allow and
- * try again. Allowing it for one partition does not allow it for another. */
-size_t    ade_image_free_blocks_holding_data(const AdeImage *image);
-AdeResult ade_edit_allow_overwriting_free_data(AdeImage *image);
+ * front end asks the person first.
+ *
+ * `partition` is the one the edit is about to go to, as the edit calls take
+ * it: ADE_WHOLE_IMAGE for a disk that is its own volume, a partition's index
+ * on a partitioned disk. Each partition is asked about, and allowed, on its
+ * own: allowing it for one does not allow it for another. ADE_WHOLE_IMAGE on
+ * a partitioned disk counts 0 and is ADE_REFUSED to allow; so is a partition
+ * that cannot be edited. */
+size_t    ade_image_free_blocks_holding_data(AdeImage *image, uint32_t partition);
+AdeResult ade_edit_allow_overwriting_free_data(AdeImage *image, uint32_t partition);
 
 /* Group edits a person sees as one action -- a drop of twenty files -- so
  * one undo takes them all back. Groups nest and only the outermost counts; a

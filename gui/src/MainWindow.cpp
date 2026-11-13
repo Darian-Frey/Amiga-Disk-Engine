@@ -2432,9 +2432,18 @@ void MainWindow::addPath(Open &open, quint32 partition, quint32 dir, const QStri
     ++*made;
 }
 
-bool MainWindow::mayOverwriteFreeData(Open &open, const QString &doing) {
-    const size_t held = open.image.freeBlocksHoldingData();
-    if (held == 0 || open.freeDataAllowed) return true;
+bool MainWindow::mayOverwriteFreeData(Open &open, quint32 partition, const QString &doing) {
+    const size_t held = open.image.freeBlocksHoldingData(partition);
+    if (held == 0 || open.freeDataAllowed.contains(partition)) return true;
+    // On a hard disk the question is about one partition, which it names.
+    QString where = open.name;
+    if (partition != ADE_WHOLE_IMAGE) {
+        const ade::Partitions partitions = open.image.partitions();
+        AdePartition p{};
+        if (partitions && partitions.at(partition, &p)) {
+            where = QStringLiteral("%1 on %2").arg(ade::latin1(p.name), open.name);
+        }
+    }
     // Asked rather than refused: reusing an old game disk as a blank is a
     // fair thing to do, and the person is the one who knows which this is.
     if (!m_confirmFreeData ||
@@ -2443,15 +2452,15 @@ bool MainWindow::mayOverwriteFreeData(Open &open, const QString &doing) {
                            "data. On a disk like this that is usually a game its own loader "
                            "reads, and %5 would overwrite it.\n\nWrite on it anyway? Undo "
                            "brings it back until you save the disk.")
-                .arg(open.name)
+                .arg(where)
                 .arg(held)
                 .arg(held == 1 ? "" : "s")
                 .arg(held == 1 ? "s" : "")
                 .arg(doing))) {
         return false;
     }
-    open.image.allowOverwritingFreeData();
-    open.freeDataAllowed = true;
+    open.image.allowOverwritingFreeData(partition);
+    open.freeDataAllowed.insert(partition);
     return true;
 }
 
@@ -2466,7 +2475,7 @@ int MainWindow::addFiles(QTreeWidgetItem *target, const QStringList &paths) {
         return 0;
     }
     const quint32 partition = partitionOf(target);
-    if (!mayOverwriteFreeData(*open, QStringLiteral("copying files there"))) return 0;
+    if (!mayOverwriteFreeData(*open, partition, QStringLiteral("copying files there"))) return 0;
     int made = 0;
     QStringList refused;
     // One drop is one action, so one Undo takes all of it back (IMP-014).
@@ -2506,7 +2515,7 @@ bool MainWindow::makeFolder(QTreeWidgetItem *target, const QString &name) {
                                .arg(name));
         return false;
     }
-    if (!mayOverwriteFreeData(*open, QStringLiteral("making a folder"))) return false;
+    if (!mayOverwriteFreeData(*open, partitionOf(target), QStringLiteral("making a folder"))) return false;
     const ade::EditResult r = open->image.makeDir(partitionOf(target), dir, amiga);
     m_lastEdited = open->index;
     if (!r.ok()) {
@@ -2570,7 +2579,7 @@ bool MainWindow::makeLinkTo(QTreeWidgetItem *item, const QString &name) {
                                .arg(name));
         return false;
     }
-    if (!mayOverwriteFreeData(*open, QStringLiteral("making a link"))) return false;
+    if (!mayOverwriteFreeData(*open, partitionOf(item), QStringLiteral("making a link"))) return false;
     const QString target = item->text(ColName);
     const ade::EditResult r =
         open->image.makeLink(partitionOf(item), item->data(0, RoleBlock).toUInt(), dir, amiga);
@@ -2789,8 +2798,10 @@ QString MainWindow::wipeDisk(QTreeWidgetItem *item, bool freeBlocks) {
     if (!partitionFor(item, *open, QStringLiteral("a wipe"), &partition)) return {};
     // A disk whose free blocks hold a game is asked about in those terms;
     // the general question would only be the same answer asked twice.
-    if (freeBlocks && open->image.freeBlocksHoldingData() > 0) {
-        if (!mayOverwriteFreeData(*open, QStringLiteral("wiping free space"))) return {};
+    if (freeBlocks && open->image.freeBlocksHoldingData(partition) > 0) {
+        if (!mayOverwriteFreeData(*open, partition, QStringLiteral("wiping free space"))) {
+            return {};
+        }
     } else if (freeBlocks && m_confirmWipe &&
         !m_confirmWipe(QStringLiteral("Zero every free block of %1, and each file's slack?\n\n"
                                       "Nothing deleted from it can be recovered after. A game "

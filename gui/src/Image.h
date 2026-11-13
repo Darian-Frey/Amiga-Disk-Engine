@@ -738,9 +738,15 @@ public:
     /// On a volume with no files, how many blocks the bitmap marks free hold
     /// data — usually a game its own loader reads (IMP-019). While it is not
     /// zero, ADE refuses to write a file or folder or wipe free blocks until
-    /// allowOverwritingFreeData() is called.
-    size_t freeBlocksHoldingData() const { return ade_image_free_blocks_holding_data(m_raw); }
-    void allowOverwritingFreeData() { ade_edit_allow_overwriting_free_data(m_raw); }
+    /// allowOverwritingFreeData() is called. Each is about `partition` — the
+    /// one an edit is about to go to — and allowing it for one partition does
+    /// not allow it for another (IMP-024).
+    size_t freeBlocksHoldingData(quint32 partition) {
+        return ade_image_free_blocks_holding_data(m_raw, partition);
+    }
+    void allowOverwritingFreeData(quint32 partition) {
+        ade_edit_allow_overwriting_free_data(m_raw, partition);
+    }
     bool isModified() const { return ade_image_is_modified(m_raw); }
     bool canUndo() const { return ade_edit_can_undo(m_raw); }
     bool canRedo() const { return ade_edit_can_redo(m_raw); }

@@ -5,6 +5,7 @@
 #include "Image.h"
 
 #include <QMainWindow>
+#include <QSet>
 
 #include <functional>
 #include <memory>
@@ -229,9 +230,11 @@ private:
         bool createdHere = false;
         /// Where the original was kept the first time Save wrote over it.
         QString backup;
-        /// Whether the person said yes to writing over free blocks that hold
-        /// data (IMP-019); asked once for as long as the disk is open.
-        bool freeDataAllowed = false;
+        /// The partitions — ADE_WHOLE_IMAGE for a disk that is its own
+        /// volume — where the person said yes to writing over free blocks
+        /// that hold data (IMP-019); asked once each for as long as the disk
+        /// is open, since one partition's answer is not another's (IMP-024).
+        QSet<quint32> freeDataAllowed;
     };
 
     void addImageRoot(Open &open);
@@ -443,5 +446,5 @@ private:
     // Whether `open` may be written to: yes, unless it is a disk with no
     // files whose free blocks hold data and the free-data confirmation says
     // no. A yes is given to the image for as long as it is open (IMP-019).
-    bool mayOverwriteFreeData(Open &open, const QString &doing);
+    bool mayOverwriteFreeData(Open &open, quint32 partition, const QString &doing);
 };

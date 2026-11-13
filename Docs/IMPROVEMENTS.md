@@ -11,19 +11,6 @@ Effort vocabulary: trivial | small | medium | large.
 
 ## Suggested
 
-### IMP-024 On a partitioned disk, the window asks about free blocks holding data for the partition last edited, not the one about to be
-**Status:** suggested
-**Effort:** small
-**Found:** 2026-11-13, making edits inside partitions (F-038).
-
-**Where:** [bridge/src/lib.rs](../bridge/src/lib.rs) `ade_image_free_blocks_holding_data` and `ade_edit_allow_overwriting_free_data`, which take no partition; [gui/src/MainWindow.cpp](../gui/src/MainWindow.cpp) `mayOverwriteFreeData`, which asks before an edit.
-
-**What it does.** The session keeps the free-data guard (IMP-019) per partition, and both calls answer for the partition the last edit went to. The window asks *before* an edit, so on a hard disk where one partition is an emptied game disk and the edit goes to another, it can ask about the wrong one — or not ask. Nothing is lost: the engine still refuses the edit, and the refusal is shown, but the person gets an error where they should have had the question.
-
-**What would be better.** Both calls take the partition selector, as every other call does since F-038.
-
-**Trade-offs.** Two more signature changes to the ABI. The case needs a hard disk with a partition holding free data behind an empty root, which is rare on hard disks and absent from the material on hand.
-
 ### IMP-025 After every edit, the ABI handle copies the whole image three times
 **Status:** suggested
 **Effort:** small
@@ -51,6 +38,21 @@ Effort vocabulary: trivial | small | medium | large.
 **Trade-offs.** None worth the name; edits cannot write outside a partition in any case, so this guards against opening a table that is wrong, not against writing one. It matters more when ADE edits tables.
 
 ## Applied
+
+### IMP-024 On a partitioned disk, the window asks about free blocks holding data for the partition last edited, not the one about to be
+**Status:** applied
+**Effort:** small
+**Found:** 2026-11-13, making edits inside partitions (F-038).
+
+**Where:** [bridge/src/lib.rs](../bridge/src/lib.rs) `ade_image_free_blocks_holding_data` and `ade_edit_allow_overwriting_free_data`, which take no partition; [gui/src/MainWindow.cpp](../gui/src/MainWindow.cpp) `mayOverwriteFreeData`, which asks before an edit.
+
+**What it does.** The session keeps the free-data guard (IMP-019) per partition, and both calls answer for the partition the last edit went to. The window asks *before* an edit, so on a hard disk where one partition is an emptied game disk and the edit goes to another, it can ask about the wrong one — or not ask. Nothing is lost: the engine still refuses the edit, and the refusal is shown, but the person gets an error where they should have had the question.
+
+**What would be better.** Both calls take the partition selector, as every other call does since F-038.
+
+**Trade-offs.** Two more signature changes to the ABI. The case needs a hard disk with a partition holding free data behind an empty root, which is rare on hard disks and absent from the material on hand.
+
+**Applied 2026-11-13, as proposed.** `ade_image_free_blocks_holding_data` and `ade_edit_allow_overwriting_free_data` take the partition selector — an ABI change — and the session answers for any partition without selecting it (`Session::free_blocks_holding_data_in`, `allow_overwriting_free_data_in`), examining a partition the first time it is asked about and keeping the answer for when it is edited. The handle remembers which partitions were allowed and hands each to the session whenever an edit selects it, so consent given before the first edit still counts, and only where it was given. The window asks about the partition it is about to write to, names it (`DH1 on disk.hdf`), and remembers each answer per partition. On a partitioned disk, `ADE_WHOLE_IMAGE` counts 0 and is refused to allow, since it is no volume. `free_data_is_asked_about_and_allowed_per_partition` in `bridge/tests/abi.rs` holds it, on a device whose second partition is an emptied volume with data in free blocks; answering for the last-edited partition, as before, fails it, and so does consent for one partition reaching another.
 
 ### IMP-023 An edit still copies the whole image once, to be able to refuse itself
 **Status:** applied

@@ -2595,7 +2595,7 @@ fn a_disk_whose_free_blocks_hold_data_is_written_only_when_allowed() {
     unsafe {
         let image = ade::ade_image_open(c_path.as_ptr(), std::ptr::null(), std::ptr::null_mut());
         let root = ade::ade_image_root_block(image);
-        assert_eq!(ade::ade_image_free_blocks_holding_data(image), 8);
+        assert_eq!(ade::ade_image_free_blocks_holding_data(image, WHOLE), 8);
 
         let mut why: *mut std::ffi::c_char = std::ptr::null_mut();
         assert_eq!(
@@ -2630,7 +2630,7 @@ fn a_disk_whose_free_blocks_hold_data_is_written_only_when_allowed() {
 
         // Allowed before the first edit made a session: handed to it.
         assert_eq!(
-            ade::ade_edit_allow_overwriting_free_data(image),
+            ade::ade_edit_allow_overwriting_free_data(image, WHOLE),
             AdeResult::Ok
         );
         assert_eq!(
@@ -2644,13 +2644,16 @@ fn a_disk_whose_free_blocks_hold_data_is_written_only_when_allowed() {
             ),
             AdeResult::Ok
         );
-        assert_eq!(ade::ade_image_free_blocks_holding_data(image), 0);
+        assert_eq!(ade::ade_image_free_blocks_holding_data(image, WHOLE), 0);
         assert_eq!(ade::ade_edit_undo(image), AdeResult::Ok);
-        assert_eq!(ade::ade_image_free_blocks_holding_data(image), 8);
+        assert_eq!(ade::ade_image_free_blocks_holding_data(image, WHOLE), 8);
 
-        assert_eq!(ade::ade_image_free_blocks_holding_data(std::ptr::null()), 0);
         assert_eq!(
-            ade::ade_edit_allow_overwriting_free_data(std::ptr::null_mut()),
+            ade::ade_image_free_blocks_holding_data(std::ptr::null_mut(), WHOLE),
+            0
+        );
+        assert_eq!(
+            ade::ade_edit_allow_overwriting_free_data(std::ptr::null_mut(), WHOLE),
             AdeResult::NullArgument
         );
         ade::ade_image_free(image);
@@ -2823,6 +2826,92 @@ fn an_edit_names_its_partition_and_lands_in_it() {
             ),
             AdeResult::Refused
         );
+        ade::ade_image_free(image);
+    }
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn free_data_is_asked_about_and_allowed_per_partition() {
+    // IMP-024: on a partitioned disk the question is about the partition an
+    // edit is about to go to — not the one last edited — and allowing it for
+    // one partition does not allow it for another. DH1 is an emptied volume
+    // with data in eight free blocks, as a trackloaded game leaves it.
+    let mut device = ade_fixtures::device::Device::new(64, 4, 32);
+    device.add_partition("DH0", 2, 30, 1, true, |v| {
+        v.add_file("startup-sequence", b"partitioned");
+    });
+    device.add_partition("DH1", 31, 63, 0, false, |_| {});
+    let mut disk = device.build();
+    let first =
+        usize::try_from(ade_core::inspect_bytes(disk.clone()).partitions[1].first_block).unwrap();
+    // Not one value repeated, which is filler rather than data.
+    for b in first + 10..first + 18 {
+        disk[b * 512..(b + 1) * 512].fill(0x4E);
+        disk[(b + 1) * 512 - 1] = 1;
+    }
+    let (path, c_path) = fixture("free-data-parts", &disk);
+    let bytes = |b: &[u8]| ade::AdeBytes {
+        data: b.as_ptr(),
+        len: b.len(),
+    };
+    // SAFETY: a valid path; every handle is freed once.
+    unsafe {
+        let roots = |image| {
+            let table = ade::ade_partitions_open(image);
+            let mut p = std::mem::zeroed::<ade::AdePartition>();
+            ade::ade_partitions_entry(table, 0, &raw mut p);
+            let dh0 = p.root_block;
+            ade::ade_partitions_entry(table, 1, &raw mut p);
+            ade::ade_partitions_free(table);
+            (dh0, p.root_block)
+        };
+        let mkdir = |image, partition, parent, name: &[u8]| {
+            ade::ade_edit_mkdir(
+                image,
+                partition,
+                parent,
+                bytes(name),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        };
+
+        let image = ade::ade_image_open(c_path.as_ptr(), std::ptr::null(), std::ptr::null_mut());
+        let (dh0, dh1) = roots(image);
+        assert_eq!(ade::ade_image_free_blocks_holding_data(image, 1), 8);
+        assert_eq!(ade::ade_image_free_blocks_holding_data(image, 0), 0);
+        assert_eq!(ade::ade_image_free_blocks_holding_data(image, WHOLE), 0);
+        assert_eq!(ade::ade_image_free_blocks_holding_data(image, 9), 0);
+
+        // An edit in DH0 leaves DH1's answer as it was: the question is
+        // about DH1 whichever was edited last.
+        assert_eq!(mkdir(image, 0, dh0, b"One"), AdeResult::Ok);
+        assert_eq!(ade::ade_image_free_blocks_holding_data(image, 1), 8);
+        assert_eq!(mkdir(image, 1, dh1, b"Two"), AdeResult::Refused);
+
+        // Allowed for DH1, an edit there goes ahead; the whole image of a
+        // partitioned disk is no volume to allow.
+        assert_eq!(
+            ade::ade_edit_allow_overwriting_free_data(image, WHOLE),
+            AdeResult::Refused
+        );
+        assert_eq!(
+            ade::ade_edit_allow_overwriting_free_data(image, 1),
+            AdeResult::Ok
+        );
+        assert_eq!(mkdir(image, 0, dh0, b"Three"), AdeResult::Ok);
+        assert_eq!(mkdir(image, 1, dh1, b"Two"), AdeResult::Ok);
+        ade::ade_image_free(image);
+
+        // Allowed for DH0 alone, DH1 is still guarded — before any edit has
+        // made a session, too.
+        let image = ade::ade_image_open(c_path.as_ptr(), std::ptr::null(), std::ptr::null_mut());
+        assert_eq!(
+            ade::ade_edit_allow_overwriting_free_data(image, 0),
+            AdeResult::Ok
+        );
+        assert_eq!(mkdir(image, 1, dh1, b"Two"), AdeResult::Refused);
         ade::ade_image_free(image);
     }
     let _ = std::fs::remove_file(&path);
