@@ -186,7 +186,23 @@ Neither run is the F-001 bar, which requires a fuzz corpus rather than well-form
 
 **Deliverables:**
 - [x] **Larger unpartitioned hardfiles — delivered 2026-11-12.** The `bm_ext` chain is written as AmigaDOS's `Format` lays it out (measured on 100 MB and 500 MB hardfiles in FS-UAE: each extension block directly before the pages it lists), so `create` goes to the 4 GB a volume can address — 1 GB in the window, which holds a disk whole — and every edit, `repair` (which refused any chained bitmap), `format` and `wipe` keep the chain's blocks as the bitmap's own. AmigaDOS reads and writes a 330 MB ADE hardfile with two extension blocks, and ADE writes onto a 100 MB volume AmigaDOS formatted; ADFlib reads a 100 MB one. An edit still holds about four copies of the image — 2 GB for a `put` on 500 MB — which is the **Scale** deliverable below.
-- [ ] **Partition-aware everything.** Every command, ABI call and window action that works on a floppy works on a partition: the edits (`mkdir`, `put`, `rm`, `undelete`, `link`, `rename`, `mv`, `repair`, `format`, `wipe`), `carve`, `find`, `scan`, `layout`, `specs`, `annotate`, `decode`, and the window's Map, Hex, Text, Assembly and Decoded views and Recover lost files. `--partition=` everywhere it means something; the ABI's edit calls take the partition selector its read calls already do. An audit first, command by command, of what already works on a partition and what does not.
+- [ ] **Partition-aware everything.** Every command, ABI call and window action that works on a floppy works on a partition: the edits (`mkdir`, `put`, `rm`, `undelete`, `link`, `rename`, `mv`, `repair`, `format`, `wipe`), `carve`, `find`, `scan`, `layout`, `specs`, `annotate`, `decode`, and the window's Map, Hex, Text, Assembly and Decoded views and Recover lost files. `--partition=` everywhere it means something; the ABI's edit calls take the partition selector its read calls already do. An audit first, command by command, of what already works on a partition and what does not — *done 2026-11-13, below*.
+
+  **Audit, 2026-11-13** — every command run on Amiga Forever's `workbench-135.hdf` (one partition, `DH0`) with `--partition=0`, then the ABI and the window read for the same:
+
+  | Area | On a partition |
+  |---|---|
+  | `check`, `ls`, `extract` (one file or `--all`), `disasm <path>`, `decode`, `annotate`, `batch` | **work** |
+  | `carve`; the window's Recover lost files (`ade_carve_open` takes no partition) | **wrong** — every live file reported lost (**BUG-027**) |
+  | `find` | runs over the whole device; hits in live files called *unclaimed* (BUG-027) |
+  | `layout`; the window's Map and its region colours, and the damage drawn on it (`ade_image_damage(…, ADE_WHOLE_IMAGE)`) | name the RDB and nothing else (BUG-027) |
+  | `find`, `scan`, `layout`, `specs`, `carve` | **accept `--partition` and ignore it**, even one that does not exist (**BUG-028**) |
+  | `scan`, `specs`, `diff`, `surface`, `identify` | whole-device by nature; `specs` reports *no standard floppy* where a partition's facts would serve |
+  | `disasm` with no path (the boot code) | *does not begin with an AmigaDOS bootblock* — the partition's own boot blocks are not read |
+  | Every edit — `mkdir`, `put`, `rm`, `undelete`, `link`, `rename`, `mv`, `repair`, `format`, `wipe` — and the ABI's `ade_edit_*`, none of which take a partition | **refused**, with the reason; the window disables them on partition rows |
+  | `convert` | no partition ↔ standalone hardfile conversion yet |
+  | ABI | partitions taken by `ade_dir_open`, `ade_walk_open`, `ade_file_read`, `ade_unpack`, `ade_layout_open`, `ade_disasm_*`, `ade_decoded_open`, `ade_project_set_*`; not by `ade_carve_open`, `ade_specs_open`, `ade_disasm_bootblock` or any `ade_edit_*` |
+  | Window | tree, Hex, Text, Assembly and Decoded follow the selected partition; Map, Recover lost files, Disk ▸ specs and every edit do not |
 - [ ] **Saving an RDB disk.** D-018's terms unchanged — buffered, explicit, atomic, never silently over the opened file — for a device image whose edits land inside one partition.
 - [ ] **Creating a partitioned disk.** `ade create --rdb` (shape to be designed): an `RDSK` block, a `PART` per partition with its name (`DH0`), dostype, size, boot priority and bootable flag, and each partition formatted. Optionally a filesystem carried in the RDB (`FSHD` + `LSEG`), which ADFlib requires and FAQ §6.5 says is not needed (SPEC §The oracle is stricter than the format here).
 - [ ] **Editing the partition table.** Add, delete, rename and resize partitions; change boot priority, bootable flag and dostype; reformat one partition without touching the others. Resizing a partition that holds files is the hard case — moving its contents, or refusing with the reason, is a decision of its own.

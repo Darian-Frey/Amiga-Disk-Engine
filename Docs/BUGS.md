@@ -10,7 +10,26 @@ Severity vocabulary: low | medium | high.
 
 ## Open
 
-_None._
+### BUG-027 On a partitioned disk, `carve` and Recover lost files call every live file lost, and `find` and `layout` see no volume
+**Severity:** high
+**Status:** open
+**Found:** 2026-11-13, auditing Phase 6's commands against Amiga Forever's `workbench-135.hdf`, a sound RDB disk with one partition: `ade carve` reports **367 orphaned headers** — `AmigaBASIC`, `c/Dir` and every other file `ade ls` lists — and `carve --all` would write all of them out as recovered.
+**Where:** [src/api/src/carve.rs](../src/api/src/carve.rs) and [src/api/src/layout.rs](../src/api/src/layout.rs), which work over "the volume" of an image; `ade_carve_open`, which takes no partition; the window's Disk ▸ Recover lost files, which calls it; and `ade find`, whose region attribution comes from the layout.
+
+**What is wrong.** A partitioned device has no volume of its own — its volumes are in its partitions (CLAUDE.md: "a device has no volume of its own"). These analyses look for the image's volume, find none, and treat every block as unclaimed: so every live file header is "orphaned", every search hit is "unclaimed", and `ade layout` names the RDB and nothing else. On a floppy or an unpartitioned hardfile, where the image *is* the volume, none of this happens, which is why nothing caught it: the corpus has one RDB disk, and only `check`, `ls`, `extract` and `disasm` had been taught partitions.
+
+**Correct behaviour.** Each works on a partition the way it works on a floppy: carving finds only what that partition's tree does not reach, a search hit is attributed to the file in that partition that holds it, and the layout covers the RDB blocks and each partition's regions. Until then, run on a device without a partition chosen, each should say it needs one rather than report a disk with nothing on it.
+
+### BUG-028 `--partition` is accepted and ignored by `find`, `scan`, `layout`, `specs` and `carve` — even a partition that does not exist
+**Severity:** medium
+**Status:** open
+**Found:** 2026-11-13, the same audit: each of the five prints exactly the same with `--partition=0` as without it, and `--partition=9` on a one-partition disk exits 0.
+**Where:** [cli/src/main.rs](../cli/src/main.rs): the five commands never read `args.partition`, and the argument parser takes the flag for every command.
+
+**What is wrong.** A flag a command does not honour, accepted silently, is BUG-007's shape: a script cannot tell an ignored option from one that worked, and here the ignored option is the one that decides which volume the answer is about. A partition that does not exist should be an error on every command, as it is on `ls` and `extract`.
+
+**Correct behaviour.** Each command either honours `--partition` — which is BUG-027's fix — or refuses it with the reason; never accepts it and does something else.
+
 
 ## Fixed
 
