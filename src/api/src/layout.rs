@@ -52,6 +52,9 @@ pub enum Region {
     File,
     /// Inside the volume, and nothing reaches it: deleted, hidden, or damage.
     Unclaimed,
+    /// A hard disk's own structure: its RDSK block and each partition's
+    /// entry. Last, so the codes before it keep their numbers across the ABI.
+    PartitionTable,
 }
 
 impl Region {
@@ -65,6 +68,7 @@ impl Region {
             Self::Directory => "directory",
             Self::File => "file",
             Self::Unclaimed => "unclaimed",
+            Self::PartitionTable => "partition table",
         }
     }
 
@@ -78,6 +82,7 @@ impl Region {
             Self::Directory => "a directory header, holding its name",
             Self::File => "a file's header or its data",
             Self::Unclaimed => "nothing points here: free space, deleted data, or damage",
+            Self::PartitionTable => "the hard disk's RDSK block and partition entries",
         }
     }
 }
@@ -206,49 +211,77 @@ pub(crate) type Owned = (Region, Option<String>, Option<u32>);
 
 pub(crate) fn attribute(image: &crate::Image) -> (BTreeMap<u64, Owned>, bool) {
     let mut out: BTreeMap<u64, Owned> = BTreeMap::new();
-    let geometry = image.geometry();
+    // A device's own structure: its RDSK block and each partition's entry.
+    // Named rather than left "unclaimed", which would say nothing points
+    // there when the whole disk hangs from them.
+    if let Ok(Some(rdb)) = image.rdb() {
+        out.insert(u64::from(rdb.block), (Region::PartitionTable, None, None));
+        if let Ok((parts, _)) = image.partitions() {
+            for p in &parts {
+                out.insert(u64::from(p.block), (Region::PartitionTable, None, None));
+            }
+        }
+    }
+    // Then each place a volume can be — the image itself, or every partition
+    // of a device, which has no volume of its own (BUG-027). Mapped at its
+    // place on the image, its owners named with the partition.
+    let mut mounted = false;
+    for area in image.areas() {
+        mounted |= attribute_area(&area, &mut out);
+    }
+    (out, mounted)
+}
+
+/// What each block of one [`Area`](crate::inspect::Area) is, entered in
+/// `out` at its place on the image. Whether its volume mounted.
+fn attribute_area(area: &crate::inspect::Area<'_>, out: &mut BTreeMap<u64, Owned>) -> bool {
+    let source = area.source.get();
+    let geometry = source.geometry();
+    let at = |block: u64| area.first_block.saturating_add(block);
+    let named = |path: &str| match &area.partition {
+        Some(p) => format!("{p}:{path}"),
+        None => path.to_owned(),
+    };
 
     // The bootblock does not depend on the volume mounting. C-008 keeps the
     // two facts separate, and this is where that matters most: a protected
     // disk is exactly the one that does not mount *and* the one whose hits are
     // all in block 0. Answering "unclaimed" there would be the tool at its
-    // least useful on the search it is best at.
-    //
-    // Unless it is a device, whose block 0 is an `RDSK` and not a bootblock at
-    // all — parsing one as the other is a mistake this project has already
-    // made twice.
-    if matches!(image.rdb(), Ok(None)) {
-        for block in 0..u64::from(geometry.reserved()) {
-            out.insert(block, (Region::Bootblock, None, None));
-        }
+    // least useful on the search it is best at. A partition has its own boot
+    // blocks at its start, as a floppy has.
+    for block in 0..u64::from(geometry.reserved()) {
+        out.insert(at(block), (Region::Bootblock, None, None));
     }
 
-    let Ok(volume) = image.volume() else {
-        return (out, false);
+    let Ok(volume) = ade_filesystem::volume::Volume::mount(source) else {
+        return false;
     };
 
     // Then the rest of the structure, so a file can never be shadowed by one:
     // if a file's data really does sit in a reserved block the volume is
     // damaged, and the file is the more informative answer.
-    out.insert(geometry.root_block().0, (Region::Rootblock, None, None));
+    out.insert(
+        at(u64::from(volume.root())),
+        (Region::Rootblock, None, None),
+    );
     if let Ok(bitmap) =
-        ade_filesystem::bitmap::Bitmap::read(image.source(), volume.geometry(), volume.rootblock())
+        ade_filesystem::bitmap::Bitmap::read(source, volume.geometry(), volume.rootblock())
     {
         for &block in bitmap.blocks.iter().chain(&bitmap.extensions) {
-            out.insert(u64::from(block), (Region::Bitmap, None, None));
+            out.insert(at(u64::from(block)), (Region::Bitmap, None, None));
         }
     }
 
     let Ok(walk) = volume.walk(volume.root()) else {
-        return (out, true);
+        return true;
     };
     for (path, entry) in &walk.entries {
         // A directory has no data blocks, but its header is where its name
         // lives — a search for a directory name should say which one.
         if entry.kind.is_directory() {
             out.insert(
-                u64::from(entry.block),
-                (Region::Directory, Some(path.clone()), Some(entry.block)),
+                at(u64::from(entry.block)),
+                (Region::Directory, Some(named(path)), Some(entry.block)),
             );
             continue;
         }
@@ -259,20 +292,20 @@ pub(crate) fn attribute(image: &crate::Image) -> (BTreeMap<u64, Owned>, bool) {
         // filename in its own header should say so rather than report an
         // unowned block.
         out.insert(
-            u64::from(entry.block),
-            (Region::File, Some(path.clone()), Some(entry.block)),
+            at(u64::from(entry.block)),
+            (Region::File, Some(named(path)), Some(entry.block)),
         );
         let Ok(blocks) = volume.file_blocks(entry) else {
             continue;
         };
         for block in blocks {
             out.insert(
-                u64::from(block),
-                (Region::File, Some(path.clone()), Some(entry.block)),
+                at(u64::from(block)),
+                (Region::File, Some(named(path)), Some(entry.block)),
             );
         }
     }
-    (out, true)
+    true
 }
 
 /// Turn a per-block map into runs covering every block.

@@ -531,6 +531,7 @@ public:
 
         size_t count() const { return ade_carve_count(m_raw); }
         QString name(size_t i) const { return latin1(ade_carve_name(m_raw, i)); }
+        QString partition(size_t i) const { return latin1(ade_carve_partition(m_raw, i)); }
         QString filename(size_t i) const { return latin1(ade_carve_filename(m_raw, i)); }
         quint32 block(size_t i) const { return ade_carve_block(m_raw, i); }
         quint32 size(size_t i) const { return ade_carve_size(m_raw, i); }

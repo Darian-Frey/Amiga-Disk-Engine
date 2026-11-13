@@ -696,10 +696,14 @@ fn the_region_strings_match_the_engines() {
 
 #[test]
 fn an_unknown_region_code_is_empty_rather_than_wrong() {
-    // A front end built against a newer header must not be told that region 6
+    // A front end built against a newer header must not be told that region 7
     // is a bootblock. Empty is a legend entry somebody notices; a wrong name
-    // is a legend entry they believe.
-    for code in [6u32, 99, u32::MAX] {
+    // is a legend entry they believe. (6 became the partition table on
+    // 2026-11-13, BUG-027; it is named, and pinned below.)
+    // SAFETY: tolerates any integer and returns static storage.
+    let six = unsafe { std::ffi::CStr::from_ptr(ade::ade_region_name(6)) };
+    assert_eq!(six.to_bytes(), b"partition table");
+    for code in [7u32, 99, u32::MAX] {
         // SAFETY: both tolerate any integer and return static storage.
         unsafe {
             assert_eq!(

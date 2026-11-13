@@ -188,6 +188,7 @@ QColor HexPane::regionColour(const QPalette &palette, int region) {
         case 3:  return wash(70, 130, 220, 78);   // directory
         case 4:  return QColor();                 // file — most of the disk; left alone
         case 5:  return wash(140, 140, 150, 90);  // unclaimed — the faintest wash there is
+        case 6:  return wash(170, 80, 200, 78);   // partition table — a hard disk's RDB
         default: return QColor();
     }
 }

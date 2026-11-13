@@ -428,6 +428,64 @@ impl Damage {
     }
 }
 
+/// Every damaged block of a whole image, numbered on the image, worst kind
+/// first per block — what a map of the disk draws.
+///
+/// The image's own volume on a floppy or hardfile. On a partitioned device,
+/// which has no volume of its own, every partition is examined and its
+/// damage placed at its offset on the device (BUG-027): a partition's
+/// report numbers blocks from its own start, and drawn as they stood they
+/// landed on the wrong blocks.
+#[must_use]
+pub fn image_damage(bytes: &[u8]) -> Vec<(u32, Damage)> {
+    let inspection = inspect_bytes(bytes.to_vec());
+    if inspection.partitions.is_empty() {
+        return damaged_blocks(&examine(bytes.to_vec()));
+    }
+    let mut all: Vec<(u32, Damage)> = Vec::new();
+    for (index, part) in inspection.partitions.iter().enumerate() {
+        let report = examine_partition(bytes.to_vec(), Some(&index.to_string()));
+        if report.examined.is_none() {
+            continue;
+        }
+        for (block, damage) in damaged_blocks(&report) {
+            if let Ok(on_device) = u32::try_from(part.first_block.saturating_add(u64::from(block)))
+            {
+                all.push((on_device, damage));
+            }
+        }
+    }
+    all.sort_unstable_by_key(|(block, _)| *block);
+    all
+}
+
+/// Blocks the volumes of a whole image map, and how many of them are marked
+/// used: the image's own volume, or every partition of a device added
+/// together. `None` when no volume has a bitmap to count.
+#[must_use]
+pub fn image_block_counts(bytes: &[u8]) -> Option<(u64, u64)> {
+    let inspection = inspect_bytes(bytes.to_vec());
+    let reports: Vec<Health> = if inspection.partitions.is_empty() {
+        vec![examine(bytes.to_vec())]
+    } else {
+        (0..inspection.partitions.len())
+            .map(|i| examine_partition(bytes.to_vec(), Some(&i.to_string())))
+            .filter(|r| r.examined.is_some())
+            .collect()
+    };
+    let mut counted: Option<(u64, u64)> = None;
+    for report in &reports {
+        if let Some(b) = &report.bitmap {
+            let (covered, used) = counted.unwrap_or((0, 0));
+            counted = Some((
+                covered.saturating_add(u64::from(b.covered)),
+                used.saturating_add(b.marked_used as u64),
+            ));
+        }
+    }
+    counted
+}
+
 /// Every block the health report finds something wrong with, once each, by
 /// the worst thing wrong with it, in block order.
 #[must_use]

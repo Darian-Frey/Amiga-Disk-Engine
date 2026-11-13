@@ -1126,6 +1126,23 @@ pub unsafe extern "C" fn ade_carve_name(carve: *const AdeCarve, index: usize) ->
     })
 }
 
+/// The partition it was found in (`DH0`), whose start its block numbers
+/// count from — empty on a floppy or an unpartitioned hardfile. Borrowed
+/// until the handle is freed.
+///
+/// # Safety
+/// `carve` must be a live handle or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ade_carve_partition(carve: *const AdeCarve, index: usize) -> AdeBytes {
+    guard(AdeBytes::empty(), || {
+        // SAFETY: the caller's contract; null is checked.
+        unsafe { carve.as_ref() }
+            .and_then(|c| c.found.get(index))
+            .and_then(|c| c.partition.as_ref())
+            .map_or_else(AdeBytes::empty, |p| AdeBytes::of(p.as_bytes()))
+    })
+}
+
 /// The block the header sits at — the thing that makes each answer unique.
 ///
 /// # Safety
@@ -1919,8 +1936,7 @@ pub unsafe extern "C" fn ade_image_damage(
         let Some(handle) = image.image.as_ref() else {
             return std::ptr::null_mut();
         };
-        let report = examine(handle.read_range(0, image.inspection.size));
-        let blocks = ade_core::damaged_blocks(&report)
+        let blocks = ade_core::image_damage(&handle.read_range(0, image.inspection.size))
             .into_iter()
             .map(|(block, damage)| AdeDamagedBlock {
                 block,
@@ -1934,13 +1950,11 @@ pub unsafe extern "C" fn ade_image_damage(
                 },
             })
             .collect();
-        let counts = report
-            .bitmap
-            .as_ref()
-            .map_or_else(AdeBlockCounts::default, |b| {
+        let bytes = handle.read_range(0, image.inspection.size);
+        let counts = ade_core::image_block_counts(&bytes).map_or_else(
+            AdeBlockCounts::default,
+            |(covered, used)| {
                 let (files, in_pieces) = ade_core::layout::Layout::of(handle).files();
-                let covered = u64::from(b.covered);
-                let used = b.marked_used as u64;
                 AdeBlockCounts {
                     blocks: covered,
                     used,
@@ -1949,7 +1963,8 @@ pub unsafe extern "C" fn ade_image_damage(
                     in_pieces: in_pieces as u64,
                     known: true,
                 }
-            });
+            },
+        );
         Box::into_raw(Box::new(AdeDamage { blocks, counts }))
     })
 }
@@ -2125,29 +2140,31 @@ pub extern "C" fn ade_region_describes(region: u32) -> *const c_char {
 /// string it never frees is a leak the caller cannot see. `the_region_strings_
 /// match_the_engines` pins these against the engine's, so the duplication
 /// cannot drift into two different names for one thing.
-static REGION_NAMES: [&CStr; 6] = [
+static REGION_NAMES: [&CStr; 7] = [
     c"bootblock",
     c"rootblock",
     c"bitmap",
     c"directory",
     c"file",
     c"unclaimed",
+    c"partition table",
 ];
 
 /// The region descriptions, NUL-terminated, in `AdeRegion` order.
-static REGION_DESCRIPTIONS: [&CStr; 6] = [
+static REGION_DESCRIPTIONS: [&CStr; 7] = [
     c"boot code and the dostype — where protection lives",
     c"the volume's name, datestamps and hash table",
     c"which blocks are free; a set bit means free",
     c"a directory header, holding its name",
     c"a file's header or its data",
     c"nothing points here: free space, deleted data, or damage",
+    c"the hard disk's RDSK block and partition entries",
 ];
 
 /// One of a static table, or an empty string for a code this build does not
 /// know — never a wrong name. A front end built against a newer header must
 /// not be told that region 6 is a bootblock.
-fn region_text(region: u32, table: &'static [&'static CStr; 6]) -> *const c_char {
+fn region_text(region: u32, table: &'static [&'static CStr; 7]) -> *const c_char {
     guard(c"".as_ptr(), || {
         usize::try_from(region)
             .ok()

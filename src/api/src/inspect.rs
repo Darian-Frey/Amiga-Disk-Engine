@@ -1574,6 +1574,65 @@ impl Image {
     pub fn volume(&self) -> Result<Volume<'_>, FsError> {
         Volume::mount(self.backing.source())
     }
+
+    /// Every place on this image that can hold a volume: the image itself,
+    /// or — on a partitioned device, which has no volume of its own — each
+    /// partition the table declares and the device can hold (BUG-027).
+    ///
+    /// Analyses that work over "the volume" go through this, so a device is
+    /// examined partition by partition rather than read as one disk on which
+    /// nothing is claimed.
+    pub(crate) fn areas(&self) -> Vec<Area<'_>> {
+        let parts = match self.partitions() {
+            Ok((parts, _)) if !parts.is_empty() => parts,
+            _ => {
+                return vec![Area {
+                    source: AreaSource::Whole(self.backing.source()),
+                    partition: None,
+                    first_block: 0,
+                }];
+            }
+        };
+        parts
+            .iter()
+            .filter_map(|p| {
+                let window = self.partition_window(p).ok()?;
+                Some(Area {
+                    first_block: window.start(),
+                    source: AreaSource::Partition(window),
+                    partition: Some(p.name_lossy()),
+                })
+            })
+            .collect()
+    }
+}
+
+/// One place on an image that can hold a volume: see [`Image::areas`].
+pub(crate) struct Area<'a> {
+    /// Its blocks, numbered from its own start.
+    pub(crate) source: AreaSource<'a>,
+    /// The partition's drive name, when it is one (`DH0`).
+    pub(crate) partition: Option<String>,
+    /// Where its block 0 is on the image.
+    pub(crate) first_block: u64,
+}
+
+/// Where an [`Area`]'s blocks are read from.
+pub(crate) enum AreaSource<'a> {
+    /// The image itself: a floppy, or a hardfile with no partition table.
+    Whole(&'a dyn ade_block::BlockSource),
+    /// One partition of a device.
+    Partition(Window<'a>),
+}
+
+impl AreaSource<'_> {
+    /// The blocks, as a source a volume can be mounted on.
+    pub(crate) fn get(&self) -> &dyn ade_block::BlockSource {
+        match self {
+            Self::Whole(source) => *source,
+            Self::Partition(window) => window,
+        }
+    }
 }
 
 /// One bootblock as JSON, split out to keep `Inspection::to_json` readable.

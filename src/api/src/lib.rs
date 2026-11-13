@@ -32,7 +32,7 @@ pub use consolidate::{Consolidation, Diff, consolidate, diff};
 pub use convert::{Conversion, conversion};
 pub use health::{
     BitmapHealth, Damage, DirCacheHealth, DiskKind, Examined, Finding, Health, Severity,
-    damaged_blocks, examine, examine_partition,
+    damaged_blocks, examine, examine_partition, image_block_counts, image_damage,
 };
 pub use inspect::{
     Compression, Description, Fault, Image, Inspection, InspectionError, MAX_DECOMPRESSED,

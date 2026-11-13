@@ -1157,6 +1157,8 @@ Protection is bootblock and trackloader, exactly the region no directory entry p
 | `rootblock` | 37 |
 | `bitmap` | 14 |
 
+**On a partitioned hard disk, every partition (BUG-027, 2026-11-13).** A device has no volume of its own, and the map once looked for one, found none, and called every block past the partition table unclaimed. It now maps each partition's volume at its place on the device — boot blocks, rootblock, bitmap and its `bm_ext` chain, directories and files — and names each owner with its partition (`DH0:c/Dir`), so a hit in a live file is that file. The `RDSK` block and each partition's `PART` entry are a seventh region, **`partition table`** — code 6, after the six a floppy has, so the codes before it keep their numbers across the ABI. Blocks outside every partition, such as the rest of the RDB's reserved cylinders, stay `unclaimed`. On Amiga Forever's `workbench-135.hdf`: 3,277 file blocks, 30 directory headers, a rootblock, a bitmap block, two boot blocks, two partition-table blocks. Measured the same day on the same disk, `find Workbench` attributed its first hit to *unclaimed* before and to `DH0:Utilities/ClockPtr` after.
+
 ## What can be carved back
 
 An orphaned header is a `T_HEADER` block with a valid checksum sitting in space
@@ -1190,6 +1192,8 @@ Corpus, all 4,652 images (2026-09-01), 8.5 seconds:
 
 Directories are header-only by construction: a directory header has no data
 blocks to agree with it.
+
+**On a partitioned hard disk, each partition through its own numbering (BUG-027, 2026-11-13).** A header inside a partition names blocks counted from the partition's start, so carving reads each partition through its own window, takes only what that partition's tree does not reach, and reports the partition with each find — `DH0 block 1280` in the text, `partition` in the JSON (schema **1.20 → 1.21**), `ade_carve_partition` in the ABI, the Block column in the window — and a recovered file's name begins with it (`DH0-01280-…`). Read as one disk, every live file had looked lost: **367** orphaned headers on Amiga Forever's sound `workbench-135.hdf`, which now has **2** — `TxEd.Backup_1` and `TxEd.Backup_2`, an editor's deleted backups, the first real deleted material on a hard disk ADE has seen; `workbench-211.hdf` has the same two, both self-evident, and `workbench-311.hdf` one.
 
 ## Intuition Preferences (`devs/system-configuration`)
 

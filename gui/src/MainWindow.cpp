@@ -1725,7 +1725,11 @@ void MainWindow::recoverLostFiles() {
         const AdeEvidence how = carve.evidence(i);
         auto *row = new QTreeWidgetItem(table);
         row->setData(0, Qt::UserRole, static_cast<qulonglong>(i));
-        row->setText(0, QString::number(carve.block(i)));
+        // On a hard disk the block counts from its partition, which says so.
+        const QString partition = carve.partition(i);
+        row->setText(0, partition.isEmpty()
+                            ? QString::number(carve.block(i))
+                            : QStringLiteral("%1 %2").arg(partition).arg(carve.block(i)));
         row->setText(1, carve.name(i));
         row->setText(2, how == ADE_EVIDENCE_SELF_EVIDENT ? QStringLiteral("self-evident")
                         : how == ADE_EVIDENCE_PARTIAL    ? QStringLiteral("partial")

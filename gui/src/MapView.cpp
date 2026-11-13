@@ -16,6 +16,7 @@ namespace {
 /// blocks worth finding.
 int rank(int region) {
     switch (region) {
+        case 6:  return 6;  // partition table: the disk hangs from it
         case 0:  return 5;  // bootblock
         case 1:  return 4;  // rootblock
         case 2:  return 3;  // bitmap
@@ -48,6 +49,7 @@ QColor MapView::colourFor(const QPalette &palette, int region) {
         case 1:  return wash(220, 170, 40, 25);   // rootblock
         case 2:  return wash(60, 170, 90, 25);    // bitmap
         case 3:  return wash(70, 130, 220, 25);   // directory
+        case 6:  return wash(170, 80, 200, 25);   // partition table
         // File and unclaimed carry most of the map between them, so their
         // percentages were solved rather than chosen. At the first values
         // unclaimed sat at 1.16 contrast against the page — invisible, which

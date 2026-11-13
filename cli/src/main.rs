@@ -2527,9 +2527,14 @@ fn carve(path: &Path, format: Format, dest: Option<&Path>) -> ExitCode {
             if found.len() == 1 { "" } else { "s" }
         )];
         for c in &found {
+            // On a hard disk the block counts from its partition's start,
+            // and says which partition that is.
+            let at = c.partition.as_ref().map_or_else(
+                || format!("block {:>5}", c.block),
+                |p| format!("{p} block {:>5}", c.block),
+            );
             lines.push(format!(
-                "  block {:>5}  {:<12} {:>9}  {:<12} {}",
-                c.block,
+                "  {at}  {:<12} {:>9}  {:<12} {}",
                 c.evidence.name(),
                 c.size,
                 ade_core::carve::kind_name(c.kind),
@@ -2775,7 +2780,7 @@ fn layout(path: &Path, format: Format) -> ExitCode {
     ];
     for (region, blocks) in map.totals() {
         lines.push(format!(
-            "  {:>10}  {:>6} blocks  {}",
+            "  {:>15}  {:>6} blocks  {}",
             region.name(),
             blocks,
             region.describes()

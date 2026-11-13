@@ -193,9 +193,9 @@ Neither run is the F-001 bar, which requires a fuzz corpus rather than well-form
   | Area | On a partition |
   |---|---|
   | `check`, `ls`, `extract` (one file or `--all`), `disasm <path>`, `decode`, `annotate`, `batch` | **work** |
-  | `carve`; the window's Recover lost files (`ade_carve_open` takes no partition) | **wrong** — every live file reported lost (**BUG-027**) |
-  | `find` | runs over the whole device; hits in live files called *unclaimed* (BUG-027) |
-  | `layout`; the window's Map and its region colours, and the damage drawn on it (`ade_image_damage(…, ADE_WHOLE_IMAGE)`) | name the RDB and nothing else (BUG-027) |
+  | `carve`; the window's Recover lost files | *was* wrong — every live file reported lost (**BUG-027**); **fixed 2026-11-13**: every partition carved through its own numbering |
+  | `find` | runs over the whole device; hits attributed to their partition's files since BUG-027's fix |
+  | `layout`; the window's Map, its region colours and the damage drawn on it | map every partition and the partition table since BUG-027's fix |
   | `find`, `scan`, `layout`, `specs`, `carve` | **accept `--partition` and ignore it**, even one that does not exist (**BUG-028**) |
   | `scan`, `specs`, `diff`, `surface`, `identify` | whole-device by nature; `specs` reports *no standard floppy* where a partition's facts would serve |
   | `disasm` with no path (the boot code) | *does not begin with an AmigaDOS bootblock* — the partition's own boot blocks are not read |

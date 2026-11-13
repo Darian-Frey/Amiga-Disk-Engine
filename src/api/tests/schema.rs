@@ -520,6 +520,7 @@ fn a_carve_emits_exactly_these_fields() {
             "carved[].kind",
             "carved[].evidence",
             "carved[].data_blocks",
+            "carved[].partition",
         ],
     );
 }

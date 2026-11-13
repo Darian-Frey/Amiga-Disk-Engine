@@ -227,7 +227,8 @@ typedef enum {
     ADE_REGION_BITMAP    = 2, /* which blocks are free                     */
     ADE_REGION_DIRECTORY = 3, /* a directory header, holding its name      */
     ADE_REGION_FILE      = 4, /* a file's header or its data               */
-    ADE_REGION_UNCLAIMED = 5  /* nothing points here                       */
+    ADE_REGION_UNCLAIMED = 5, /* nothing points here                       */
+    ADE_REGION_PARTITION_TABLE = 6 /* a hard disk's RDSK block and partitions */
 } AdeRegion;
 
 /* A run of consecutive blocks that are all the same thing. Owner borrows from
@@ -413,6 +414,10 @@ typedef enum {
  * what the header claims, which for a partial recovery is more than comes
  * back. Empty or zero past the end. */
 AdeBytes    ade_carve_name(const AdeCarve *carve, size_t index);
+/* On a partitioned hard disk, the partition it was found in (DH0), whose
+ * start `block` counts from; empty otherwise. Every partition is carved, each
+ * through its own numbering. */
+AdeBytes    ade_carve_partition(const AdeCarve *carve, size_t index);
 uint32_t    ade_carve_block(const AdeCarve *carve, size_t index);
 uint32_t    ade_carve_size(const AdeCarve *carve, size_t index);
 uint32_t    ade_carve_confirmed(const AdeCarve *carve, size_t index); /* bytes */

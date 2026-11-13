@@ -10,16 +10,6 @@ Severity vocabulary: low | medium | high.
 
 ## Open
 
-### BUG-027 On a partitioned disk, `carve` and Recover lost files call every live file lost, and `find` and `layout` see no volume
-**Severity:** high
-**Status:** open
-**Found:** 2026-11-13, auditing Phase 6's commands against Amiga Forever's `workbench-135.hdf`, a sound RDB disk with one partition: `ade carve` reports **367 orphaned headers** — `AmigaBASIC`, `c/Dir` and every other file `ade ls` lists — and `carve --all` would write all of them out as recovered.
-**Where:** [src/api/src/carve.rs](../src/api/src/carve.rs) and [src/api/src/layout.rs](../src/api/src/layout.rs), which work over "the volume" of an image; `ade_carve_open`, which takes no partition; the window's Disk ▸ Recover lost files, which calls it; and `ade find`, whose region attribution comes from the layout.
-
-**What is wrong.** A partitioned device has no volume of its own — its volumes are in its partitions (CLAUDE.md: "a device has no volume of its own"). These analyses look for the image's volume, find none, and treat every block as unclaimed: so every live file header is "orphaned", every search hit is "unclaimed", and `ade layout` names the RDB and nothing else. On a floppy or an unpartitioned hardfile, where the image *is* the volume, none of this happens, which is why nothing caught it: the corpus has one RDB disk, and only `check`, `ls`, `extract` and `disasm` had been taught partitions.
-
-**Correct behaviour.** Each works on a partition the way it works on a floppy: carving finds only what that partition's tree does not reach, a search hit is attributed to the file in that partition that holds it, and the layout covers the RDB blocks and each partition's regions. Until then, run on a device without a partition chosen, each should say it needs one rather than report a disk with nothing on it.
-
 ### BUG-028 `--partition` is accepted and ignored by `find`, `scan`, `layout`, `specs` and `carve` — even a partition that does not exist
 **Severity:** medium
 **Status:** open
@@ -32,6 +22,23 @@ Severity vocabulary: low | medium | high.
 
 
 ## Fixed
+
+### BUG-027 On a partitioned disk, `carve` and Recover lost files call every live file lost, and `find` and `layout` see no volume
+**Severity:** high
+**Status:** fixed
+**Found:** 2026-11-13, auditing Phase 6's commands against Amiga Forever's `workbench-135.hdf`, a sound RDB disk with one partition: `ade carve` reports **367 orphaned headers** — `AmigaBASIC`, `c/Dir` and every other file `ade ls` lists — and `carve --all` would write all of them out as recovered. **Fixed** 2026-11-13.
+**Where:** [src/api/src/carve.rs](../src/api/src/carve.rs) and [src/api/src/layout.rs](../src/api/src/layout.rs), which work over "the volume" of an image; `ade_carve_open`, which takes no partition; the window's Disk ▸ Recover lost files, which calls it; and `ade find`, whose region attribution comes from the layout.
+
+**What is wrong.** A partitioned device has no volume of its own — its volumes are in its partitions (CLAUDE.md: "a device has no volume of its own"). These analyses look for the image's volume, find none, and treat every block as unclaimed: so every live file header is "orphaned", every search hit is "unclaimed", and `ade layout` names the RDB and nothing else. On a floppy or an unpartitioned hardfile, where the image *is* the volume, none of this happens, which is why nothing caught it: the corpus has one RDB disk, and only `check`, `ls`, `extract` and `disasm` had been taught partitions.
+
+**Correct behaviour.** Each works on a partition the way it works on a floppy: carving finds only what that partition's tree does not reach, a search hit is attributed to the file in that partition that holds it, and the layout covers the RDB blocks and each partition's regions. Until then, run on a device without a partition chosen, each should say it needs one rather than report a disk with nothing on it.
+
+**The fix.** `Image::areas` lists every place on an image that can hold a volume — the image itself, or each partition of a device through its window — and the analyses go through it. The layout maps each partition's volume at its place on the device, names owners with their partition and marks the RDB's own blocks as a new region, `partition table` (code 6, so the six before it keep their numbers); `find`'s attribution comes from that map. `carve` reads each partition through its own numbering and records the partition, which the text, the JSON (schema 1.20 → 1.21), `ade_carve_partition` and the window show, and a recovered file's name carries. `image_damage` and `image_block_counts` examine every partition and place its damage at its offset — the Map had also been drawing the first partition's damage at block numbers counted from the device's start. On `workbench-135.hdf`: 367 orphaned headers become 2, both genuinely deleted editor backups.
+
+**How it is tested.** `partition_reads.rs`, on a two-partition device the fixture generator builds: a sound device carves nothing; the layout names `DH0:startup`, `DH0:Tools` and `DH1:data.bin`, both rootblocks at their own midpoints and the partition table; a search hit is the file it is in; a file lost from `DH1` is carved from `DH1`, self-evident, with its bytes; and damage inside `DH1` lands inside `DH1` on the device. Treating every image as one volume again fails four of the five; dropping the partition offset from the damage fails the fifth. In the window, `aPartitionedDisksMapShowsItsPartitions` requires the Map's legend to name files, rootblocks, the bitmap and the partition table.
+
+**Not here:** BUG-028 — these commands still accept `--partition` and ignore it — is its own entry; they now cover every partition instead of the device's absent volume, which is right when no partition is named.
+
 
 ### BUG-026 A path through a hard link to a directory finds nothing: `ade ls disk dirlink` lists an empty directory
 **Severity:** medium

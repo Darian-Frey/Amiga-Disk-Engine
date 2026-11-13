@@ -80,6 +80,10 @@ pub struct Carved {
     pub evidence: Evidence,
     /// The data blocks that agreed, in order.
     pub blocks: Vec<u32>,
+    /// The partition it was found in (`DH0`), on a partitioned hard disk —
+    /// whose block numbers [`Self::block`] and [`Self::blocks`] count from.
+    /// `None` on a floppy or an unpartitioned hardfile.
+    pub partition: Option<String>,
 }
 
 /// Every orphaned header on the volume, in block order.
@@ -90,20 +94,27 @@ pub struct Carved {
 /// not carving.
 #[must_use]
 pub fn carve(image: &crate::Image) -> Vec<Carved> {
-    let map = crate::layout::Layout::of(image);
-    let block_size = u64::from(image.geometry().block_size());
-
+    // What the directory trees reach, at its place on the image; anything
+    // absent from it is unclaimed. On a partitioned device each partition is
+    // carved through its own window and numbering, since a header there names
+    // blocks counted from the partition's start (BUG-027): read as one disk,
+    // every live file looked lost.
+    let (claimed, _) = crate::layout::attribute(image);
     let mut out = Vec::new();
-    for span in &map.spans {
-        if span.region != crate::layout::Region::Unclaimed {
-            continue;
-        }
-        for offset in 0..span.blocks {
-            let block = span.block.saturating_add(offset);
+    for area in image.areas() {
+        let source = area.source.get();
+        let total = source.geometry().total_blocks();
+        let reserved = u64::from(source.geometry().reserved());
+        for block in reserved..total {
+            if claimed.contains_key(&area.first_block.saturating_add(block)) {
+                continue;
+            }
             let Ok(number) = u32::try_from(block) else {
                 continue;
             };
-            let raw = image.read_range(block.saturating_mul(block_size), block_size);
+            let Some(raw) = read(source, number) else {
+                continue;
+            };
             let Ok(entry) = Entry::parse(&raw, number) else {
                 continue;
             };
@@ -113,10 +124,18 @@ pub fn carve(image: &crate::Image) -> Vec<Carved> {
             if !matches!(entry.kind, EntryKind::File | EntryKind::Directory) {
                 continue;
             }
-            out.push(examine(image, &entry));
+            out.push(examine(source, &entry, area.partition.clone()));
         }
     }
     out
+}
+
+/// One block of `source`, whole, or `None` past its end.
+fn read(source: &dyn ade_block::BlockSource, block: u32) -> Option<Vec<u8>> {
+    let mut raw = vec![0u8; source.geometry().block_size() as usize];
+    ade_block::read_at(source, ade_block::BlockIndex(u64::from(block)), &mut raw)
+        .ok()
+        .map(|()| raw)
 }
 
 /// The data blocks a file header names, following its extension chain.
@@ -129,24 +148,20 @@ pub fn carve(image: &crate::Image) -> Vec<Carved> {
 /// Carries a visited set and a cap, for the same reason every other chain walk
 /// in ADE does: a crafted or corrupt header can point at itself (AV-001), and
 /// this one is *expected* to be reading damaged structures.
-fn data_blocks(image: &crate::Image, entry: &Entry) -> Vec<u32> {
+fn data_blocks(source: &dyn ade_block::BlockSource, entry: &Entry) -> Vec<u32> {
     /// More than a double-density floppy holds, so a chain that does not end
     /// stops here rather than running until something else does.
     const CAP: usize = 4096;
 
-    let block_size = u64::from(image.geometry().block_size());
     let mut out = Vec::new();
-    let Ok(size) = usize::try_from(block_size) else {
-        return out;
-    };
+    let size = source.geometry().block_size() as usize;
     let mut seen = std::collections::BTreeSet::new();
     let mut header = entry.block;
 
     while seen.insert(header) && out.len() < CAP {
-        let raw = image.read_range(u64::from(header).saturating_mul(block_size), block_size);
-        if raw.len() != size {
+        let Some(raw) = read(source, header) else {
             break;
-        }
+        };
         // The block table runs downward from BSIZE-204, `high_seq` entries of
         // it in use.
         let Ok(high) = ade_endian::u32_at(&raw, 8) else {
@@ -181,13 +196,17 @@ fn data_blocks(image: &crate::Image, entry: &Entry) -> Vec<u32> {
 }
 
 /// Work out how far the disk supports one orphaned header.
-fn examine(image: &crate::Image, entry: &Entry) -> Carved {
+fn examine(
+    source: &dyn ade_block::BlockSource,
+    entry: &Entry,
+    partition: Option<String>,
+) -> Carved {
     let mut good = Vec::new();
     let mut bad = 0usize;
 
     if entry.kind == EntryKind::File {
-        for block in data_blocks(image, entry) {
-            if owns(image, block, entry.block) {
+        for block in data_blocks(source, entry) {
+            if owns(source, block, entry.block) {
                 good.push(block);
             } else {
                 bad = bad.saturating_add(1);
@@ -211,6 +230,7 @@ fn examine(image: &crate::Image, entry: &Entry) -> Carved {
         kind: entry.kind,
         evidence,
         blocks: good,
+        partition,
     }
 }
 
@@ -220,15 +240,13 @@ fn examine(image: &crate::Image, entry: &Entry) -> Carved {
 /// and its checksum holds. An FFS data block says none of this — it is raw
 /// payload — so this is `false` there, which is why an FFS carve can never be
 /// better than header-only.
-fn owns(image: &crate::Image, block: u32, header: u32) -> bool {
+fn owns(source: &dyn ade_block::BlockSource, block: u32, header: u32) -> bool {
     /// `T_DATA`, the OFS data-block type.
     const T_DATA: u32 = 8;
 
-    let size = u64::from(image.geometry().block_size());
-    let raw = image.read_range(u64::from(block).saturating_mul(size), size);
-    if raw.len() as u64 != size {
+    let Some(raw) = read(source, block) else {
         return false;
-    }
+    };
     let (Ok(kind), Ok(owner)) = (ade_endian::u32_at(&raw, 0), ade_endian::u32_at(&raw, 4)) else {
         return false;
     };
@@ -258,6 +276,8 @@ fn one(c: &Carved) -> Value {
         ("size", Value::Num(u64::from(c.size))),
         ("kind", Value::str(kind_name(c.kind))),
         ("evidence", Value::str(c.evidence.name())),
+        // Which partition the block numbers count from, on a hard disk.
+        ("partition", Value::opt(c.partition.as_ref(), Value::str)),
         // A count, not the list: a large carve has thousands of blocks and the
         // list is the same information the block chain already holds.
         ("data_blocks", Value::Num(c.blocks.len() as u64)),
@@ -286,11 +306,18 @@ pub const fn kind_name(kind: EntryKind) -> &'static str {
 /// about it.
 #[must_use]
 pub fn contents(image: &crate::Image, carved: &Carved) -> Vec<u8> {
-    let block_size = u64::from(image.geometry().block_size());
     let mut bytes = Vec::with_capacity(carved.blocks.len().saturating_mul(488));
+    // Read where it was found: the partition it names, or the image.
+    let areas = image.areas();
+    let Some(area) = areas.iter().find(|a| a.partition == carved.partition) else {
+        return bytes;
+    };
+    let source = area.source.get();
 
     for block in &carved.blocks {
-        let raw = image.read_range(u64::from(*block).saturating_mul(block_size), block_size);
+        let Some(raw) = read(source, *block) else {
+            continue;
+        };
         // An OFS data block is a 24-byte header then payload, and its own
         // header says how much of the payload is real.
         let Ok(used) = ade_endian::u32_at(&raw, 12) else {
@@ -322,7 +349,11 @@ pub fn contents(image: &crate::Image, carved: &Carved) -> Vec<u8> {
 #[must_use]
 pub fn recovered_name(carved: &Carved) -> String {
     format!(
-        "{:05}-{}{}",
+        "{}{:05}-{}{}",
+        carved
+            .partition
+            .as_ref()
+            .map_or_else(String::new, |p| format!("{}-", crate::unpack::host_name(p))),
         carved.block,
         crate::unpack::host_name(&carved.name),
         if matches!(carved.evidence, Evidence::Partial { .. }) {

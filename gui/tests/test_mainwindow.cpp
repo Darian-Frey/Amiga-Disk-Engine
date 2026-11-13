@@ -179,6 +179,7 @@ private slots:
     void selectingAFilePicksOutItsBlocksOnTheMap();
     void aFileSelectedFirstStillHasItsDisksMap();
     void theMapShowsDamageAndCountsBesideIt();
+    void aPartitionedDisksMapShowsItsPartitions();
     void eachRowSaysWhatItIs();
     void newDiskIsOfferedAndItsTypesComeFromTheEngine();
     void aFileThatIsNotADiskImageIsDeclinedRatherThanShown();
@@ -3367,4 +3368,19 @@ void TestMainWindow::aHardLinkIsMadeAndOutlivesItsOriginal() {
     QVERIFY2(childNamed(root, QStringLiteral("alias")), "the link took the file's place");
     QVERIFY(window.undoEdit());
     QVERIFY(childNamed(tree->topLevelItem(0), QStringLiteral("note")));
+}
+
+void TestMainWindow::aPartitionedDisksMapShowsItsPartitions() {
+    // BUG-027: a device has no volume of its own, and its map once named the
+    // partition table and called everything else unclaimed. Its legend must
+    // name what is in its partitions — files, directories, rootblocks — and
+    // the partition table itself.
+    QScopedPointer<MainWindow> window(diskWindow(m_device));
+    auto *legend = window->findChild<QLabel *>(QStringLiteral("mapLegend"));
+    QVERIFY(legend);
+    const QString text = legend->text();
+    for (const char *region : {"file", "rootblock", "bitmap", "partition table"}) {
+        QVERIFY2(text.contains(QString::fromLatin1(region)), qPrintable(text));
+    }
+    QVERIFY2(text.contains(QStringLiteral("blocks used")), qPrintable(text));
 }
