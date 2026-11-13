@@ -750,7 +750,8 @@ pub fn inspect_bytes(bytes: Vec<u8>) -> Inspection {
 /// bytes given; for a compressed or raw-track container, the unwrapped or
 /// reconstructed ones. Lets a caller that needs the bytes afterwards lend them
 /// rather than copy them (D-024 part 7).
-pub(crate) fn inspect_returning(bytes: Vec<u8>) -> (Inspection, Vec<u8>) {
+#[must_use]
+pub fn inspect_returning(bytes: Vec<u8>) -> (Inspection, Vec<u8>) {
     // ADZ and HDZ are gzip-wrapped ADF and HDF; everything below this line
     // sees the image itself, and the wrapper is reported separately.
     let (bytes, compression) = unwrap_container(bytes);

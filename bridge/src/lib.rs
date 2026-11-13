@@ -2422,8 +2422,14 @@ fn refresh(image: &mut AdeImage) {
     let Some(session) = image.session.as_ref() else {
         return;
     };
+    // One copy of the edited disk, lent to the health report and the
+    // inspection in turn and then kept as the handle's image (IMP-025). The
+    // reading it replaces goes first: held while the new one was built, it
+    // was a copy of the disk kept for nothing.
+    image.image = None;
     let bytes = session.bytes().to_vec();
-    let report = examine(bytes.clone());
+    let length = bytes.len();
+    let (report, bytes) = ade_core::health::examine_returning(bytes);
     image.findings = report.findings.len();
     // An edit can change what a disk is: a file put on a blank disk, the last
     // one deleted.
@@ -2432,7 +2438,16 @@ fn refresh(image: &mut AdeImage) {
         image.kind_summary = CString::new(report.kind.summary()).unwrap_or_default();
         image.kind_explanation = CString::new(report.kind.explanation()).unwrap_or_default();
     }
-    image.inspection = inspect_bytes(bytes.clone());
+    let (inspection, bytes) = ade_core::inspect_returning(bytes);
+    image.inspection = inspection;
+    // A session holds a plain image, which both hand back as it was lent; a
+    // length that differs means one kept it, and the session's own is read
+    // again rather than the handle holding something else.
+    let bytes = if bytes.len() == length {
+        bytes
+    } else {
+        session.bytes().to_vec()
+    };
     image.container = CString::new(image.inspection.detection.kind.to_string()).unwrap_or_default();
     image.absent = image
         .inspection

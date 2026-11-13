@@ -11,19 +11,6 @@ Effort vocabulary: trivial | small | medium | large.
 
 ## Suggested
 
-### IMP-025 After every edit, the ABI handle copies the whole image three times
-**Status:** suggested
-**Effort:** small
-**Found:** 2026-11-13, reading `refresh` while making the ABI's edits take a partition.
-
-**Where:** [bridge/src/lib.rs](../bridge/src/lib.rs) `refresh`.
-
-**What it does.** To re-read the edited disk, `refresh` copies the session's bytes (`to_vec`), then clones that copy for the health report and again for the inspection, and keeps the first as the handle's `Image`. The session itself peaks at one copy since IMP-023; the window, through this, holds four for a moment after each edit — 4 GB at its 1 GB limit.
-
-**What would be better.** The `_returning` forms the session uses (`examine_returning`, `inspect_returning`) lend the bytes and hand them back, so one copy for the handle's `Image` would do; or the handle could read through the session instead of keeping its own.
-
-**Trade-offs.** The handle's `Image` is borrowed by volumes the window holds between calls (IMP-006), so it cannot simply borrow the session's bytes without a lifetime the ABI cannot express.
-
 ### IMP-026 The partition-table check at open does not hold partitions to the cylinders the RDB reserves for them
 **Status:** suggested
 **Effort:** small
@@ -38,6 +25,21 @@ Effort vocabulary: trivial | small | medium | large.
 **Trade-offs.** None worth the name; edits cannot write outside a partition in any case, so this guards against opening a table that is wrong, not against writing one. It matters more when ADE edits tables.
 
 ## Applied
+
+### IMP-025 After every edit, the ABI handle copies the whole image three times
+**Status:** applied
+**Effort:** small
+**Found:** 2026-11-13, reading `refresh` while making the ABI's edits take a partition.
+
+**Where:** [bridge/src/lib.rs](../bridge/src/lib.rs) `refresh`.
+
+**What it does.** To re-read the edited disk, `refresh` copies the session's bytes (`to_vec`), then clones that copy for the health report and again for the inspection, and keeps the first as the handle's `Image`. The session itself peaks at one copy since IMP-023; the window, through this, holds four for a moment after each edit — 4 GB at its 1 GB limit.
+
+**What would be better.** The `_returning` forms the session uses (`examine_returning`, `inspect_returning`) lend the bytes and hand them back, so one copy for the handle's `Image` would do; or the handle could read through the session instead of keeping its own.
+
+**Trade-offs.** The handle's `Image` is borrowed by volumes the window holds between calls (IMP-006), so it cannot simply borrow the session's bytes without a lifetime the ABI cannot express.
+
+**Applied 2026-11-13, the first way.** `refresh` makes one copy of the session's bytes and lends it to the health report and then the inspection — `health::examine_returning` and `inspect_returning`, now public — each handing it back, and keeps it as the handle's `Image`. It also lets go of the handle's previous `Image` before building the new one, which had been a further copy held for nothing. Should either hand back bytes of a different length, which a session's plain image never gives them reason to, the session's own are copied again rather than the handle keeping something else. **Measured through the C ABI, one `ade_edit_mkdir` on a 300 MB hardfile: 925 MB peak before, 618 MB after**, steady over two runs. 618 MB is the session's copy and the handle's own, both already held when the edit begins — so an edit no longer raises the peak. Making those two one is the trade-off above, and stays open.
 
 ### IMP-024 On a partitioned disk, the window asks about free blocks holding data for the partition last edited, not the one about to be
 **Status:** applied

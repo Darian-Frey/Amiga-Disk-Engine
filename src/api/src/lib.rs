@@ -37,7 +37,7 @@ pub use health::{
 pub use inspect::{
     Compression, Description, Fault, Image, Inspection, InspectionError, MAX_DECOMPRESSED,
     MAX_DESCRIPTION, PartitionInfo, RdbInfo, TrackTable, VolumeInfo, entry_to_json,
-    entry_to_json_hashed, inspect_bytes, inspect_bytes_named, inspect_path,
+    entry_to_json_hashed, inspect_bytes, inspect_bytes_named, inspect_path, inspect_returning,
 };
 
 /// The layer crates, re-exported so that front-ends depend on this crate alone.
