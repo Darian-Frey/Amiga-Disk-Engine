@@ -169,6 +169,12 @@ pub struct RdbInfo {
     pub sectors: u32,
     /// Highest block used by the reserved area.
     pub high_rdsk_block: u32,
+    /// The first cylinder partitions may use (`LoCylinder`).
+    pub lo_cylinder: u32,
+    /// The last cylinder partitions may use (`HiCylinder`).
+    pub hi_cylinder: u32,
+    /// Blocks per cylinder, as the RDB states it (`CylBlocks`).
+    pub cylinder_blocks: u32,
     /// Drive vendor, as stored.
     pub vendor: String,
     /// Drive product, as stored.
@@ -898,6 +904,9 @@ fn read_partition_table(image: &RawImage) -> (Option<RdbInfo>, Vec<PartitionInfo
         heads: rdb.heads,
         sectors: rdb.sectors,
         high_rdsk_block: rdb.high_rdsk_block,
+        lo_cylinder: rdb.lo_cylinder,
+        hi_cylinder: rdb.hi_cylinder,
+        cylinder_blocks: rdb.cylinder_blocks,
         vendor: latin1(&rdb.vendor).trim().to_owned(),
         product: latin1(&rdb.product).trim().to_owned(),
         revision: latin1(&rdb.revision).trim().to_owned(),

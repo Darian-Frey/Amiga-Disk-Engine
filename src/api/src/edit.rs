@@ -1521,7 +1521,24 @@ fn target_name(areas: &[Area], index: usize) -> String {
 fn table_faults(inspection: &crate::inspect::Inspection, image_bytes: u64) -> Vec<String> {
     let mut faults: Vec<String> = inspection.partition_faults.clone();
     let blocks = image_bytes / 512;
+    // Where the RDB says partitions may lie, in blocks: from its first
+    // partition cylinder to the end of its last (IMP-026).
+    let mut allowed: Option<(u64, u64)> = None;
     let reserved_end = if let Some(rdb) = &inspection.rdb {
+        let per = u64::from(rdb.cylinder_blocks);
+        if per == 0 || rdb.hi_cylinder < rdb.lo_cylinder {
+            faults.push(format!(
+                "the RDSK block's partition cylinders ({} to {}, {per} blocks each) are no range",
+                rdb.lo_cylinder, rdb.hi_cylinder
+            ));
+        } else {
+            allowed = Some((
+                u64::from(rdb.lo_cylinder).saturating_mul(per),
+                u64::from(rdb.hi_cylinder)
+                    .saturating_add(1)
+                    .saturating_mul(per),
+            ));
+        }
         if !rdb.checksum_valid {
             faults.push("the RDSK block's checksum does not verify".to_owned());
         }
@@ -1550,6 +1567,18 @@ fn table_faults(inspection: &crate::inspect::Inspection, image_bytes: u64) -> Ve
                 "{} ends at block {end}, past the disk's {blocks}",
                 p.name
             ));
+        }
+        if let Some((low, high)) = allowed {
+            if p.first_block < low || end > high {
+                faults.push(format!(
+                    "{} lies at blocks {} to {}, outside the cylinders the RDSK block \
+                     reserves for partitions (blocks {low} to {})",
+                    p.name,
+                    p.first_block,
+                    end.saturating_sub(1),
+                    high.saturating_sub(1)
+                ));
+            }
         }
         if p.first_block <= reserved_end {
             faults.push(format!(

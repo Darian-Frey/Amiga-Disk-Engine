@@ -11,8 +11,12 @@ Effort vocabulary: trivial | small | medium | large.
 
 ## Suggested
 
+_None._
+
+## Applied
+
 ### IMP-026 The partition-table check at open does not hold partitions to the cylinders the RDB reserves for them
-**Status:** suggested
+**Status:** applied
 **Effort:** small
 **Found:** 2026-11-13, implementing D-024 part 3's table checks.
 
@@ -24,7 +28,7 @@ Effort vocabulary: trivial | small | medium | large.
 
 **Trade-offs.** None worth the name; edits cannot write outside a partition in any case, so this guards against opening a table that is wrong, not against writing one. It matters more when ADE edits tables.
 
-## Applied
+**Applied 2026-11-13, as proposed.** The RDSK reader takes `LoCylinder` and `HiCylinder` (offsets 0x88 and 0x8C), carried in `RigidDiskBlock` and `RdbInfo` with `CylBlocks`, and the table check refuses a partition lying outside those cylinders — measured in blocks, from the RDB's own `CylBlocks`, since a partition's cylinders are counted in its own geometry, which may differ — and a range that is none (`HiCylinder` below `LoCylinder`, or no blocks per cylinder). The JSON is unchanged. The one real partitioned disk on hand, Amiga Forever's `workbench-135.hdf` (cylinders 2–5), passes and opens for editing, and so does every generated device; a `HiCylinder` short of a partition's end, a `LoCylinder` past its start and a range that is none are each refused, in `partition_edits.rs`, and removing the check fails it.
 
 ### IMP-025 After every edit, the ABI handle copies the whole image three times
 **Status:** applied

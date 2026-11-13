@@ -233,3 +233,74 @@ fn a_part_block_whose_checksum_fails_is_refused() {
     put_u32(&mut bytes, at + 8, sum).unwrap();
     assert!(Session::from_bytes(bytes).is_ok());
 }
+
+/// Set a long in the RDSK block at block 0 and make its checksum good again,
+/// so the only thing wrong with the disk is the value set.
+fn set_rdsk(bytes: &mut [u8], offset: usize, value: u32) {
+    put_u32(bytes, offset, value).unwrap();
+    put_u32(bytes, 8, 0).unwrap();
+    // The RDSK checksum covers its first 64 longs.
+    let sum = normal_at(&bytes[..256], 8).unwrap();
+    put_u32(bytes, 8, sum).unwrap();
+}
+
+#[test]
+fn a_partition_outside_the_cylinders_the_rdb_reserves_is_refused() {
+    // IMP-026, D-024 part 3: partitions lie between the RDSK block's
+    // LoCylinder and HiCylinder. The device is 64 cylinders, DH0 on 2–30 and
+    // DH1 on 31–63; the fixture reserves 2–63.
+    const LO_CYLINDER: usize = 0x88;
+    const HI_CYLINDER: usize = 0x8c;
+    let original = device();
+    let rdb = ade_core::inspect_bytes(original.clone()).rdb.unwrap();
+    assert_eq!((rdb.lo_cylinder, rdb.hi_cylinder), (2, 63));
+    assert!(Session::from_bytes(original.clone()).is_ok());
+
+    // HiCylinder short of DH1's end.
+    let mut bytes = original.clone();
+    set_rdsk(&mut bytes, HI_CYLINDER, 50);
+    let refused = Session::from_bytes(bytes).err().unwrap();
+    let why = refused.to_string();
+    assert!(
+        why.contains("DH1") && why.contains("outside the cylinders") && !why.contains("DH0 "),
+        "{why}"
+    );
+
+    // LoCylinder past DH0's start.
+    let mut bytes = original.clone();
+    set_rdsk(&mut bytes, LO_CYLINDER, 3);
+    let why = Session::from_bytes(bytes).err().unwrap().to_string();
+    assert!(
+        why.contains("DH0") && why.contains("outside the cylinders"),
+        "{why}"
+    );
+
+    // A range that is no range.
+    let mut bytes = original.clone();
+    set_rdsk(&mut bytes, HI_CYLINDER, 1);
+    let why = Session::from_bytes(bytes).err().unwrap().to_string();
+    assert!(why.contains("no range"), "{why}");
+
+    // Exactly the partitions' own cylinders is enough.
+    let mut bytes = original;
+    set_rdsk(&mut bytes, LO_CYLINDER, 2);
+    set_rdsk(&mut bytes, HI_CYLINDER, 63);
+    assert!(Session::from_bytes(bytes).is_ok());
+}
+
+#[test]
+fn amiga_forevers_partitioned_workbench_disk_opens_for_editing() {
+    // The one real partitioned disk on hand: its table must pass every check
+    // D-024 part 3 makes, or the checks are stricter than real disks.
+    let dir = std::env::var_os("ADE_HARDFILES").map_or_else(
+        || std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../disks/hardfiles"),
+        std::path::PathBuf::from,
+    );
+    let path = dir.join("workbench-135.hdf");
+    if !path.is_file() {
+        eprintln!("skipping: no workbench-135.hdf (set ADE_HARDFILES)");
+        return;
+    }
+    let s = Session::open(&path).unwrap();
+    assert_eq!(s.partitions(), vec![("DH0".to_owned(), true)]);
+}

@@ -67,6 +67,11 @@ pub struct RigidDiskBlock {
     pub sectors: u32,
     /// Heads.
     pub heads: u32,
+    /// The first cylinder partitions may use: those before it hold the RDB
+    /// and its lists.
+    pub lo_cylinder: u32,
+    /// The last cylinder partitions may use.
+    pub hi_cylinder: u32,
     /// Blocks per cylinder — should equal `heads × sectors`.
     pub cylinder_blocks: u32,
     /// Highest block used by the reserved area.
@@ -139,6 +144,8 @@ impl RigidDiskBlock {
             cylinders: at(0x40)?,
             sectors: at(0x44)?,
             heads: at(0x48)?,
+            lo_cylinder: at(0x88)?,
+            hi_cylinder: at(0x8c)?,
             cylinder_blocks: at(0x90)?,
             high_rdsk_block: at(0x98)?,
             vendor: text(0xa0, 8),
