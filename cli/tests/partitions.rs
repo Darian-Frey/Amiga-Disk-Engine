@@ -413,3 +413,10 @@ fn an_edit_goes_into_the_partition_named_and_nowhere_else() {
     assert_eq!(code, 0, "{report}");
     let _ = fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn only_create_takes_partition_more_than_once() {
+    let (code, _, err) = run_at("twice", &["ls", "@", "--partition=DH0", "--partition=DH1"]);
+    assert_eq!(code, 2, "{err}");
+    assert!(err.contains("only create takes several"), "{err}");
+}

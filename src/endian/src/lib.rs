@@ -137,6 +137,12 @@ macro_rules! writer {
 writer!(put_u16, u16, 2, "Write a big-endian `u16`.");
 writer!(put_u32, u32, 4, "Write a big-endian `u32`.");
 writer!(put_u64, u64, 8, "Write a big-endian `u64`.");
+writer!(
+    put_i32,
+    i32,
+    4,
+    "Write a big-endian `i32`: two's complement, as the 68000 stores it."
+);
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, reason = "tests may unwrap")]
@@ -164,6 +170,10 @@ mod tests {
     fn signed_values_keep_their_sign() {
         assert_eq!(i32_at(&[0xFF, 0xFF, 0xFF, 0xFF], 0).unwrap(), -1);
         assert_eq!(i16_at(&[0x80, 0x00], 0).unwrap(), i16::MIN);
+        let mut buf = [0u8; 4];
+        put_i32(&mut buf, 0, -128).unwrap();
+        assert_eq!(buf, [0xFF, 0xFF, 0xFF, 0x80]);
+        assert_eq!(i32_at(&buf, 0).unwrap(), -128);
     }
 
     #[test]

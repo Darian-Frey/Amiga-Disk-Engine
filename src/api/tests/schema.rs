@@ -614,6 +614,37 @@ fn create_emits_exactly_these_fields() {
 }
 
 #[test]
+fn a_partitioned_create_emits_exactly_these_fields() {
+    // Schema 1.21 → 1.22: `ade create` with `--partition`s (F-038).
+    let made = vec![ade_core::create::MadePartition {
+        name: "DH0".to_owned(),
+        type_name: "ffs-intl".to_owned(),
+        volume: "DH0".to_owned(),
+        first_block: 64,
+        blocks: 2048,
+        bootable: true,
+    }];
+    let json = ade_core::create::partitioned_json(std::path::Path::new("x.hdf"), 1_048_576, &made)
+        .versioned();
+    compare(
+        "create (partitioned)",
+        &paths(&json),
+        &[
+            "schema",
+            "written",
+            "bytes",
+            "partitions",
+            "partitions[].name",
+            "partitions[].type",
+            "partitions[].volume",
+            "partitions[].first_block",
+            "partitions[].blocks",
+            "partitions[].bootable",
+        ],
+    );
+}
+
+#[test]
 fn convert_emits_exactly_these_fields() {
     use ade_core::layers::container::Kind;
     let json = ade_core::convert::converted_json(

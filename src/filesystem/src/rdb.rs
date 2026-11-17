@@ -341,3 +341,189 @@ pub fn read_partitions(
     }
     (out, faults)
 }
+
+/// One partition of a table to write: where it lies, in the table's
+/// cylinders, and what the `PART` block says of it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewPartition {
+    /// Drive name — `DH0` and the like — as the bytes to store, at most 31.
+    pub name: Vec<u8>,
+    /// First cylinder, inclusive.
+    pub low_cylinder: u32,
+    /// Last cylinder, inclusive.
+    pub high_cylinder: u32,
+    /// The dostype the table claims; the partition's own bootblock should
+    /// agree (ADF FAQ §6.3).
+    pub dostype: u32,
+    /// Whether Kickstart may boot from it.
+    pub bootable: bool,
+    /// Its rank among bootable partitions.
+    pub boot_priority: i32,
+}
+
+/// A partition table to write: the device's shape, the cylinders kept for
+/// the table itself, and the partitions.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewTable {
+    /// Cylinders on the device.
+    pub cylinders: u32,
+    /// Heads.
+    pub heads: u32,
+    /// Sectors (blocks) per track.
+    pub sectors: u32,
+    /// The first cylinder partitions may use; those before it hold the RDB.
+    pub lo_cylinder: u32,
+    /// The partitions, in list order.
+    pub partitions: Vec<NewPartition>,
+    /// What the RDB calls the drive — vendor, product, revision — as stored
+    /// (at most 8, 16 and 4 bytes).
+    pub drive: (Vec<u8>, Vec<u8>, Vec<u8>),
+}
+
+/// The `RDSK` and `PART` blocks of `table`, by block number: the RDB at block
+/// 0 and each partition in the blocks after it, chained in order. Writes no
+/// filesystem into the table (D-024 part 4) — a partition relies on the FFS
+/// in Kickstart's ROM — and no bad-block list.
+///
+/// Every field a reader or AmigaDOS consults is set as HDToolBox sets it:
+/// 512-byte blocks, 30 buffers, `MaxTransfer` 0x1FE00 and `Mask` 0x7FFFFFFE,
+/// the safe values for any controller; unused list pointers -1.
+///
+/// Checks nothing about the plan — overlaps, names, sizes are the caller's
+/// to have refused — beyond what it needs to write at all.
+///
+/// # Errors
+/// A description, for a table whose blocks would not fit in the cylinders
+/// kept for it, or a name or drive string too long for its field.
+pub fn table_blocks(table: &NewTable) -> Result<Vec<(u32, [u8; 512])>, String> {
+    let cylinder_blocks = table.heads.saturating_mul(table.sectors);
+    let reserved = table.lo_cylinder.saturating_mul(cylinder_blocks);
+    let count = u32::try_from(table.partitions.len()).map_err(|e| e.to_string())?;
+    if count.saturating_add(1) > reserved {
+        return Err(format!(
+            "{count} partitions need {} blocks for the table, and {} cylinders keep {reserved}",
+            count.saturating_add(1),
+            table.lo_cylinder
+        ));
+    }
+    let (vendor, product, revision) = &table.drive;
+    if vendor.len() > 8 || product.len() > 16 || revision.len() > 4 {
+        return Err("the drive's vendor, product or revision is too long".to_owned());
+    }
+    let mut out = Vec::with_capacity(table.partitions.len().saturating_add(1));
+    out.push((0, rdsk_block(table, count, reserved)));
+    for (i, p) in table.partitions.iter().enumerate() {
+        let block = u32::try_from(i)
+            .map_err(|e| e.to_string())?
+            .saturating_add(1);
+        if p.name.is_empty() || p.name.len() > 31 {
+            return Err(format!(
+                "a drive name is 1 to 31 bytes, and {:?} is {}",
+                String::from_utf8_lossy(&p.name),
+                p.name.len()
+            ));
+        }
+        let next = if block == count {
+            END_OF_LIST
+        } else {
+            block.saturating_add(1)
+        };
+        out.push((block, part_block(table, p, next)));
+    }
+    Ok(out)
+}
+
+/// A long at a fixed offset of a block being built. The offsets are
+/// constants inside 512 bytes, so a write cannot fail.
+fn put(b: &mut [u8; 512], at: usize, value: u32) {
+    let _ = ade_endian::put_u32(b, at, value);
+}
+
+/// Bytes at a fixed offset; lengths are checked before, so a copy that would
+/// not fit cannot occur and is skipped rather than panicking.
+fn place(b: &mut [u8; 512], at: usize, bytes: &[u8]) {
+    if let Some(field) = b.get_mut(at..at.saturating_add(bytes.len())) {
+        field.copy_from_slice(bytes);
+    }
+}
+
+/// Set the checksum: `SummedLongs` is 64, so it covers the first 256 bytes.
+fn seal(b: &mut [u8; 512]) {
+    let sum = checksum::normal_at(b.get(..256).unwrap_or(&[]), 8).unwrap_or(0);
+    put(b, 8, sum);
+}
+
+/// The `RDSK` block: the device's shape, the cylinders kept for the table,
+/// and the head of the partition list at block 1.
+fn rdsk_block(table: &NewTable, count: u32, reserved: u32) -> [u8; 512] {
+    let mut b = [0u8; 512];
+    place(&mut b, 0, RDSK);
+    put(&mut b, 0x04, 64); // SummedLongs
+    put(&mut b, 0x0c, 7); // HostID
+    put(&mut b, 0x10, 512); // BlockBytes
+    // RDBFF_LAST | LASTLUN | LASTTID | DISKID: the only drive, its strings
+    // valid.
+    put(&mut b, 0x14, 0x17);
+    put(&mut b, 0x18, END_OF_LIST); // BadBlockList
+    put(&mut b, 0x1c, if count == 0 { END_OF_LIST } else { 1 }); // PartitionList
+    put(&mut b, 0x20, END_OF_LIST); // FileSysHeaderList: none (D-024 part 4)
+    put(&mut b, 0x24, END_OF_LIST); // DriveInit
+    for at in (0x28..0x40).step_by(4) {
+        put(&mut b, at, END_OF_LIST); // Reserved1, "set to -1"
+    }
+    put(&mut b, 0x40, table.cylinders);
+    put(&mut b, 0x44, table.sectors);
+    put(&mut b, 0x48, table.heads);
+    put(&mut b, 0x4c, 1); // Interleave
+    put(&mut b, 0x50, table.cylinders); // Park
+    put(&mut b, 0x60, table.cylinders); // WritePreComp
+    put(&mut b, 0x64, table.cylinders); // ReducedWrite
+    put(&mut b, 0x68, 3); // StepRate
+    put(&mut b, 0x80, 0); // RDBBlocksLo
+    put(&mut b, 0x84, reserved.saturating_sub(1)); // RDBBlocksHi
+    put(&mut b, 0x88, table.lo_cylinder);
+    put(&mut b, 0x8c, table.cylinders.saturating_sub(1)); // HiCylinder
+    put(&mut b, 0x90, table.heads.saturating_mul(table.sectors)); // CylBlocks
+    put(&mut b, 0x98, count); // HighRDSKBlock: the last PART
+    let (vendor, product, revision) = &table.drive;
+    place(&mut b, 0xa0, vendor);
+    place(&mut b, 0xa8, product);
+    place(&mut b, 0xb8, revision);
+    seal(&mut b);
+    b
+}
+
+/// A `PART` block: the drive name and the DOSEnvVec AmigaDOS mounts from.
+fn part_block(table: &NewTable, p: &NewPartition, next: u32) -> [u8; 512] {
+    let mut b = [0u8; 512];
+    place(&mut b, 0, PART);
+    put(&mut b, 0x04, 64); // SummedLongs
+    put(&mut b, 0x0c, 7); // HostID
+    put(&mut b, 0x10, next);
+    put(&mut b, 0x14, u32::from(p.bootable)); // Flags: PBFF_BOOTABLE
+    put(&mut b, 0x18, END_OF_LIST); // Reserved1
+    put(&mut b, 0x1c, END_OF_LIST);
+    // DriveName, a BSTR: its length, then its bytes.
+    place(&mut b, 0x24, &[u8::try_from(p.name.len()).unwrap_or(31)]);
+    place(&mut b, 0x25, &p.name);
+    // The DOSEnvVec, from 0x80.
+    put(&mut b, 0x80, 16); // TableSize: through DosType
+    put(&mut b, 0x84, 128); // SizeBlock, in LONGS: 512 bytes
+    put(&mut b, 0x88, 0); // SecOrg
+    put(&mut b, 0x8c, table.heads); // Surfaces
+    put(&mut b, 0x90, 1); // SectorPerBlock
+    put(&mut b, 0x94, table.sectors); // BlocksPerTrack
+    put(&mut b, 0x98, 2); // Reserved: the bootblock's two
+    put(&mut b, 0x9c, 0); // PreAlloc
+    put(&mut b, 0xa0, 0); // Interleave
+    put(&mut b, 0xa4, p.low_cylinder);
+    put(&mut b, 0xa8, p.high_cylinder);
+    put(&mut b, 0xac, 30); // NumBuffers
+    put(&mut b, 0xb0, 0); // BufMemType: any
+    put(&mut b, 0xb4, 0x0001_FE00); // MaxTransfer
+    put(&mut b, 0xb8, 0x7FFF_FFFE); // Mask
+    let _ = ade_endian::put_i32(&mut b, 0xbc, p.boot_priority);
+    put(&mut b, 0xc0, p.dostype);
+    seal(&mut b);
+    b
+}

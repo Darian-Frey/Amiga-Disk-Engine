@@ -880,6 +880,14 @@ This is a divergence in *strictness*, not in reading — ADFlib demands a driver
 
 A second, narrower divergence: on a partition whose bitmap spans more than one block, ADFlib reports a fill percentage that direct byte inspection contradicts (94% for a partition with five blocks in use). Listing and extraction are unaffected, so this appears to be a display artefact in ADFlib rather than a disagreement about the disk. Recorded because it will otherwise be rediscovered as a suspected ADE bug.
 
+### What `ade create` writes (F-038, 2026-11-17)
+
+`ade create --size=N --partition=NAME:SIZE[:TYPE[:VOLUME]]…` makes a partitioned disk ADE's own way, every choice here checked by AmigaDOS in FS-UAE mounting, writing and reading both an FFS and an OFS partition (`amigados.rs`):
+
+- **Shape:** one head, 32 sectors, so 64 cylinders a megabyte and a partition's size in megabytes is whole cylinders — the shape of ADE's unpartitioned hardfiles. Up to 4 GB; past that an image needs the 64-bit device commands C-002 has not settled.
+- **The table:** `RDSK` at block 0, a `PART` for each partition in blocks 1, 2, … chained in order, in two cylinders kept for it (`LoCylinder` 2, `RDB_BlockHi` 63, `HiCylinder` the last), as HDToolBox keeps two; room for 63 partitions. Flags `0x17` — the only drive, its vendor strings valid (`ADE`, `HARDFILE`, `1.0`). **No `FSHD`/`LSEG`** (D-024 part 4): each partition names its dostype and Kickstart 2.0 and later mount it with the FFS in ROM. ADFlib refuses such a disk (above); AmigaDOS does not.
+- **Each partition:** the DOSEnvVec HDToolBox writes — `SizeBlock` 128, two reserved blocks, 30 buffers, `MaxTransfer` 0x1FE00 and `Mask` 0x7FFFFFFE, safe for any controller — its cylinders in order from cylinder 2, and quick-formatted with its own filesystem (default `--type`) and volume name (default the drive name). The first is bootable at priority 0, as HDToolBox makes it; the rest are not. Space the partitions leave is left unpartitioned.
+
 ## Hardfiles (HDF)
 
 A hardfile is a raw volume dump with no RDB — bootblock, rootblock, bitmap, exactly like a floppy but larger. Its first three bytes are therefore `'DOS'`. Typical UAE geometry is `heads = 1, sectors = 32`, cylinders derived from size. [FAQ §7]

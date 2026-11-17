@@ -1102,3 +1102,74 @@ fn amigados_reads_and_writes_the_partitions_ade_edits_on_a_partitioned_disk() {
     }
     assert!(Session::from_bytes(after).is_ok());
 }
+
+#[test]
+fn amigados_mounts_and_fills_a_partitioned_disk_ade_creates() {
+    // F-038, D-024 part 2: a disk `ade create` partitions — an RDB with no
+    // filesystem in it (part 4), FFS and OFS partitions, the first bootable —
+    // mounts under AmigaDOS from the FFS in Kickstart's ROM; AmigaDOS writes
+    // into both partitions and reads back, and ADE reads what it wrote.
+    use ade_core::create::{self, PartitionSize, PartitionSpec};
+    let Some(setup) = setup() else { return };
+    let dir = scratch("rdbmade");
+    fs::create_dir_all(&dir).unwrap();
+    let disk = dir.join("made.hdf");
+    let spec = |name: &str, size, type_name: &str, volume: &str| PartitionSpec {
+        name: name.to_owned(),
+        size,
+        type_name: Some(type_name.to_owned()),
+        volume: Some(volume.to_owned()),
+    };
+    // DH1 and DH2, since the boot folder is DH0.
+    create::partitioned(
+        &disk,
+        24,
+        &[
+            spec("DH1", PartitionSize::Megabytes(10), "ffs-intl", "Fast"),
+            spec("DH2", PartitionSize::Rest, "ofs", "Old"),
+        ],
+        "ffs-intl",
+        WHEN,
+    )
+    .unwrap();
+
+    let theirs = pattern(80_000, 31);
+    let commands = "C:Copy SYS:in/theirs Fast:theirs.bin\n\
+                    C:MakeDir Old:Box\n\
+                    C:Copy SYS:in/theirs Old:Box/theirs.bin\n\
+                    C:Copy Fast:theirs.bin SYS:out/fast\n\
+                    C:Copy Old:Box/theirs.bin SYS:out/old\n\
+                    C:Info >SYS:out/info\n\
+                    C:Lock DH2: ON\n";
+    let outcome = run_with(
+        &setup,
+        "rdbmade",
+        (&[], &[&disk]),
+        &[("theirs", &theirs)],
+        commands,
+        Duration::from_secs(120),
+    )
+    .unwrap();
+    let info = fs::read_to_string(outcome.out.join("info")).unwrap_or_default();
+    assert!(
+        fs::read(outcome.out.join("fast")).ok().as_deref() == Some(theirs.as_slice()),
+        "AmigaDOS could not write and read back the FFS partition ADE made\n{info}"
+    );
+    assert!(
+        fs::read(outcome.out.join("old")).ok().as_deref() == Some(theirs.as_slice()),
+        "AmigaDOS could not write and read back the OFS partition ADE made\n{info}"
+    );
+    assert_eq!(outcome.resets, 1, "the Amiga booted once\n{info}");
+
+    let after = fs::read(&disk).unwrap();
+    assert!(read_in_partition(&after, "DH1", "theirs.bin") == Some(theirs.clone()));
+    assert!(read_in_partition(&after, "DH2", "Box/theirs.bin") == Some(theirs));
+    for name in ["DH1", "DH2"] {
+        assert!(
+            partition_faults(&after, name).is_empty(),
+            "{name}: {:?}",
+            partition_faults(&after, name)
+        );
+    }
+    assert!(Session::from_bytes(after).is_ok());
+}

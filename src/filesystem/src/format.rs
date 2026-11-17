@@ -169,6 +169,29 @@ pub fn blank_named(
     name: &[u8],
     created: Stamp,
 ) -> Result<Vec<u8>, FormatError> {
+    let mut image = vec![0u8; usize::try_from(geometry.total_bytes()).unwrap_or(0)];
+    blank_into(&mut image, geometry, dostype, name, created)?;
+    Ok(image)
+}
+
+/// [`blank_named`], formatting `image` in place rather than allocating one:
+/// a partition of a larger disk, without a second copy of it.
+///
+/// `image` must be exactly `geometry`'s size and **all zeros**: the blocks a
+/// quick format writes are written, and every other block is left as it is,
+/// which on a new disk is what a blank volume holds. Nothing is written when
+/// the format is refused.
+///
+/// # Errors
+/// As [`blank`], and [`FormatError::TooSmall`] for an `image` that is not
+/// `geometry`'s size.
+pub fn blank_into(
+    image: &mut [u8],
+    geometry: Geometry,
+    dostype: Dostype,
+    name: &[u8],
+    created: Stamp,
+) -> Result<(), FormatError> {
     check_name(name)?;
     let block_size = geometry.block_size() as usize;
     let total = geometry.total_blocks();
@@ -200,15 +223,18 @@ pub fn blank_named(
         return Err(FormatError::TooSmall { blocks: total });
     }
 
-    let mut image = vec![0u8; usize::try_from(geometry.total_bytes()).unwrap_or(0)];
-    write_bootblock(&mut image, dostype);
+    if u64::try_from(image.len()).ok() != Some(geometry.total_bytes()) {
+        return Err(FormatError::TooSmall { blocks: total });
+    }
+    let image = &mut *image;
+    write_bootblock(image, dostype);
     let in_rootblock = layout
         .pages
         .get(..layout.pages.len().min(BM_PAGES))
         .unwrap_or(&[]);
     let first_extension = layout.extensions.first().map(|(block, _)| *block);
     write_rootblock(
-        &mut image,
+        image,
         geometry,
         name,
         created,
@@ -217,14 +243,14 @@ pub fn blank_named(
         cache,
     );
     if let Some(cache) = cache {
-        write_empty_cache(&mut image, geometry, cache, root);
+        write_empty_cache(image, geometry, cache, root);
     }
-    write_extensions(&mut image, geometry, &layout.extensions);
+    write_extensions(image, geometry, &layout.extensions);
     let mut also_used: Vec<u64> = layout.extensions.iter().map(|(block, _)| *block).collect();
     also_used.extend(cache);
-    write_bitmap(&mut image, geometry, root, &layout.pages, &also_used);
+    write_bitmap(image, geometry, root, &layout.pages, &also_used);
     let _ = block_size;
-    Ok(image)
+    Ok(())
 }
 
 /// Bitmap pointers the rootblock itself can hold. Past this a `bm_ext` chain

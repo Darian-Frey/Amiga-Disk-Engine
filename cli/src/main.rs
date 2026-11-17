@@ -140,6 +140,9 @@ struct Args {
     format: Format,
     /// Which partition of a hard disk to act on, by name or index.
     partition: Option<String>,
+    /// Every `--partition` given, in order: `create` takes one per partition
+    /// to make; every other command takes at most one.
+    partitions: Vec<String>,
     /// Where `consolidate` should write its merged image, if anywhere.
     output: Option<PathBuf>,
     /// A directory of TOSEC datfiles, for identification (F-013).
@@ -211,6 +214,16 @@ fn view_flag(arg: &str) -> Option<ade_core::disasm::View> {
 ///
 /// # Errors
 /// A second, different view: `disasm` shows one at a time.
+/// `--partition=P`, which may be given more than once: `create` takes one
+/// per partition to make.
+fn take_partition(arg: &str, partitions: &mut Vec<String>) -> bool {
+    let Some(value) = arg.strip_prefix("--partition=") else {
+        return false;
+    };
+    partitions.push(value.to_owned());
+    true
+}
+
 fn take_view(arg: &str, view: &mut Option<ade_core::disasm::View>) -> Result<bool, String> {
     let Some(wanted) = view_flag(arg) else {
         return Ok(false);
@@ -252,13 +265,13 @@ fn parse_args(raw: Vec<String>) -> Result<Args, String> {
     let mut size: Option<u64> = None;
     let mut text = false;
     let mut ignore_case = false;
-    let mut partition: Option<String> = None;
+    let mut partitions: Vec<String> = Vec::new();
     let mut raw_output = false;
     let mut output: Option<PathBuf> = None;
     let mut datfiles: Option<PathBuf> = None;
     let mut view: Option<ade_core::disasm::View> = None;
     for arg in raw {
-        if take_view(&arg, &mut view)? {
+        if take_view(&arg, &mut view)? || take_partition(&arg, &mut partitions) {
             continue;
         }
         match arg.as_str() {
@@ -271,9 +284,7 @@ fn parse_args(raw: Vec<String>) -> Result<Args, String> {
             "--slack" => slack = true,
             "--free" => free = true,
             "--dd525" | "--525" => dd525 = true,
-            _ if arg.starts_with("--size=") => {
-                size = arg.trim_start_matches("--size=").parse().ok();
-            }
+            _ if arg.starts_with("--size=") => size = arg.replacen("--size=", "", 1).parse().ok(),
             "--text" => text = true,
             "--ignore-case" | "-i" => ignore_case = true,
             _ if text_option(
@@ -283,7 +294,6 @@ fn parse_args(raw: Vec<String>) -> Result<Args, String> {
                     ("--name=", &mut volume_name),
                     ("--type=", &mut volume_type),
                     ("--convert=", &mut convert_to),
-                    ("--partition=", &mut partition),
                 ],
             ) => {}
             "--format=json" | "--json" => format = Format::Json,
@@ -329,7 +339,8 @@ fn parse_args(raw: Vec<String>) -> Result<Args, String> {
         size,
         text,
         ignore_case,
-        partition,
+        partition: partitions.last().cloned(),
+        partitions,
         raw: raw_output,
         output,
         datfiles,
@@ -492,6 +503,16 @@ fn refuse_standard_output(args: &Args) -> Option<ExitCode> {
 /// did nothing from one that chose the volume its answer is about.
 fn refuse_partition(args: &Args) -> Option<ExitCode> {
     args.partition.as_ref()?;
+    if args.command == "create" {
+        return None;
+    }
+    if args.partitions.len() > 1 {
+        eprintln!(
+            "ade: {} takes one --partition; only create takes several, one per partition to make",
+            args.command
+        );
+        return Some(ExitCode::from(EXIT_USAGE));
+    }
     let why = match args.command.as_str() {
         "check" | "ls" | "extract" | "disasm" | "annotate" | "decode" | "find" | "scan"
         | "layout" | "carve" | "mkdir" | "put" | "rm" | "undelete" | "link" | "rename" | "mv"
@@ -519,6 +540,9 @@ fn usage() {
             .to_owned(),
         "    ade convert <in> <out>             convert between containers (F-016)".to_owned(),
         "    ade create <out.adf>               make a blank formatted disk (F-019)".to_owned(),
+        "    ade create <out.hdf> --size=N --partition=NAME:SIZE[:TYPE[:VOLUME]]...  a partitioned \
+         hard disk, one --partition each; SIZE in MB or rest (F-038)"
+            .to_owned(),
         "    ade mkdir <image> <path> --output=<new>     make a directory, saved as a new image"
             .to_owned(),
         "    ade put <image> <file> [path] --output=<new> add a file, saved as a new image"
@@ -580,6 +604,8 @@ fn options() -> Vec<String> {
             .to_owned(),
         "                    and carve, and every edit, which needs it on a partitioned disk;"
             .to_owned(),
+        "                    create takes one per partition to make (NAME:SIZE[:TYPE[:VOLUME]]);"
+            .to_owned(),
         "                    any other command refuses it".to_owned(),
         "    --raw           convert writes raw MFM tracks (an extended ADF)".to_owned(),
         "                    disasm decodes a file that is not a program, as a guess".to_owned(),
@@ -600,7 +626,8 @@ fn options() -> Vec<String> {
         "                    (default ffs-intl; DOS\\6 and DOS\\7 are deferred by D-013)"
             .to_owned(),
         "    --dd525         create: a 5.25\" DD disk, 40 cylinders (440 KB)".to_owned(),
-        "    --size=N        create: an unpartitioned hard disk of N megabytes".to_owned(),
+        "    --size=N        create: a hard disk of N megabytes, unpartitioned unless".to_owned(),
+        "                    --partition is given, once for each partition to make".to_owned(),
         "    --hd            create: a 1.76 MB high-density disk instead of 880 KB".to_owned(),
         "    --all           extract: take every file on the disk, not one path".to_owned(),
         "    --slack         wipe: zero the bytes after each file's last, in its last block"
@@ -2428,6 +2455,9 @@ fn create(args: &Args) -> ExitCode {
     };
 
     let type_name = kind.unwrap_or(create::DEFAULT_TYPE);
+    if !args.partitions.is_empty() {
+        return create_partitioned(args, output, shape, type_name);
+    }
     let volume = name.unwrap_or(ade_core::layers::filesystem::format::DEFAULT_NAME);
 
     // The clock, because "created" means when the disk was made and a tool
@@ -2464,6 +2494,78 @@ fn create(args: &Args) -> ExitCode {
             ],
         );
     }
+    ExitCode::from(EXIT_CLEAN)
+}
+
+/// `ade create` with `--partition`s: a partitioned hard disk (F-038).
+fn create_partitioned(
+    args: &Args,
+    output: &Path,
+    shape: ade_core::create::Shape,
+    type_name: &str,
+) -> ExitCode {
+    use ade_core::create::{self, PartitionSpec, Shape};
+    let Shape::Hard(megabytes) = shape else {
+        eprintln!(
+            "ade: a partitioned disk is a hard disk: give its size with --size=N (megabytes)"
+        );
+        return ExitCode::from(EXIT_USAGE);
+    };
+    if args.volume_name.is_some() {
+        eprintln!("ade: --name names one volume; give each partition's as NAME:SIZE:TYPE:VOLUME");
+        return ExitCode::from(EXIT_USAGE);
+    }
+    let mut specs = Vec::with_capacity(args.partitions.len());
+    for text in &args.partitions {
+        match PartitionSpec::parse(text) {
+            Ok(spec) => specs.push(spec),
+            Err(why) => {
+                eprintln!("ade: --partition={why}");
+                return ExitCode::from(EXIT_USAGE);
+            }
+        }
+    }
+    let made = match create::partitioned(output, megabytes, &specs, type_name, create::now()) {
+        Ok(made) => made,
+        Err(e) => {
+            eprintln!("ade: {e}");
+            return ExitCode::from(match e {
+                create::CreateError::Io(_) => EXIT_UNREADABLE,
+                _ => EXIT_USAGE,
+            });
+        }
+    };
+    let size = std::fs::metadata(output).map_or(0, |m| m.len());
+    let mut stdout = std::io::stdout().lock();
+    if args.format == Format::Json {
+        emit_json(&mut stdout, create::partitioned_json(output, size, &made));
+        let _ = stdout.flush();
+        return ExitCode::from(EXIT_CLEAN);
+    }
+    let mut lines = vec![
+        format!("partitioned  ->  {}", output.display()),
+        format!(
+            "  {size} bytes, {} partition{}; no filesystem in the RDB, so Kickstart 2.0 or \
+             later mounts it from ROM",
+            made.len(),
+            if made.len() == 1 { "" } else { "s" }
+        ),
+    ];
+    for p in &made {
+        // Tenths of a megabyte: the last partition takes what is left after
+        // the table's 32 KB, which whole megabytes would round away.
+        let tenths = p.blocks.saturating_mul(512).saturating_mul(10) >> 20;
+        lines.push(format!(
+            "  {:<6} {:>4}.{} MB  {:<9} \"{}\"{}",
+            p.name,
+            tenths / 10,
+            tenths % 10,
+            p.type_name,
+            p.volume,
+            if p.bootable { "  bootable" } else { "" }
+        ));
+    }
+    emit_lines(&mut stdout, &lines);
     ExitCode::from(EXIT_CLEAN)
 }
 

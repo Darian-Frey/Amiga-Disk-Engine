@@ -271,3 +271,120 @@ fn an_accented_name_is_stored_in_latin1_and_one_latin1_lacks_is_refused() {
     assert!(!refused.exists(), "nothing is written");
     let _ = fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn a_partitioned_disk_is_made_one_partition_per_flag_and_every_command_reads_it() {
+    // F-038: `--partition=NAME:SIZE[:TYPE[:VOLUME]]`, once per partition.
+    let dir = scratch("rdb");
+    let disk = dir.join("work.hdf");
+    let path = disk.to_str().unwrap();
+    let (stdout, stderr, code) = run(&[
+        "create",
+        path,
+        "--size=20",
+        "--partition=DH0:8",
+        "--partition=DH1:rest:ofs:Data",
+    ]);
+    assert_eq!(code, Some(0), "{stderr}");
+    assert!(stdout.contains("2 partitions"), "{stdout}");
+    // The rest is 11.97 MB: tenths, so whole megabytes do not round it away.
+    assert!(
+        stdout.contains("11.9 MB") && stdout.contains("\"Data\""),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("bootable") && stdout.contains("ROM"),
+        "{stdout}"
+    );
+    assert_eq!(fs::metadata(&disk).unwrap().len(), 20 * 1024 * 1024);
+
+    let (info, _, _) = run(&["info", path]);
+    assert!(
+        info.contains("partitions  2") && info.contains("volume \"Data\""),
+        "{info}"
+    );
+    for partition in ["--partition=DH0", "--partition=DH1"] {
+        let (report, _, code) = run(&["check", path, partition]);
+        assert_eq!(code, Some(0), "{report}");
+        assert!(report.contains("findings    none"), "{report}");
+    }
+
+    // And it takes an edit in either partition.
+    let note = dir.join("note.txt");
+    fs::write(&note, b"hello").unwrap();
+    let edited = dir.join("edited.hdf");
+    let (_, stderr, code) = run(&[
+        "put",
+        path,
+        note.to_str().unwrap(),
+        "--partition=DH1",
+        &format!("--output={}", edited.display()),
+    ]);
+    assert_eq!(code, Some(0), "{stderr}");
+    let (listing, _, _) = run(&["ls", edited.to_str().unwrap(), "--partition=DH1"]);
+    assert!(listing.contains("note.txt"), "{listing}");
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_partitioned_disk_reports_its_partitions_in_json() {
+    let dir = scratch("rdb-json");
+    let disk = dir.join("work.hdf");
+    let (stdout, stderr, code) = run(&[
+        "create",
+        disk.to_str().unwrap(),
+        "--size=8",
+        "--partition=DH0:3:ffs",
+        "--partition=DH1:rest",
+        "--type=ofs-intl",
+        "--format=json",
+    ]);
+    assert_eq!(code, Some(0), "{stderr}");
+    assert!(stdout.contains("\"partitions\":["), "{stdout}");
+    assert!(
+        stdout.contains("\"name\":\"DH0\",\"type\":\"ffs\""),
+        "{stdout}"
+    );
+    // --type is the default for a partition that names none.
+    assert!(
+        stdout.contains("\"name\":\"DH1\",\"type\":\"ofs-intl\""),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("\"first_block\":64,\"blocks\":6144,\"bootable\":true"),
+        "{stdout}"
+    );
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_partitioned_disk_that_is_not_one_is_refused_and_nothing_is_written() {
+    let dir = scratch("rdb-refused");
+    let disk = dir.join("work.hdf");
+    let path = disk.to_str().unwrap();
+    for (args, says) in [
+        (vec!["--partition=DH0:4"], "--size"),
+        (vec!["--hd", "--partition=DH0:1"], "--size"),
+        (
+            vec!["--size=10", "--name=X", "--partition=DH0:4"],
+            "each partition's",
+        ),
+        (vec!["--size=10", "--partition=DH0"], "NAME:SIZE"),
+        (
+            vec!["--size=10", "--partition=DH0:rest", "--partition=DH1:2"],
+            "only the last",
+        ),
+        (
+            vec!["--size=10", "--partition=DH0:9", "--partition=DH1:2"],
+            "do not fit",
+        ),
+    ] {
+        let mut full = vec!["create", path];
+        full.extend(args.iter().copied());
+        let (_, stderr, code) = run(&full);
+        assert_eq!(code, Some(2), "{args:?}: {stderr}");
+        assert!(stderr.contains(says), "{args:?}: {stderr}");
+        assert!(!disk.exists(), "{args:?} wrote a file");
+    }
+    let _ = fs::remove_dir_all(&dir);
+}
