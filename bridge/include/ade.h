@@ -512,6 +512,32 @@ const char *ade_create_type_label(size_t index);
 AdeResult ade_create(const char *path, const char *type_name, const char *volume_name,
                      AdeDiskShape shape, uint32_t megabytes);
 
+/* One partition of a disk ade_create_partitioned makes (F-038). Strings are
+ * UTF-8; a volume name is stored in Latin-1, so one with a character Latin-1
+ * lacks is refused. */
+typedef struct {
+    const char *name;        /* drive name: "DH0"                           */
+    uint32_t    megabytes;   /* 0 for the rest of the disk -- the last only */
+    const char *type_name;   /* one of ade_create_type_name's; NULL: default */
+    const char *volume_name; /* NULL: the drive name                        */
+} AdePartitionSpec;
+
+/* Make a partitioned hard disk of `megabytes` at `path`: an RDB with one
+ * partition per spec, in order, each formatted with its filesystem and volume
+ * name, as `ade create --partition` makes one. The first partition is
+ * bootable. No filesystem is written into the RDB (D-024): Kickstart 2.0 and
+ * later mount the partitions with the FFS in ROM. Space the partitions leave
+ * is left unpartitioned. `default_type` NULL means ffs-intl.
+ *
+ * **Never overwrites:** ADE_ALREADY_EXISTS. A plan that is not a disk --
+ * names repeated or illegal, sizes that do not fit, the rest anywhere but
+ * last, more than 4096 MB -- is ADE_REFUSED, with the reason in
+ * `*out_message` (if not NULL) to free with ade_string_free; nothing is
+ * written. */
+AdeResult ade_create_partitioned(const char *path, uint32_t megabytes,
+                                 const AdePartitionSpec *specs, size_t count,
+                                 const char *default_type, char **out_message);
+
 /* Write every file on the image into `dir`, creating it if needed (F-024).
  *
  * Names are mapped to what this host can hold: Latin-1 decoded to UTF-8, and

@@ -2916,3 +2916,101 @@ fn free_data_is_asked_about_and_allowed_per_partition() {
     }
     let _ = std::fs::remove_file(&path);
 }
+
+#[test]
+fn a_partitioned_disk_is_made_through_the_abi() {
+    let dir = std::env::temp_dir().join(format!("ade-abi-rdb-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("made.hdf");
+    let c_path = CString::new(path.to_str().unwrap()).unwrap();
+    let (dh0, dh1, work, ofs) = (
+        CString::new("DH0").unwrap(),
+        CString::new("DH1").unwrap(),
+        CString::new("Work").unwrap(),
+        CString::new("ofs").unwrap(),
+    );
+    let specs = [
+        ade::AdePartitionSpec {
+            name: dh0.as_ptr(),
+            megabytes: 3,
+            type_name: std::ptr::null(),
+            volume_name: work.as_ptr(),
+        },
+        ade::AdePartitionSpec {
+            name: dh1.as_ptr(),
+            megabytes: 0,
+            type_name: ofs.as_ptr(),
+            volume_name: std::ptr::null(),
+        },
+    ];
+    // SAFETY: valid strings and specs; handles and messages freed once.
+    unsafe {
+        let make = |path: *const std::ffi::c_char, megabytes, why| {
+            ade::ade_create_partitioned(
+                path,
+                megabytes,
+                specs.as_ptr(),
+                specs.len(),
+                std::ptr::null(),
+                why,
+            )
+        };
+        let mut why: *mut std::ffi::c_char = std::ptr::null_mut();
+        assert_eq!(make(c_path.as_ptr(), 8, &raw mut why), AdeResult::Ok);
+        assert!(why.is_null(), "no message on success");
+
+        let image = ade::ade_image_open(c_path.as_ptr(), std::ptr::null(), std::ptr::null_mut());
+        let table = ade::ade_partitions_open(image);
+        assert_eq!(ade::ade_partitions_count(table), 2);
+        let mut p = std::mem::zeroed::<ade::AdePartition>();
+        let text = |b: ade::AdeBytes| std::slice::from_raw_parts(b.data, b.len).to_vec();
+        assert_eq!(
+            ade::ade_partitions_entry(table, 0, &raw mut p),
+            AdeResult::Ok
+        );
+        assert_eq!(text(p.name), b"DH0");
+        assert_eq!(text(p.volume_name), b"Work");
+        assert_eq!(p.dostype, 0x444F_5303, "the default, ffs-intl");
+        assert!(p.bootable && p.mounts);
+        assert_eq!(
+            ade::ade_partitions_entry(table, 1, &raw mut p),
+            AdeResult::Ok
+        );
+        assert_eq!(text(p.volume_name), b"DH1", "named after the drive");
+        assert_eq!(p.dostype, 0x444F_5300);
+        assert!(!p.bootable && p.mounts);
+        ade::ade_partitions_free(table);
+        ade::ade_image_free(image);
+
+        // Never over a file; and a plan that is not a disk says why.
+        assert_eq!(
+            make(c_path.as_ptr(), 8, std::ptr::null_mut()),
+            AdeResult::AlreadyExists
+        );
+        let other = CString::new(dir.join("other.hdf").to_str().unwrap()).unwrap();
+        let mut why: *mut std::ffi::c_char = std::ptr::null_mut();
+        assert_eq!(make(other.as_ptr(), 2, &raw mut why), AdeResult::Refused);
+        let said = CStr::from_ptr(why).to_string_lossy().into_owned();
+        ade::ade_string_free(why);
+        assert!(said.contains("do not fit"), "{said}");
+        assert!(!dir.join("other.hdf").exists(), "nothing written");
+
+        assert_eq!(
+            make(std::ptr::null(), 8, std::ptr::null_mut()),
+            AdeResult::NullArgument
+        );
+        assert_eq!(
+            ade::ade_create_partitioned(
+                other.as_ptr(),
+                8,
+                std::ptr::null(),
+                2,
+                std::ptr::null(),
+                std::ptr::null_mut()
+            ),
+            AdeResult::NullArgument
+        );
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}

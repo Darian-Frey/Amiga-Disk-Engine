@@ -180,6 +180,10 @@ public:
     /// How the window asks before writing on a disk with no files whose free
     /// blocks hold data (IMP-019).
     void setFreeDataConfirmation(Confirm confirm) { m_confirmFreeData = std::move(confirm); }
+    /// Where New disk saves what it makes, given the name it suggests; empty
+    /// cancels. Defaults to a file dialog; a test replaces it.
+    using ChoosePath = std::function<QString(const QString &suggested)>;
+    void setNewDiskPathChooser(ChoosePath choose) { m_chooseNewDiskPath = std::move(choose); }
 
     // How many images are open. Several can be, which is what makes
     // cross-image search meaningful.
@@ -442,6 +446,7 @@ private:
     QAction *m_wipeFree = nullptr;
     Confirm m_confirmWipe;
     Confirm m_confirmFreeData;
+    ChoosePath m_chooseNewDiskPath;
 
     // Whether `open` may be written to: yes, unless it is a disk with no
     // files whose free blocks hold data and the free-data confirmation says

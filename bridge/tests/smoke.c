@@ -420,6 +420,43 @@ int main(int argc, char **argv) {
         AdeImage *fresh = ade_image_open(argv[3], NULL, NULL);
         check(fresh != NULL && ade_image_has_volume(fresh), "and it holds a volume");
 
+        /* A partitioned hard disk (F-038), beside it and removed after. */
+        {
+            char rdb_path[4096];
+            char refused_path[4096];
+            snprintf(rdb_path, sizeof rdb_path, "%s.rdb.hdf", argv[3]);
+            snprintf(refused_path, sizeof refused_path, "%s.refused.hdf", argv[3]);
+            remove(rdb_path);
+            remove(refused_path);
+            AdePartitionSpec parts[2] = {
+                { "DH0", 2, NULL, "Boot" },
+                { "DH1", 0, "ofs", NULL },
+            };
+            char *why_rdb = NULL;
+            check(ade_create_partitioned(rdb_path, 4, parts, 2, NULL, &why_rdb) == ADE_OK &&
+                      why_rdb == NULL,
+                  "a partitioned disk is made");
+            AdeImage *device = ade_image_open(rdb_path, NULL, NULL);
+            AdePartitions *table = device ? ade_partitions_open(device) : NULL;
+            check(table != NULL && ade_partitions_count(table) == 2, "with its two partitions");
+            ade_partitions_free(table);
+            ade_image_free(device);
+            AdePartitionSpec rest_first[2] = {
+                { "DH0", 0, NULL, NULL },
+                { "DH1", 1, NULL, NULL },
+            };
+            check(ade_create_partitioned(refused_path, 4, rest_first, 2, NULL, &why_rdb) ==
+                          ADE_REFUSED &&
+                      why_rdb != NULL,
+                  "a plan that is not a disk is refused, with why");
+            if (why_rdb) printf("  refused: %s\n", why_rdb);
+            ade_string_free(why_rdb);
+            check(ade_create_partitioned(NULL, 4, parts, 2, NULL, NULL) == ADE_NULL_ARGUMENT,
+                  "create_partitioned(NULL) is refused");
+            remove(rdb_path);
+            remove(refused_path);
+        }
+
         /* Writing into it (D-018): in memory, then only ever to a new file. */
         uint32_t root = ade_image_root_block(fresh);
         const uint8_t dir_name[] = "FromC";

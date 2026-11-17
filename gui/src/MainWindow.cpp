@@ -27,6 +27,8 @@
 #include <QDialogButtonBox>
 #include <QFormLayout>
 #include <QSpinBox>
+#include <QTableWidget>
+#include <array>
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QFont>
@@ -1568,15 +1570,88 @@ void MainWindow::newDisk() {
     megabytes->setValue(8);
     megabytes->setSuffix(QStringLiteral(" MB"));
     megabytes->setEnabled(false);
-    connect(shape, &QComboBox::currentIndexChanged, &dialog, [shape, megabytes] {
-        megabytes->setEnabled(shape->currentData().toInt() == ADE_DISK_HARD);
+
+    // A hard disk can be partitioned (F-038): an RDB with a row per
+    // partition, each with its own filesystem and volume name, as `ade create
+    // --partition` makes one. The engine checks the plan; the window only
+    // gathers it.
+    auto *partitioned = new QCheckBox(QStringLiteral("Partitioned (RDB)"), &dialog);
+    partitioned->setObjectName(QStringLiteral("newDiskPartitioned"));
+    partitioned->setToolTip(QStringLiteral(
+        "A partition table with a volume in each partition, as HDToolBox makes one.\n"
+        "No filesystem is stored in it: Kickstart 2.0 and later mount the partitions\n"
+        "with the FFS in ROM."));
+    partitioned->setEnabled(false);
+    auto *partitions = new QTableWidget(0, 4, &dialog);
+    partitions->setObjectName(QStringLiteral("newDiskPartitions"));
+    partitions->setHorizontalHeaderLabels({QStringLiteral("Drive"), QStringLiteral("Size (MB)"),
+                                           QStringLiteral("Filesystem"),
+                                           QStringLiteral("Volume")});
+    // The filesystem names are long ("FFS, international (DOS\3)"): its column
+    // takes what it needs, the volume name the rest.
+    partitions->horizontalHeader()->setSectionResizeMode(QHeaderView::ResizeToContents);
+    partitions->horizontalHeader()->setSectionResizeMode(3, QHeaderView::Stretch);
+    partitions->verticalHeader()->hide();
+    partitions->setMinimumWidth(560);
+    partitions->setMinimumHeight(160);
+    partitions->setToolTip(QStringLiteral(
+        "Size is megabytes, or \"rest\" for the last partition. An empty volume\n"
+        "name is the drive's name. The first partition is bootable."));
+    const auto addPartition = [partitions, type](const QString &drive, const QString &size) {
+        const int row = partitions->rowCount();
+        partitions->insertRow(row);
+        partitions->setItem(row, 0, new QTableWidgetItem(drive));
+        partitions->setItem(row, 1, new QTableWidgetItem(size));
+        auto *fs = new QComboBox(partitions);
+        for (int i = 0; i < type->count(); ++i) fs->addItem(type->itemText(i), type->itemData(i));
+        fs->setCurrentIndex(type->currentIndex());
+        partitions->setCellWidget(row, 2, fs);
+        partitions->setItem(row, 3, new QTableWidgetItem(QString()));
+    };
+    addPartition(QStringLiteral("DH0"), QStringLiteral("rest"));
+    auto *add = new QPushButton(QStringLiteral("Add partition"), &dialog);
+    add->setObjectName(QStringLiteral("newDiskAddPartition"));
+    auto *remove = new QPushButton(QStringLiteral("Remove"), &dialog);
+    remove->setObjectName(QStringLiteral("newDiskRemovePartition"));
+    connect(add, &QPushButton::clicked, &dialog, [partitions, addPartition] {
+        addPartition(QStringLiteral("DH%1").arg(partitions->rowCount()), QStringLiteral("rest"));
     });
+    connect(remove, &QPushButton::clicked, &dialog, [partitions] {
+        const int row = partitions->currentRow() >= 0 ? partitions->currentRow()
+                                                       : partitions->rowCount() - 1;
+        if (partitions->rowCount() > 1 && row >= 0) partitions->removeRow(row);
+    });
+    auto *partitionBox = new QWidget(&dialog);
+    auto *partitionLayout = new QVBoxLayout(partitionBox);
+    partitionLayout->setContentsMargins(0, 0, 0, 0);
+    partitionLayout->addWidget(partitions);
+    auto *partitionButtons = new QHBoxLayout;
+    partitionButtons->addWidget(add);
+    partitionButtons->addWidget(remove);
+    partitionButtons->addStretch();
+    partitionLayout->addLayout(partitionButtons);
+    partitionBox->setVisible(false);
+
+    const auto follow = [shape, megabytes, partitioned, partitionBox, name, &dialog] {
+        const bool hard = shape->currentData().toInt() == ADE_DISK_HARD;
+        megabytes->setEnabled(hard);
+        partitioned->setEnabled(hard);
+        const bool rdb = hard && partitioned->isChecked();
+        partitionBox->setVisible(rdb);
+        // Each partition names its own volume.
+        name->setEnabled(!rdb);
+        dialog.adjustSize();
+    };
+    connect(shape, &QComboBox::currentIndexChanged, &dialog, follow);
+    connect(partitioned, &QCheckBox::toggled, &dialog, follow);
 
     auto *form = new QFormLayout;
     form->addRow(QStringLiteral("Volume name"), name);
     form->addRow(QStringLiteral("Filesystem"), type);
     form->addRow(QStringLiteral("Size"), shape);
     form->addRow(QStringLiteral("Hard disk size"), megabytes);
+    form->addRow(QString(), partitioned);
+    form->addRow(partitionBox);
 
     auto *buttons =
         new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
@@ -1589,11 +1664,59 @@ void MainWindow::newDisk() {
     if (dialog.exec() != QDialog::Accepted) return;
 
     const int kind = shape->currentData().toInt();
-    const QString suggested =
-        QStringLiteral("%1.%2").arg(name->text(), kind == ADE_DISK_HARD ? "hdf" : "adf");
-    const QString path = QFileDialog::getSaveFileName(
-        this, QStringLiteral("Save the new disk as..."), QDir::homePath() + "/" + suggested);
+    const bool rdb = kind == ADE_DISK_HARD && partitioned->isChecked();
+    const QString suggested = QStringLiteral("%1.%2").arg(
+        rdb ? QStringLiteral("Hard disk") : name->text(), kind == ADE_DISK_HARD ? "hdf" : "adf");
+    const QString path =
+        m_chooseNewDiskPath
+            ? m_chooseNewDiskPath(suggested)
+            : QFileDialog::getSaveFileName(this, QStringLiteral("Save the new disk as..."),
+                                           QDir::homePath() + "/" + suggested);
     if (path.isEmpty()) return;
+
+    if (rdb) {
+        // The strings outlive the call: AdePartitionSpec only points at them.
+        std::vector<std::array<QByteArray, 3>> text;
+        std::vector<AdePartitionSpec> specs;
+        text.reserve(static_cast<size_t>(partitions->rowCount()));
+        for (int row = 0; row < partitions->rowCount(); ++row) {
+            const QString drive = partitions->item(row, 0)->text().trimmed();
+            const QString size = partitions->item(row, 1)->text().trimmed();
+            bool number = false;
+            const uint value = size.toUInt(&number);
+            const bool rest = size.isEmpty() || size.compare(QStringLiteral("rest"),
+                                                             Qt::CaseInsensitive) == 0;
+            if (!rest && !number) {
+                emit errorOccurred(QStringLiteral("%1: the size is megabytes, or \"rest\" for "
+                                                  "the last partition.")
+                                       .arg(drive.isEmpty() ? QStringLiteral("A partition")
+                                                            : drive));
+                return;
+            }
+            const auto *fs = qobject_cast<QComboBox *>(partitions->cellWidget(row, 2));
+            text.push_back({drive.toUtf8(), fs ? fs->currentData().toString().toUtf8() : QByteArray(),
+                            partitions->item(row, 3)->text().trimmed().toUtf8()});
+            const auto &[d, t, v] = text.back();
+            specs.push_back({d.constData(), rest ? 0u : value, t.isEmpty() ? nullptr : t.constData(),
+                             v.isEmpty() ? nullptr : v.constData()});
+        }
+        char *why = nullptr;
+        const AdeResult made = ade_create_partitioned(
+            path.toLocal8Bit().constData(), static_cast<uint32_t>(megabytes->value()),
+            specs.data(), specs.size(), type->currentData().toString().toUtf8().constData(), &why);
+        const QString reason = why ? QString::fromUtf8(why) : QString();
+        ade_string_free(why);
+        if (made != ADE_OK) {
+            emit errorOccurred(made == ADE_ALREADY_EXISTS
+                                   ? QStringLiteral("%1 already exists. ADE will not overwrite a "
+                                                    "disk image.")
+                                         .arg(path)
+                                   : QStringLiteral("Could not create %1: %2").arg(path, reason));
+            return;
+        }
+        openCreated(path);
+        return;
+    }
 
     const QByteArray typeName = type->currentData().toString().toUtf8();
     const QByteArray volumeName = name->text().toUtf8();

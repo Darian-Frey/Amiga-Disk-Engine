@@ -1612,6 +1612,124 @@ pub unsafe extern "C" fn ade_create(
     })
 }
 
+/// One partition of a disk [`ade_create_partitioned`] makes.
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct AdePartitionSpec {
+    /// Drive name, UTF-8: `DH0`.
+    pub name: *const c_char,
+    /// Its size in megabytes; 0 for the rest of the disk, last only.
+    pub megabytes: u32,
+    /// Its filesystem, one of `ade_create_type_name`'s; null for the disk's
+    /// default.
+    pub type_name: *const c_char,
+    /// Its volume name, UTF-8; null for the drive name.
+    pub volume_name: *const c_char,
+}
+
+/// A C string the caller may pass as null: `Ok(None)` for null, the text
+/// otherwise, or `Err` when it is not UTF-8.
+///
+/// # Safety
+/// `text` must be null or NUL-terminated.
+unsafe fn optional_text<'a>(text: *const c_char) -> Result<Option<&'a str>, AdeResult> {
+    if text.is_null() {
+        return Ok(None);
+    }
+    // SAFETY: non-null, so NUL-terminated by the caller's contract.
+    (unsafe { CStr::from_ptr(text) })
+        .to_str()
+        .map(Some)
+        .map_err(|_| AdeResult::BadEncoding)
+}
+
+/// Make a partitioned hard disk of `megabytes` at `path` (F-038): an RDB
+/// with one partition per spec, in order, each formatted. As `ade create
+/// --partition`, and refused for the same reasons, with the reason in
+/// `out_message`.
+///
+/// # Safety
+/// `path` and `default_type` NUL-terminated or null; `specs` pointing to
+/// `count` readable specs whose strings are NUL-terminated or null;
+/// `out_message` writable or null, and a message written there is freed with
+/// [`ade_string_free`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ade_create_partitioned(
+    path: *const c_char,
+    megabytes: u32,
+    specs: *const AdePartitionSpec,
+    count: usize,
+    default_type: *const c_char,
+    out_message: *mut *mut c_char,
+) -> AdeResult {
+    use ade_core::create::{self, CreateError, PartitionSize, PartitionSpec};
+    guard(AdeResult::Internal, || {
+        if path.is_null() || (specs.is_null() && count > 0) {
+            return AdeResult::NullArgument;
+        }
+        // SAFETY: the caller's contract.
+        let path = match unsafe { optional_text(path) } {
+            Ok(Some(p)) => p,
+            Ok(None) => return AdeResult::NullArgument,
+            Err(code) => return code,
+        };
+        // SAFETY: the caller's contract.
+        let default_type = match unsafe { optional_text(default_type) } {
+            Ok(t) => t.unwrap_or(create::DEFAULT_TYPE),
+            Err(code) => return code,
+        };
+        let given: &[AdePartitionSpec] = if count == 0 {
+            &[]
+        } else {
+            // SAFETY: non-null, and `count` readable specs by the contract.
+            unsafe { std::slice::from_raw_parts(specs, count) }
+        };
+        let mut plan = Vec::with_capacity(given.len());
+        for spec in given {
+            // SAFETY: the caller's contract, for each string.
+            let (name, kind, volume) = match unsafe {
+                (
+                    optional_text(spec.name),
+                    optional_text(spec.type_name),
+                    optional_text(spec.volume_name),
+                )
+            } {
+                (Ok(Some(n)), Ok(k), Ok(v)) => (n, k, v),
+                (Ok(None), _, _) => return AdeResult::NullArgument,
+                _ => return AdeResult::BadEncoding,
+            };
+            plan.push(PartitionSpec {
+                name: name.to_owned(),
+                size: if spec.megabytes == 0 {
+                    PartitionSize::Rest
+                } else {
+                    PartitionSize::Megabytes(spec.megabytes)
+                },
+                type_name: kind.map(str::to_owned),
+                volume: volume.map(str::to_owned),
+            });
+        }
+        match create::partitioned(
+            std::path::Path::new(path),
+            megabytes,
+            &plan,
+            default_type,
+            create::now(),
+        ) {
+            Ok(_) => AdeResult::Ok,
+            Err(e) => {
+                set_message(out_message, &e.to_string());
+                match e {
+                    CreateError::Exists => AdeResult::AlreadyExists,
+                    CreateError::UnknownType(_) | CreateError::Shape(_) => AdeResult::Refused,
+                    CreateError::Format(_) => AdeResult::NoVolume,
+                    CreateError::Io(_) => AdeResult::Io,
+                }
+            }
+        }
+    })
+}
+
 /// Write every file on the image into `dir` (F-024).
 ///
 /// The name mapping lives in the engine, not here and not in a front end: get

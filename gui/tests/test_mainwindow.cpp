@@ -40,6 +40,11 @@
 #include <QLabel>
 #include <QPushButton>
 #include <QCheckBox>
+#include <QSpinBox>
+#include <QTableWidget>
+#include <QTimer>
+#include <QDialog>
+#include <array>
 #include <QMenu>
 #include <QMenuBar>
 #include <QScreen>
@@ -182,6 +187,8 @@ private slots:
     void aPartitionedDisksMapShowsItsPartitions();
     void eachRowSaysWhatItIs();
     void newDiskIsOfferedAndItsTypesComeFromTheEngine();
+    void newDiskMakesAPartitionedHardDisk();
+    void newDiskSaysWhyAPartitionPlanIsNotADisk();
     void aFileThatIsNotADiskImageIsDeclinedRatherThanShown();
     void thereIsAHelpMenuWithAnAboutBox();
     void theAboutBoxTakesItsVersionFromTheEngine();
@@ -1604,6 +1611,107 @@ void TestMainWindow::newDiskIsOfferedAndItsTypesComeFromTheEngine() {
         QVERIFY(*ade_create_type_name(i) != '\0');
         QVERIFY(*ade_create_type_label(i) != '\0');
     }
+}
+
+namespace {
+
+// Fill in New disk as a person would — once it is open, since it is modal —
+// with a hard disk of `megabytes`, partitioned into `rows` (drive, size,
+// filesystem code, volume), and press OK. Saves a picture of the dialog to
+// `$ADE_GUI_SHOTS` when that is set, for looking at the layout.
+void fillNewDisk(MainWindow &window, int megabytes,
+                 const QList<std::array<QString, 4>> &rows) {
+    QTimer::singleShot(0, &window, [megabytes, rows] {
+        auto *dialog = qobject_cast<QDialog *>(QApplication::activeModalWidget());
+        QVERIFY(dialog);
+        auto *shape = dialog->findChild<QComboBox *>(QStringLiteral("newDiskShape"));
+        shape->setCurrentIndex(shape->findData(ADE_DISK_HARD));
+        dialog->findChild<QSpinBox *>(QStringLiteral("newDiskMegabytes"))->setValue(megabytes);
+        auto *partitioned = dialog->findChild<QCheckBox *>(QStringLiteral("newDiskPartitioned"));
+        QVERIFY(partitioned->isEnabled());
+        partitioned->setChecked(true);
+        auto *table = dialog->findChild<QTableWidget *>(QStringLiteral("newDiskPartitions"));
+        auto *add = dialog->findChild<QPushButton *>(QStringLiteral("newDiskAddPartition"));
+        QCOMPARE(table->rowCount(), 1);
+        while (table->rowCount() < rows.size()) add->click();
+        for (int row = 0; row < rows.size(); ++row) {
+            table->item(row, 0)->setText(rows[row][0]);
+            table->item(row, 1)->setText(rows[row][1]);
+            auto *fs = qobject_cast<QComboBox *>(table->cellWidget(row, 2));
+            fs->setCurrentIndex(fs->findData(rows[row][2]));
+            table->item(row, 3)->setText(rows[row][3]);
+        }
+        const QString shots = qEnvironmentVariable("ADE_GUI_SHOTS");
+        if (!shots.isEmpty()) dialog->grab().save(shots + QStringLiteral("/new-disk.png"));
+        dialog->accept();
+    });
+}
+
+// File ▸ New disk..., as a person reaches it.
+QAction *newDiskAction(MainWindow &window) {
+    for (QAction *top : window.menuBar()->actions()) {
+        if (!top->text().contains(QStringLiteral("File"))) continue;
+        for (QAction *item : top->menu()->actions()) {
+            if (item->text().contains(QStringLiteral("New disk"))) return item;
+        }
+    }
+    return nullptr;
+}
+
+}  // namespace
+
+void TestMainWindow::newDiskMakesAPartitionedHardDisk() {
+    // F-038: the window makes what `ade create --partition` makes, through
+    // ade_create_partitioned, and opens it with its partitions in the tree.
+    MainWindow window;
+    QStringList errors;
+    QObject::connect(&window, &MainWindow::errorOccurred, &window,
+                     [&errors](const QString &message) { errors << message; });
+    const QString path = m_dir.filePath(QStringLiteral("partitioned.hdf"));
+    QString suggested;
+    window.setNewDiskPathChooser([&](const QString &name) {
+        suggested = name;
+        return path;
+    });
+    fillNewDisk(window, 12,
+                {{QStringLiteral("DH0"), QStringLiteral("4"), QStringLiteral("ffs-intl"),
+                  QStringLiteral("Boot")},
+                 {QStringLiteral("DH1"), QStringLiteral("rest"), QStringLiteral("ofs"),
+                  QString()}});
+    newDiskAction(window)->trigger();
+    QVERIFY2(errors.isEmpty(), qPrintable(errors.join(QLatin1Char('\n'))));
+    QCOMPARE(suggested, QStringLiteral("Hard disk.hdf"));
+    QCOMPARE(QFileInfo(path).size(), qint64(12) * 1024 * 1024);
+
+    QTreeWidgetItem *root = browser(window)->topLevelItem(0);
+    QVERIFY(root);
+    QCOMPARE(root->childCount(), 2);
+    QVERIFY(root->child(0)->text(0).startsWith(QStringLiteral("DH0")));
+    QVERIFY(root->child(0)->text(0).contains(QStringLiteral("\"Boot\"")));
+    QVERIFY(root->child(0)->text(0).contains(QStringLiteral("bootable")));
+    QVERIFY(root->child(1)->text(0).contains(QStringLiteral("\"DH1\"")));
+
+    // And it is a disk to work on: a folder goes into DH1.
+    QVERIFY(window.makeFolder(browser(window)->topLevelItem(0)->child(1), QStringLiteral("Docs")));
+    QVERIFY(childNamed(browser(window)->topLevelItem(0)->child(1), QStringLiteral("Docs")));
+}
+
+void TestMainWindow::newDiskSaysWhyAPartitionPlanIsNotADisk() {
+    MainWindow window;
+    QStringList errors;
+    QObject::connect(&window, &MainWindow::errorOccurred, &window,
+                     [&errors](const QString &message) { errors << message; });
+    const QString path = m_dir.filePath(QStringLiteral("not-a-disk.hdf"));
+    window.setNewDiskPathChooser([&](const QString &) { return path; });
+    fillNewDisk(window, 8,
+                {{QStringLiteral("DH0"), QStringLiteral("rest"), QStringLiteral("ffs"), QString()},
+                 {QStringLiteral("DH1"), QStringLiteral("2"), QStringLiteral("ffs"), QString()}});
+    newDiskAction(window)->trigger();
+    QCOMPARE(errors.size(), 1);
+    QVERIFY2(errors.first().contains(QStringLiteral("only the last partition")),
+             qPrintable(errors.first()));
+    QVERIFY(!QFileInfo::exists(path));
+    QCOMPARE(browser(window)->topLevelItemCount(), 0);
 }
 
 void TestMainWindow::aFileThatIsNotADiskImageIsDeclinedRatherThanShown() {
