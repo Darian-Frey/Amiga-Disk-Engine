@@ -1173,3 +1173,92 @@ fn amigados_mounts_and_fills_a_partitioned_disk_ade_creates() {
     }
     assert!(Session::from_bytes(after).is_ok());
 }
+
+#[test]
+fn amigados_mounts_a_partition_table_ade_has_edited() {
+    // F-038, D-024 part 5: a table changed by every edit ADE makes to one —
+    // a partition deleted and another added in its place, one added in the
+    // rest of the disk, a drive renamed, a boot priority lowered, a partition
+    // reformatted as another filesystem — mounts under AmigaDOS, which
+    // writes into each partition and reads back; ADE reads what it wrote.
+    use ade_core::create::{self, PartitionSize, PartitionSpec};
+    let Some(setup) = setup() else { return };
+    let dir = scratch("rdbedit");
+    fs::create_dir_all(&dir).unwrap();
+    let made = dir.join("made.hdf");
+    let spec = |name: &str, size, type_name: &str, volume: &str| PartitionSpec {
+        name: name.to_owned(),
+        size,
+        type_name: Some(type_name.to_owned()),
+        volume: Some(volume.to_owned()),
+    };
+    create::partitioned(
+        &made,
+        32,
+        &[
+            spec("DH1", PartitionSize::Megabytes(8), "ffs-intl", "One"),
+            spec("DH2", PartitionSize::Rest, "ofs", "Gone"),
+        ],
+        "ffs-intl",
+        WHEN,
+    )
+    .unwrap();
+    let ofs = Dostype::from_raw(0x444F_5300).unwrap();
+    let mut s = Session::from_bytes(fs::read(&made).unwrap()).unwrap();
+    s.set_clock(Some(WHEN));
+    s.delete_partition("DH2").unwrap();
+    s.add_partition("DH2", PartitionSize::Megabytes(8), ofs, Some("Two"))
+        .unwrap();
+    s.add_partition("DH3", PartitionSize::Rest, dostype(5), Some("Three"))
+        .unwrap();
+    s.rename_partition("DH3", "DH5").unwrap();
+    // Lowered, never raised: the boot folder must stay the one that boots.
+    s.set_partition_boot("DH1", Some(-5)).unwrap();
+    s.select_partition("DH2").unwrap();
+    s.format_as(Some(b"TwoFFS"), Some(dostype(1))).unwrap();
+    let disk = dir.join("edited.hdf");
+    fs::write(&disk, s.bytes()).unwrap();
+    drop(s);
+
+    let theirs = pattern(50_000, 41);
+    let commands = "C:Copy SYS:in/theirs One:a.bin\n\
+                    C:Copy SYS:in/theirs TwoFFS:b.bin\n\
+                    C:Copy SYS:in/theirs Three:c.bin\n\
+                    C:Copy DH1:a.bin SYS:out/one\n\
+                    C:Copy DH2:b.bin SYS:out/two\n\
+                    C:Copy DH5:c.bin SYS:out/three\n\
+                    C:Info >SYS:out/info\n\
+                    C:Lock DH2: ON\n\
+                    C:Lock DH5: ON\n";
+    let outcome = run_with(
+        &setup,
+        "rdbedit",
+        (&[], &[&disk]),
+        &[("theirs", &theirs)],
+        commands,
+        Duration::from_secs(120),
+    )
+    .unwrap();
+    let info = fs::read_to_string(outcome.out.join("info")).unwrap_or_default();
+    for name in ["one", "two", "three"] {
+        assert!(
+            fs::read(outcome.out.join(name)).ok().as_deref() == Some(theirs.as_slice()),
+            "AmigaDOS did not write and read back {name}\n{info}"
+        );
+    }
+    assert_eq!(outcome.resets, 1, "the Amiga booted once\n{info}");
+
+    let after = fs::read(&disk).unwrap();
+    for (partition, file) in [("DH1", "a.bin"), ("DH2", "b.bin"), ("DH5", "c.bin")] {
+        assert!(
+            read_in_partition(&after, partition, file) == Some(theirs.clone()),
+            "{partition}"
+        );
+        assert!(
+            partition_faults(&after, partition).is_empty(),
+            "{partition}: {:?}",
+            partition_faults(&after, partition)
+        );
+    }
+    assert!(Session::from_bytes(after).is_ok());
+}

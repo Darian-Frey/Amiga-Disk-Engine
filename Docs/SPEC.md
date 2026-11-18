@@ -888,6 +888,18 @@ A second, narrower divergence: on a partition whose bitmap spans more than one b
 - **The table:** `RDSK` at block 0, a `PART` for each partition in blocks 1, 2, … chained in order, in two cylinders kept for it (`LoCylinder` 2, `RDB_BlockHi` 63, `HiCylinder` the last), as HDToolBox keeps two; room for 63 partitions. Flags `0x17` — the only drive, its vendor strings valid (`ADE`, `HARDFILE`, `1.0`). **No `FSHD`/`LSEG`** (D-024 part 4): each partition names its dostype and Kickstart 2.0 and later mount it with the FFS in ROM. ADFlib refuses such a disk (above); AmigaDOS does not.
 - **Each partition:** the DOSEnvVec HDToolBox writes — `SizeBlock` 128, two reserved blocks, 30 buffers, `MaxTransfer` 0x1FE00 and `Mask` 0x7FFFFFFE, safe for any controller — its cylinders in order from cylinder 2, and quick-formatted with its own filesystem (default `--type`) and volume name (default the drive name). The first is bootable at priority 0, as HDToolBox makes it; the rest are not. Space the partitions leave is left unpartitioned.
 
+### How ADE edits a table (F-038, 2026-11-17)
+
+A table is never regenerated: a real disk's RDB may carry a filesystem (`FSHD` and its `LSEG` chain), a bad-block list, the drive's own strings and the controller values HDToolBox chose, and rewriting the table from what ADE understands would lose them. Each edit changes the fields it is about and reseals the blocks it touched, over each block's own `SummedLongs`:
+
+- **Rename:** the `PART`'s DriveName BSTR (0x24, 32 bytes). Drive names stay unique, ignoring case.
+- **Boot:** bit 0 of the `PART`'s Flags, and `BootPri` (0xbc) — only where the DOSEnvVec is long enough to hold it (TableSize ≥ 15).
+- **Delete:** whatever pointed at the `PART` — the RDSK's `PartitionList` or the previous `PART`'s `next` — points past it; the `PART` block is zeroed. The volume's blocks are left as they were.
+- **Add:** the first run of whole cylinders between `LoCylinder` and `HiCylinder` that no partition uses and that holds the size; a `PART` in the first block from the RDSK to `RDBBlocksHi`, before the partition cylinders, that no list (`PART`, `FSHD`, `LSEG`, `BADB`) occupies; chained at the end; `HighRDSKBlock` raised to it; the volume quick-formatted. Not bootable.
+- **Another filesystem:** a reformat, writing the new dostype into the partition's bootblock and the `PART`'s `DosType` (0xc0) together — never the table alone, which would leave the two disagreeing (FAQ §6.3).
+
+Every edit is kept only if the table still passes the checks an edit session opens with (D-024 part 3), and a partition it formatted examines clean.
+
 ## Hardfiles (HDF)
 
 A hardfile is a raw volume dump with no RDB — bootblock, rootblock, bitmap, exactly like a floppy but larger. Its first three bytes are therefore `'DOS'`. Typical UAE geometry is `heads = 1, sectors = 32`, cylinders derived from size. [FAQ §7]

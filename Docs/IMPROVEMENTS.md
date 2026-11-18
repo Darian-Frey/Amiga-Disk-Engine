@@ -11,7 +11,18 @@ Effort vocabulary: trivial | small | medium | large.
 
 ## Suggested
 
-_None._
+### IMP-027 A format, and an added partition, build a blank copy of the whole volume to read its blocks off
+**Status:** suggested
+**Effort:** small
+**Found:** 2026-11-17, sharing `format`'s block list with adding a partition (F-038).
+
+**Where:** [src/api/src/edit.rs](../src/api/src/edit.rs) `quick_format_writes`, used by `Session::format_as` and `Session::add_partition`.
+
+**What it does.** To know which blocks a quick format writes, and what goes in them, it formats a fresh volume of the same size in memory — `format::blank_named`, a `Vec` of the volume's full size — and copies the dozen or so blocks out. On a 1 GB partition that is 1 GB allocated for a few kilobytes of result, on top of the session's copy of the disk: the one-copy peak IMP-023 reached does not hold for a format.
+
+**What would be better.** The formatter already knows its layout before it writes (`lay_out_bitmap`, the rootblock and cache positions): it could return the blocks it would write as a map rather than a whole image, and `blank_named` become that map laid into zeros.
+
+**Trade-offs.** Two forms of one layout to keep in step; the test that a format lays out what `Format` does would need to cover both, or the map form would have to be the only one.
 
 ## Applied
 

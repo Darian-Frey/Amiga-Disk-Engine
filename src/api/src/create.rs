@@ -527,7 +527,7 @@ fn plan_partitions(
 
 /// A drive name as the table stores it: 1 to 31 printable Latin-1
 /// characters, without the `:` and `/` that AmigaDOS reads as path syntax.
-fn drive_name(text: &str) -> Result<Vec<u8>, CreateError> {
+pub(crate) fn drive_name(text: &str) -> Result<Vec<u8>, CreateError> {
     let bytes: Vec<u8> = text
         .chars()
         .map(|ch| {

@@ -67,6 +67,10 @@ pub struct RigidDiskBlock {
     pub sectors: u32,
     /// Heads.
     pub heads: u32,
+    /// The first block kept for the RDB and its lists (`RDBBlocksLo`).
+    pub rdb_blocks_lo: u32,
+    /// The last block kept for them (`RDBBlocksHi`).
+    pub rdb_blocks_hi: u32,
     /// The first cylinder partitions may use: those before it hold the RDB
     /// and its lists.
     pub lo_cylinder: u32,
@@ -144,6 +148,8 @@ impl RigidDiskBlock {
             cylinders: at(0x40)?,
             sectors: at(0x44)?,
             heads: at(0x48)?,
+            rdb_blocks_lo: at(0x80)?,
+            rdb_blocks_hi: at(0x84)?,
             lo_cylinder: at(0x88)?,
             hi_cylinder: at(0x8c)?,
             cylinder_blocks: at(0x90)?,
@@ -428,7 +434,7 @@ pub fn table_blocks(table: &NewTable) -> Result<Vec<(u32, [u8; 512])>, String> {
         } else {
             block.saturating_add(1)
         };
-        out.push((block, part_block(table, p, next)));
+        out.push((block, part_block(table.heads, table.sectors, p, next)));
     }
     Ok(out)
 }
@@ -493,8 +499,11 @@ fn rdsk_block(table: &NewTable, count: u32, reserved: u32) -> [u8; 512] {
     b
 }
 
-/// A `PART` block: the drive name and the DOSEnvVec AmigaDOS mounts from.
-fn part_block(table: &NewTable, p: &NewPartition, next: u32) -> [u8; 512] {
+/// A `PART` block: the drive name and the DOSEnvVec AmigaDOS mounts from,
+/// for a device of `heads` × `sectors`, chained to `next` (or
+/// [`END_OF_LIST`]).
+#[must_use]
+pub fn part_block(heads: u32, sectors: u32, p: &NewPartition, next: u32) -> [u8; 512] {
     let mut b = [0u8; 512];
     place(&mut b, 0, PART);
     put(&mut b, 0x04, 64); // SummedLongs
@@ -510,9 +519,9 @@ fn part_block(table: &NewTable, p: &NewPartition, next: u32) -> [u8; 512] {
     put(&mut b, 0x80, 16); // TableSize: through DosType
     put(&mut b, 0x84, 128); // SizeBlock, in LONGS: 512 bytes
     put(&mut b, 0x88, 0); // SecOrg
-    put(&mut b, 0x8c, table.heads); // Surfaces
+    put(&mut b, 0x8c, heads); // Surfaces
     put(&mut b, 0x90, 1); // SectorPerBlock
-    put(&mut b, 0x94, table.sectors); // BlocksPerTrack
+    put(&mut b, 0x94, sectors); // BlocksPerTrack
     put(&mut b, 0x98, 2); // Reserved: the bootblock's two
     put(&mut b, 0x9c, 0); // PreAlloc
     put(&mut b, 0xa0, 0); // Interleave
@@ -526,4 +535,57 @@ fn part_block(table: &NewTable, p: &NewPartition, next: u32) -> [u8; 512] {
     put(&mut b, 0xc0, p.dostype);
     seal(&mut b);
     b
+}
+
+/// Every block the table occupies: the `RDSK` block, each `PART`, each
+/// filesystem header (`FSHD`) and the `LSEG` blocks its driver is stored in,
+/// and the bad-block list. A block the table may still use for a new `PART`
+/// is one in `RDBBlocksLo`..=`RDBBlocksHi` that is not here. Each chain stops
+/// at -1, at a block it has seen, or at one outside the device.
+#[must_use]
+pub fn table_block_usage(
+    source: &dyn BlockSource,
+    geometry: &Geometry,
+    rdb: &RigidDiskBlock,
+) -> HashSet<u32> {
+    let mut used: HashSet<u32> = HashSet::from([rdb.block]);
+    let bsize = geometry.block_size() as usize;
+    let mut buf = vec![0u8; bsize];
+    let follow = |start: u32, used: &mut HashSet<u32>, buf: &mut Vec<u8>| -> Vec<u32> {
+        let mut chain = Vec::new();
+        let mut next = start;
+        while next != END_OF_LIST && next != 0 && !used.contains(&next) {
+            if geometry.validate(BlockIndex(u64::from(next))).is_err()
+                || read_at(source, BlockIndex(u64::from(next)), buf).is_err()
+            {
+                break;
+            }
+            used.insert(next);
+            chain.push(next);
+            next = u32_at(buf, 0x10).unwrap_or(END_OF_LIST);
+        }
+        chain
+    };
+    follow(rdb.partition_list, &mut used, &mut buf);
+    follow(rdb.bad_block_list, &mut used, &mut buf);
+    for header in follow(rdb.filesystem_list, &mut used, &mut buf) {
+        // Each FSHD names the first LSEG of its driver at SegListBlocks.
+        if read_at(source, BlockIndex(u64::from(header)), &mut buf).is_ok() {
+            let first = u32_at(&buf, 0x48).unwrap_or(END_OF_LIST);
+            follow(first, &mut used, &mut buf);
+        }
+    }
+    used
+}
+
+/// Set an RDB-family block's checksum, over the longs its own `SummedLongs`
+/// says — 64 on every real block, kept to 1..=128 here so a damaged count
+/// cannot read past 512 bytes.
+pub fn reseal(block: &mut [u8]) {
+    let longs = u32_at(block, 4).unwrap_or(64).clamp(1, 128) as usize;
+    let Some(summed) = block.get(..longs.saturating_mul(4)) else {
+        return;
+    };
+    let sum = checksum::normal_at(summed, 8).unwrap_or(0);
+    let _ = ade_endian::put_u32(block, 8, sum);
 }

@@ -405,6 +405,7 @@ fn dispatch(args: &Args) -> ExitCode {
         ("extract", 2 | 3) => extract(args),
         ("convert", 2) => convert(Path::new(p(0)), Path::new(p(1)), args.raw, args.format),
         ("create", 1) => create(args),
+        ("partition", _) => partition_command(args),
         (
             "mkdir" | "put" | "rm" | "undelete" | "link" | "rename" | "repair" | "mv" | "format"
             | "wipe",
@@ -562,7 +563,12 @@ fn usage() {
             .to_owned(),
         "    ade mv <image> <path> <folder> --output=<new>  move an entry into another folder"
             .to_owned(),
-        "    ade format <image> [--name=NAME] --output=<new>  quick-format it in place".to_owned(),
+        "    ade format <image> [--name=NAME] [--type=T] --output=<new>  quick-format it in place; \
+         --type for another filesystem"
+            .to_owned(),
+        "    ade partition add|delete|rename|boot <image> ... --output=<new>  edit a hard disk's \
+         partition table (F-038)"
+            .to_owned(),
         "    ade wipe <image> --slack|--free --output=<new>  zero file slack, or free blocks too"
             .to_owned(),
         "    ade disasm <image> [path]          a program's 68000 code; no path: the bootblock"
@@ -716,6 +722,137 @@ fn open_for_editing(
     Ok(session)
 }
 
+/// A table edit to make on an open session, saying what it did.
+type TableChange =
+    Box<dyn FnOnce(&mut ade_core::edit::Session) -> Result<String, ade_core::edit::EditError>>;
+
+/// `ade partition add|delete|rename|boot <image> …`: edit a partitioned
+/// disk's table (F-038, D-024 part 5), saved to `--output` as every edit is.
+fn partition_command(args: &Args) -> ExitCode {
+    if args.format == Format::Json {
+        eprintln!("ade: partition has no JSON output; it reports in text only");
+        return ExitCode::from(EXIT_USAGE);
+    }
+    let change = match partition_change(args) {
+        Ok(change) => change,
+        Err(code) => return code,
+    };
+    let image = Path::new(args.positional.get(1).map_or("", String::as_str));
+    let Some(output) = args.output.as_deref() else {
+        eprintln!(
+            "ade: --output=<new image> is required; ADE never writes into the image it \
+             opened (D-018)"
+        );
+        return ExitCode::from(EXIT_USAGE);
+    };
+    let mut session = match ade_core::edit::Session::open(image) {
+        Ok(s) => s,
+        Err(e) => return edit_failed(&image.display().to_string(), &e),
+    };
+    if !session.is_partitioned() {
+        eprintln!(
+            "ade: {} has no partition table; `ade create --partition` makes a disk with one",
+            image.display()
+        );
+        return ExitCode::from(EXIT_USAGE);
+    }
+    let done = match change(&mut session) {
+        Ok(done) => done,
+        Err(e) => return edit_failed(&image.display().to_string(), &e),
+    };
+    if let Err(e) = session.save_as(output) {
+        return edit_failed(&output.display().to_string(), &e);
+    }
+    emit_lines(
+        &mut std::io::stdout().lock(),
+        &[done, format!("  saved to {}", output.display())],
+    );
+    ExitCode::from(EXIT_CLEAN)
+}
+
+/// The table edit `ade partition` was asked for, or why it cannot be.
+fn partition_change(args: &Args) -> Result<TableChange, ExitCode> {
+    use ade_core::create::{self, PartitionSpec};
+    let p = |n: usize| args.positional.get(n).map_or("", String::as_str);
+    let usage_error = || {
+        eprintln!(
+            "ade: partition add <image> NAME:SIZE[:TYPE[:VOLUME]] | delete <image> NAME | \
+             rename <image> NAME NEW | boot <image> NAME <PRIORITY|off>, with --output=<new>"
+        );
+        ExitCode::from(EXIT_USAGE)
+    };
+    let change: TableChange = match (p(0), args.positional.len()) {
+        ("add", 3) => {
+            let spec = match PartitionSpec::parse(p(2)) {
+                Ok(spec) => spec,
+                Err(why) => {
+                    eprintln!("ade: {why}");
+                    return Err(ExitCode::from(EXIT_USAGE));
+                }
+            };
+            let kind = spec
+                .type_name
+                .clone()
+                .or_else(|| args.volume_type.clone())
+                .unwrap_or_else(|| create::DEFAULT_TYPE.to_owned());
+            let Some(filesystem) = create::dostype(&kind) else {
+                eprintln!("ade: {}", create::CreateError::UnknownType(kind));
+                return Err(ExitCode::from(EXIT_USAGE));
+            };
+            Box::new(move |s| {
+                s.add_partition(&spec.name, spec.size, filesystem, spec.volume.as_deref())?;
+                Ok(format!(
+                    "added {} ({}), volume \"{}\"; not bootable",
+                    spec.name,
+                    kind.to_ascii_lowercase(),
+                    spec.volume.as_deref().unwrap_or(&spec.name)
+                ))
+            })
+        }
+        ("delete", 3) => {
+            let name = p(2).to_owned();
+            Box::new(move |s| {
+                s.delete_partition(&name)?;
+                Ok(format!(
+                    "deleted {name} and its volume; its blocks are left as they were \
+                         until something is written over them"
+                ))
+            })
+        }
+        ("rename", 4) => {
+            let (from, to) = (p(2).to_owned(), p(3).to_owned());
+            Box::new(move |s| {
+                s.rename_partition(&from, &to)?;
+                Ok(format!("renamed {from} to {to}"))
+            })
+        }
+        ("boot", 4) => {
+            let name = p(2).to_owned();
+            let priority = if p(3).eq_ignore_ascii_case("off") {
+                None
+            } else if let Ok(n) = p(3).parse::<i32>() {
+                Some(n)
+            } else {
+                eprintln!("ade: boot takes a priority, -128 to 127, or off");
+                return Err(ExitCode::from(EXIT_USAGE));
+            };
+            if priority.is_some_and(|n| !(-128..=127).contains(&n)) {
+                eprintln!("ade: boot takes a priority, -128 to 127, or off");
+                return Err(ExitCode::from(EXIT_USAGE));
+            }
+            Box::new(move |s| {
+                s.set_partition_boot(&name, priority)?;
+                Ok(priority.map_or_else(
+                    || format!("{name} is not bootable"),
+                    |n| format!("{name} is bootable, at priority {n}"),
+                ))
+            })
+        }
+        _ => return Err(usage_error()),
+    };
+    Ok(change)
+}
+
 /// Open `image` for editing, apply `change`, and save to `output` (D-018).
 ///
 /// There is no in-place form: `--output` is required and must not exist, and
@@ -783,7 +920,12 @@ fn edit_command(args: &Args) -> ExitCode {
         ("rename", 3) => rename(Path::new(p(0)), p(1), p(2), output),
         ("repair", 1) => repair(Path::new(p(0)), args.free_orphans, output),
         ("mv", 3) => move_entry(Path::new(p(0)), p(1), p(2), output),
-        ("format", 1) => format_in_place(Path::new(p(0)), args.volume_name.as_deref(), output),
+        ("format", 1) => format_in_place(
+            Path::new(p(0)),
+            args.volume_name.as_deref(),
+            args.volume_type.as_deref(),
+            output,
+        ),
         ("wipe", 1) => wipe(
             Path::new(p(0)),
             args.slack,
@@ -947,7 +1089,12 @@ fn move_entry(image: &Path, path: &str, folder: &str, output: Dest<'_>) -> ExitC
 }
 
 /// `ade format`: a quick format in place, keeping the name unless given one.
-fn format_in_place(image: &Path, name: Option<&str>, output: Dest<'_>) -> ExitCode {
+fn format_in_place(
+    image: &Path,
+    name: Option<&str>,
+    kind: Option<&str>,
+    output: Dest<'_>,
+) -> ExitCode {
     let amiga = match name.map(ade_core::edit::amiga_name).transpose() {
         Ok(a) => a,
         Err(c) => {
@@ -955,8 +1102,21 @@ fn format_in_place(image: &Path, name: Option<&str>, output: Dest<'_>) -> ExitCo
             return ExitCode::from(EXIT_USAGE);
         }
     };
+    // --type reformats with another filesystem; on a partitioned disk the
+    // table entry changes with the bootblock (F-038).
+    let filesystem = match kind.map(|k| (k, ade_core::create::dostype(k))) {
+        None => None,
+        Some((_, Some(d))) => Some(d),
+        Some((k, None)) => {
+            eprintln!(
+                "ade: {}",
+                ade_core::create::CreateError::UnknownType(k.to_owned())
+            );
+            return ExitCode::from(EXIT_USAGE);
+        }
+    };
     edit_and_save(image, output, |session| {
-        session.format(amiga.as_deref())?;
+        session.format_as(amiga.as_deref(), filesystem)?;
         Ok(
             "formatted: an empty volume; the old blocks are free and left as they were, so \
             `ade carve` can still find what was on it"

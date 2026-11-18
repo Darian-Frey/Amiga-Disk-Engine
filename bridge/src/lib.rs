@@ -2608,18 +2608,18 @@ fn edit(
         // The partition the edit is made in, named on every call as the
         // reading calls name it, so a front end's idea of where it is cannot
         // drift from the session's.
-        let chosen = if partition == ADE_WHOLE_IMAGE {
-            match session.partition() {
-                Some(_) => Err(ade_core::edit::EditError::NotEditable(
-                    "this is a partitioned hard disk: pass the index of the partition to \
-                     edit, not ADE_WHOLE_IMAGE"
-                        .to_owned(),
-                )),
-                None => Ok(()),
-            }
-        } else {
+        let chosen = if partition != ADE_WHOLE_IMAGE {
             session.select_partition_at(partition as usize)
+        } else if session.is_partitioned() {
+            Err(ade_core::edit::EditError::NotEditable(
+                "this is a partitioned hard disk: pass the index of the partition to edit, \
+                 not ADE_WHOLE_IMAGE"
+                    .to_owned(),
+            ))
+        } else {
+            Ok(())
         };
+
         if let Err(e) = chosen {
             set_message(out_message, &e.to_string());
             return edit_code(&e);

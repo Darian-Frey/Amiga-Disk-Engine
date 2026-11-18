@@ -372,6 +372,16 @@ fn every_command_either_emits_json_or_refuses_it() {
             Json::Refuses,
         ),
         (
+            "partition",
+            vec![
+                "delete".into(),
+                d.clone(),
+                "DH0".into(),
+                format!("--output={}", out_path("pt.adf")),
+            ],
+            Json::Refuses,
+        ),
+        (
             "wipe",
             vec![
                 d.clone(),
