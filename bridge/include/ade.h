@@ -946,6 +946,39 @@ AdeResult ade_edit_move(AdeImage *image, uint32_t partition, uint32_t block, uin
  * disk too damaged for any other edit. */
 AdeResult ade_edit_format(AdeImage *image, uint32_t partition, AdeBytes name,
                           char **out_message);
+/* As ade_edit_format, as another filesystem: `type_name` is one of
+ * ade_create_type_name's, or NULL to keep the one it has (ADE_NOT_FOUND for a
+ * name ADE will not write). On a partitioned disk the partition's table entry
+ * changes with its bootblock, so the two agree. */
+AdeResult ade_edit_format_as(AdeImage *image, uint32_t partition, AdeBytes name,
+                             const char *type_name, char **out_message);
+
+/* --- Editing a partition table (F-038, D-024) -----------------------------
+ *
+ * Edits to a partitioned disk's table, buffered and undoable like every edit
+ * above and saved the same way. Each changes only the blocks it is about, so
+ * a filesystem stored in the table and a drive's own values survive, and is
+ * kept only if the table still passes the checks an edit session opens with;
+ * otherwise ADE_INTERNAL. `partition` is an index from ade_partitions_open,
+ * and an edit can change which partition an index means: open the table
+ * again after one. Free data allowed in a partition must be allowed again
+ * after one (ade_edit_allow_overwriting_free_data). ADE_REFUSED, with the
+ * reason, for a disk with no table, a partition that is not there, or a
+ * name, size or priority that cannot be. */
+
+/* Add a partition in the first unused cylinders that hold `spec->megabytes`
+ * (0: the largest unused run), formatted with its filesystem and volume
+ * name; not bootable. `*out_index` (if not NULL) is its index. */
+AdeResult ade_partition_add(AdeImage *image, const AdePartitionSpec *spec,
+                            uint32_t *out_index, char **out_message);
+/* Delete a partition and its volume; its blocks are left as they were. */
+AdeResult ade_partition_delete(AdeImage *image, uint32_t partition, char **out_message);
+/* Rename a partition's drive: `name` is UTF-8, "WORK". */
+AdeResult ade_partition_rename(AdeImage *image, uint32_t partition, const char *name,
+                               char **out_message);
+/* Mark a partition bootable at `priority` (-128 to 127), or not bootable. */
+AdeResult ade_partition_set_boot(AdeImage *image, uint32_t partition, bool bootable,
+                                 int32_t priority, char **out_message);
 /* Zero file slack, free blocks, or both, one undo step. `out_report` gets a
  * line per part, and one per file left alone with why; free it with
  * ade_string_free. Wiping free blocks destroys what a carve could recover,

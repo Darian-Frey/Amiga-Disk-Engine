@@ -148,6 +148,25 @@ public:
     /// Quick-format the disk `item` belongs to, in place, under `name` —
     /// empty keeps the old one. Undo brings everything back until saved.
     bool formatDisk(QTreeWidgetItem *item, const QString &name);
+    /// As formatDisk, as another filesystem: `type` is one of the engine's
+    /// type names (ffs-intl), and empty keeps the one it has. On a hard disk
+    /// the partition's table entry changes with its bootblock.
+    bool formatDiskAs(QTreeWidgetItem *item, const QString &name, const QString &type);
+
+    // Editing a hard disk's partition table (F-038, D-024). Each is an edit
+    // like any other: undoable, and saved only when the disk is saved.
+    /// Add a partition to the disk `item` belongs to, in the first unused
+    /// cylinders that hold `megabytes` (0: the largest unused run), formatted
+    /// as `type` and named `volume` (empty: the drive name).
+    bool addPartition(QTreeWidgetItem *item, const QString &drive, quint32 megabytes,
+                      const QString &type, const QString &volume);
+    /// Rename the drive of the partition `item` is in.
+    bool renamePartition(QTreeWidgetItem *item, const QString &drive);
+    /// Mark the partition `item` is in bootable at `priority`, or not.
+    bool setPartitionBoot(QTreeWidgetItem *item, bool bootable, int priority);
+    /// Delete the partition `item` is in, and its volume, if the delete
+    /// confirmation agrees.
+    bool deletePartition(QTreeWidgetItem *item);
     /// Zero file slack, and with `freeBlocks` every free block, on the disk
     /// `item` belongs to. The free-block wipe is made only if the wipe
     /// confirmation agrees. Returns the report, or empty when refused.
@@ -218,6 +237,10 @@ private slots:
     void formatSelected();
     void wipeSlackSelected();
     void wipeFreeSelected();
+    void addPartitionSelected();
+    void renamePartitionSelected();
+    void bootPartitionSelected();
+    void deletePartitionSelected();
     void filesDropped(QTreeWidgetItem *target, const QList<QUrl> &urls);
     void extractSelected();
     void search();
@@ -444,6 +467,12 @@ private:
     QAction *m_format = nullptr;
     QAction *m_wipeSlack = nullptr;
     QAction *m_wipeFree = nullptr;
+    QAction *m_addPartition = nullptr;
+    QAction *m_renamePartition = nullptr;
+    QAction *m_bootPartition = nullptr;
+    QAction *m_deletePartition = nullptr;
+    // A table edit's outcome: said, and the disk's rows rebuilt, or why not.
+    bool tableEdited(Open &open, const ade::EditResult &r, const QString &done);
     Confirm m_confirmWipe;
     Confirm m_confirmFreeData;
     ChoosePath m_chooseNewDiskPath;

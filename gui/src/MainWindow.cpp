@@ -838,6 +838,31 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
         "free."));
     connect(m_wipeFree, &QAction::triggered, this, &MainWindow::wipeFreeSelected);
 
+    // A hard disk's partition table (F-038): edits like the rest, undoable
+    // until saved. Changing a partition's filesystem is Format's job, so the
+    // table entry and the bootblock cannot disagree.
+    auto *partitions = disk->addMenu(QStringLiteral("&Partitions"));
+    m_addPartition = partitions->addAction(QStringLiteral("&Add partition..."));
+    m_addPartition->setToolTip(QStringLiteral(
+        "A new partition in unused space on this hard disk, formatted. Not bootable."));
+    connect(m_addPartition, &QAction::triggered, this, &MainWindow::addPartitionSelected);
+    m_renamePartition = partitions->addAction(QStringLiteral("&Rename partition..."));
+    connect(m_renamePartition, &QAction::triggered, this,
+            &MainWindow::renamePartitionSelected);
+    m_bootPartition = partitions->addAction(QStringLiteral("&Boot priority..."));
+    m_bootPartition->setToolTip(QStringLiteral(
+        "Whether Kickstart may boot from this partition, and before which others."));
+    connect(m_bootPartition, &QAction::triggered, this, &MainWindow::bootPartitionSelected);
+    m_deletePartition = partitions->addAction(QStringLiteral("&Delete partition..."));
+    m_deletePartition->setToolTip(QStringLiteral(
+        "Remove the partition and its volume from the table. Its blocks are left as they "
+        "were; Undo brings it back until you save."));
+    connect(m_deletePartition, &QAction::triggered, this,
+            &MainWindow::deletePartitionSelected);
+    for (QAction *a : {m_addPartition, m_renamePartition, m_bootPartition, m_deletePartition}) {
+        a->setEnabled(false);
+    }
+
     // Help. The manual will join About here; nothing stands in for it in the
     // meantime, because a menu item that is greyed out or opens an apology is
     // a promise the window has already broken.
@@ -2890,6 +2915,10 @@ int MainWindow::moveItems(QTreeWidgetItem *target, const QList<QTreeWidgetItem *
 }
 
 bool MainWindow::formatDisk(QTreeWidgetItem *item, const QString &name) {
+    return formatDiskAs(item, name, QString());
+}
+
+bool MainWindow::formatDiskAs(QTreeWidgetItem *item, const QString &name, const QString &type) {
     Open *open = item ? imageFor(item) : editTarget();
     if (!open) return false;
     QByteArray amiga;
@@ -2901,12 +2930,17 @@ bool MainWindow::formatDisk(QTreeWidgetItem *item, const QString &name) {
     }
     quint32 partition = ADE_WHOLE_IMAGE;
     if (!partitionFor(item, *open, QStringLiteral("a format"), &partition)) return false;
-    const ade::EditResult r = open->image.format(partition, amiga);
+    const ade::EditResult r = type.isEmpty()
+                                  ? open->image.format(partition, amiga)
+                                  : open->image.formatAs(partition, amiga, type.toUtf8());
     m_lastEdited = open->index;
     if (!r.ok()) {
         emit errorOccurred(QStringLiteral("Could not format %1: %2").arg(open->name, r.message));
         return false;
     }
+    // A new filesystem on a hard disk is a table edit too: answers about
+    // free data were given for the partitions as they were.
+    if (!type.isEmpty()) open->freeDataAllowed.clear();
     reloadImage(*open);
     statusBar()->showMessage(QStringLiteral("Formatted %1 — not saved yet; Undo brings "
                                             "everything back")
@@ -2948,15 +2982,229 @@ QString MainWindow::wipeDisk(QTreeWidgetItem *item, bool freeBlocks) {
 void MainWindow::formatSelected() {
     Open *open = imageFor(m_selected);
     if (!open) return;
+    QDialog dialog(this);
+    dialog.setWindowTitle(QStringLiteral("Format %1").arg(open->name));
+    auto *said = new QLabel(QStringLiteral("Everything on it leaves its folders; Undo brings it "
+                                           "back until you save."),
+                            &dialog);
+    auto *name = new QLineEdit(&dialog);
+    name->setObjectName(QStringLiteral("formatName"));
+    name->setPlaceholderText(QStringLiteral("the name it has"));
+    name->setMaxLength(30);
+    // The filesystems come from the engine, as New disk's do.
+    auto *type = new QComboBox(&dialog);
+    type->setObjectName(QStringLiteral("formatType"));
+    type->addItem(QStringLiteral("The one it has"), QString());
+    for (size_t i = 0; i < ade_create_type_count(); ++i) {
+        type->addItem(QString::fromUtf8(ade_create_type_label(i)),
+                      QString::fromUtf8(ade_create_type_name(i)));
+    }
+    auto *form = new QFormLayout;
+    form->addRow(said);
+    form->addRow(QStringLiteral("Volume name"), name);
+    form->addRow(QStringLiteral("Filesystem"), type);
+    auto *buttons =
+        new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
+    connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+    connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+    auto *layout = new QVBoxLayout(&dialog);
+    layout->addLayout(form);
+    layout->addWidget(buttons);
+    if (dialog.exec() != QDialog::Accepted) return;
+    formatDiskAs(m_selected, name->text(), type->currentData().toString());
+}
+
+bool MainWindow::tableEdited(Open &open, const ade::EditResult &r, const QString &done) {
+    m_lastEdited = open.index;
+    if (!r.ok()) {
+        emit errorOccurred(QStringLiteral("Could not change the partitions of %1: %2")
+                               .arg(open.name, r.message));
+        return false;
+    }
+    // A table edit can change which partition an index means; answers about
+    // free data are asked again rather than applied to the wrong partition.
+    open.freeDataAllowed.clear();
+    reloadImage(open);
+    statusBar()->showMessage(QStringLiteral("%1 — not saved yet").arg(done));
+    return true;
+}
+
+// The partition `item` is in, by index and drive name; refused with a
+// message for a row that is in none.
+static bool partitionAt(const QTreeWidgetItem *item, const ade::Image &image, quint32 *index,
+                        QString *drive) {
+    const quint32 partition = partitionOf(item);
+    if (partition == ADE_WHOLE_IMAGE) return false;
+    const ade::Partitions table = image.partitions();
+    AdePartition p{};
+    if (!table || !table.at(partition, &p)) return false;
+    *index = partition;
+    *drive = ade::latin1(p.name);
+    return true;
+}
+
+bool MainWindow::addPartition(QTreeWidgetItem *item, const QString &drive, quint32 megabytes,
+                              const QString &type, const QString &volume) {
+    Open *open = item ? imageFor(item) : editTarget();
+    if (!open) return false;
+    const ade::EditResult r =
+        open->image.addPartition(drive.toUtf8(), megabytes, type.toUtf8(), volume.toUtf8());
+    return tableEdited(*open, r, QStringLiteral("Added %1 to %2").arg(drive, open->name));
+}
+
+bool MainWindow::renamePartition(QTreeWidgetItem *item, const QString &drive) {
+    Open *open = imageFor(item);
+    quint32 index = 0;
+    QString old;
+    if (!open || !partitionAt(item, open->image, &index, &old)) {
+        emit errorOccurred(QStringLiteral("Choose a partition to rename first."));
+        return false;
+    }
+    const ade::EditResult r = open->image.renamePartition(index, drive.toUtf8());
+    return tableEdited(*open, r, QStringLiteral("Renamed %1 to %2").arg(old, drive));
+}
+
+bool MainWindow::setPartitionBoot(QTreeWidgetItem *item, bool bootable, int priority) {
+    Open *open = imageFor(item);
+    quint32 index = 0;
+    QString drive;
+    if (!open || !partitionAt(item, open->image, &index, &drive)) {
+        emit errorOccurred(QStringLiteral("Choose a partition first."));
+        return false;
+    }
+    const ade::EditResult r = open->image.setPartitionBoot(index, bootable, priority);
+    return tableEdited(*open, r,
+                       bootable ? QStringLiteral("%1 is bootable at priority %2")
+                                      .arg(drive)
+                                      .arg(priority)
+                                : QStringLiteral("%1 is not bootable").arg(drive));
+}
+
+bool MainWindow::deletePartition(QTreeWidgetItem *item) {
+    Open *open = imageFor(item);
+    quint32 index = 0;
+    QString drive;
+    if (!open || !partitionAt(item, open->image, &index, &drive)) {
+        emit errorOccurred(QStringLiteral("Choose a partition to delete first."));
+        return false;
+    }
+    if (m_confirmDelete &&
+        !m_confirmDelete(QStringLiteral("Delete the partition %1 and the volume in it?\n\n"
+                                        "Undo brings it back until you save the disk.")
+                             .arg(drive))) {
+        return false;
+    }
+    const ade::EditResult r = open->image.deletePartition(index);
+    return tableEdited(*open, r, QStringLiteral("Deleted %1 from %2").arg(drive, open->name));
+}
+
+void MainWindow::addPartitionSelected() {
+    Open *open = imageFor(m_selected);
+    if (!open) return;
+    // A drive name no partition has yet: DH0, DH1, ...
+    QStringList taken;
+    if (const ade::Partitions table = open->image.partitions()) {
+        for (size_t i = 0; i < table.count(); ++i) {
+            AdePartition p{};
+            if (table.at(i, &p)) taken << ade::latin1(p.name).toUpper();
+        }
+    }
+    int n = 0;
+    while (taken.contains(QStringLiteral("DH%1").arg(n))) ++n;
+
+    QDialog dialog(this);
+    dialog.setWindowTitle(QStringLiteral("Add partition to %1").arg(open->name));
+    auto *drive = new QLineEdit(QStringLiteral("DH%1").arg(n), &dialog);
+    drive->setObjectName(QStringLiteral("addPartitionDrive"));
+    auto *rest = new QCheckBox(QStringLiteral("All of the largest unused space"), &dialog);
+    rest->setObjectName(QStringLiteral("addPartitionRest"));
+    rest->setChecked(true);
+    auto *size = new QSpinBox(&dialog);
+    size->setObjectName(QStringLiteral("addPartitionSize"));
+    size->setRange(1, 4096);
+    size->setSuffix(QStringLiteral(" MB"));
+    size->setValue(8);
+    size->setEnabled(false);
+    connect(rest, &QCheckBox::toggled, size, [size](bool all) { size->setEnabled(!all); });
+    auto *type = new QComboBox(&dialog);
+    type->setObjectName(QStringLiteral("addPartitionType"));
+    for (size_t i = 0; i < ade_create_type_count(); ++i) {
+        type->addItem(QString::fromUtf8(ade_create_type_label(i)),
+                      QString::fromUtf8(ade_create_type_name(i)));
+    }
+    type->setCurrentIndex(type->findData(QStringLiteral("ffs-intl")));
+    auto *volume = new QLineEdit(&dialog);
+    volume->setObjectName(QStringLiteral("addPartitionVolume"));
+    volume->setPlaceholderText(QStringLiteral("the drive name"));
+    volume->setMaxLength(30);
+    auto *form = new QFormLayout;
+    form->addRow(QStringLiteral("Drive"), drive);
+    form->addRow(QStringLiteral("Size"), rest);
+    form->addRow(QString(), size);
+    form->addRow(QStringLiteral("Filesystem"), type);
+    form->addRow(QStringLiteral("Volume name"), volume);
+    auto *buttons =
+        new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
+    connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+    connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+    auto *layout = new QVBoxLayout(&dialog);
+    layout->addLayout(form);
+    layout->addWidget(buttons);
+    if (dialog.exec() != QDialog::Accepted) return;
+    addPartition(m_selected, drive->text().trimmed(),
+                 rest->isChecked() ? 0u : static_cast<quint32>(size->value()),
+                 type->currentData().toString(), volume->text().trimmed());
+}
+
+void MainWindow::renamePartitionSelected() {
+    Open *open = imageFor(m_selected);
+    quint32 index = 0;
+    QString drive;
+    if (!open || !partitionAt(m_selected, open->image, &index, &drive)) return;
     bool ok = false;
     const QString name = QInputDialog::getText(
-        this, QStringLiteral("Format %1").arg(open->name),
-        QStringLiteral("Everything on it leaves its folders; Undo brings it back until you "
-                       "save.\n\nVolume name (empty keeps the one it has):"),
-        QLineEdit::Normal, QString(), &ok);
-    if (!ok) return;
-    formatDisk(m_selected, name);
+        this, QStringLiteral("Rename partition"),
+        QStringLiteral("The drive's new name — what AmigaDOS mounts it as (%1:).\nIts "
+                       "volume keeps its own name.")
+            .arg(drive),
+        QLineEdit::Normal, drive, &ok);
+    if (ok && !name.trimmed().isEmpty()) renamePartition(m_selected, name.trimmed());
 }
+
+void MainWindow::bootPartitionSelected() {
+    Open *open = imageFor(m_selected);
+    quint32 index = 0;
+    QString drive;
+    if (!open || !partitionAt(m_selected, open->image, &index, &drive)) return;
+    AdePartition p{};
+    open->image.partitions().at(index, &p);
+    QDialog dialog(this);
+    dialog.setWindowTitle(QStringLiteral("Boot priority of %1").arg(drive));
+    auto *bootable = new QCheckBox(QStringLiteral("Bootable"), &dialog);
+    bootable->setObjectName(QStringLiteral("bootPartitionBootable"));
+    bootable->setChecked(p.bootable);
+    auto *priority = new QSpinBox(&dialog);
+    priority->setObjectName(QStringLiteral("bootPartitionPriority"));
+    priority->setRange(-128, 127);
+    priority->setToolTip(QStringLiteral(
+        "Kickstart boots the bootable partition with the highest priority."));
+    priority->setEnabled(p.bootable);
+    connect(bootable, &QCheckBox::toggled, priority, &QSpinBox::setEnabled);
+    auto *form = new QFormLayout;
+    form->addRow(bootable);
+    form->addRow(QStringLiteral("Priority"), priority);
+    auto *buttons =
+        new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
+    connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+    connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+    auto *layout = new QVBoxLayout(&dialog);
+    layout->addLayout(form);
+    layout->addWidget(buttons);
+    if (dialog.exec() != QDialog::Accepted) return;
+    setPartitionBoot(m_selected, bootable->isChecked(), priority->value());
+}
+
+void MainWindow::deletePartitionSelected() { deletePartition(m_selected); }
 
 void MainWindow::wipeSlackSelected() { wipeDisk(m_selected, false); }
 
@@ -3188,6 +3436,14 @@ void MainWindow::updateEditActions() {
     if (m_format) m_format->setEnabled(plain);
     if (m_wipeSlack) m_wipeSlack->setEnabled(plain);
     if (m_wipeFree) m_wipeFree->setEnabled(plain);
+    // The table: Add on any row of a hard disk; the rest on a partition.
+    const bool device = open && m_selected && imageFor(m_selected) == open &&
+                        open->image.partitions();
+    const bool onPartition = device && partitionOf(m_selected) != ADE_WHOLE_IMAGE;
+    if (m_addPartition) m_addPartition->setEnabled(device);
+    for (QAction *a : {m_renamePartition, m_bootPartition, m_deletePartition}) {
+        if (a) a->setEnabled(onPartition);
+    }
     const bool entry = plain && isEditableEntry(m_selected, m_tree);
     if (m_delete) m_delete->setEnabled(entry);
     if (m_rename) m_rename->setEnabled(entry);

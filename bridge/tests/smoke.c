@@ -440,6 +440,21 @@ int main(int argc, char **argv) {
             AdePartitions *table = device ? ade_partitions_open(device) : NULL;
             check(table != NULL && ade_partitions_count(table) == 2, "with its two partitions");
             ade_partitions_free(table);
+            /* Its table edited (F-038): every call, as C sees them. */
+            const uint8_t fast[] = "Fast";
+            AdeBytes fast_name = { fast, sizeof fast - 1 };
+            check(ade_partition_rename(device, 1, "WORK", NULL) == ADE_OK &&
+                      ade_partition_set_boot(device, 1, true, -3, NULL) == ADE_OK &&
+                      ade_edit_format_as(device, 1, fast_name, "ffs", NULL) == ADE_OK &&
+                      ade_partition_delete(device, 0, NULL) == ADE_OK,
+                  "a partition is renamed, made bootable, reformatted, and another deleted");
+            AdePartitionSpec again = { "DH0", 0, "ofs", "Back" };
+            uint32_t added = 99;
+            check(ade_partition_add(device, &again, &added, NULL) == ADE_OK && added == 1,
+                  "and a partition added in its place");
+            check(ade_partition_rename(device, 7, "X", NULL) == ADE_REFUSED &&
+                      ade_partition_add(NULL, &again, NULL, NULL) == ADE_NULL_ARGUMENT,
+                  "a partition that is not there is refused; NULL is tolerated");
             ade_image_free(device);
             AdePartitionSpec rest_first[2] = {
                 { "DH0", 0, NULL, NULL },

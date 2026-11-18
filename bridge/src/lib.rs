@@ -2840,6 +2840,220 @@ pub unsafe extern "C" fn ade_edit_format(
     })
 }
 
+/// As [`ade_edit_format`], as another filesystem: `type_name` is one of
+/// `ade_create_type_name`'s, or null to keep the one it has. On a partitioned
+/// disk the partition's table entry changes with its bootblock (F-038).
+///
+/// # Safety
+/// As [`ade_edit_format`], and `type_name` NUL-terminated or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ade_edit_format_as(
+    image: *mut AdeImage,
+    partition: u32,
+    name: AdeBytes,
+    type_name: *const c_char,
+    out_message: *mut *mut c_char,
+) -> AdeResult {
+    // SAFETY: the caller's contract.
+    let Some(name) = (unsafe { borrowed(name) }) else {
+        return AdeResult::NullArgument;
+    };
+    // SAFETY: the caller's contract.
+    let filesystem = match unsafe { optional_text(type_name) } {
+        Ok(None) => None,
+        Ok(Some(t)) => {
+            let Some(d) = ade_core::create::dostype(t) else {
+                set_message(
+                    out_message,
+                    &ade_core::create::CreateError::UnknownType(t.to_owned()).to_string(),
+                );
+                return AdeResult::NotFound;
+            };
+            Some(d)
+        }
+        Err(code) => return code,
+    };
+    edit(image, partition, std::ptr::null_mut(), out_message, |s| {
+        s.format_as((!name.is_empty()).then_some(name), filesystem)
+            .map(|()| 0)
+    })
+}
+
+/// Run a partition-table edit through the handle's session, starting one if
+/// needed. The handle forgets which partitions free data was allowed in: a
+/// table edit can change which partition an index means, and asking again is
+/// safe where answering for the wrong partition is not (IMP-024).
+fn table_edit(
+    image: *mut AdeImage,
+    out_message: *mut *mut c_char,
+    change: impl FnOnce(&mut ade_core::edit::Session) -> Result<(), ade_core::edit::EditError>,
+) -> AdeResult {
+    with_image_mut(image, AdeResult::NullArgument, |image| {
+        if let Err(e) = ensure_session(image) {
+            set_message(out_message, &e.to_string());
+            return edit_code(&e);
+        }
+        let Some(session) = image.session.as_mut() else {
+            return AdeResult::Internal;
+        };
+        if !session.is_partitioned() {
+            set_message(out_message, "this image has no partition table");
+            return AdeResult::Refused;
+        }
+        match change(session) {
+            Ok(()) => {
+                image.free_data_allowed.clear();
+                refresh(image);
+                AdeResult::Ok
+            }
+            Err(e) => {
+                set_message(out_message, &e.to_string());
+                edit_code(&e)
+            }
+        }
+    })
+}
+
+/// The drive name of partition `index` of the session's disk.
+fn partition_name(
+    session: &ade_core::edit::Session,
+    index: u32,
+) -> Result<String, ade_core::edit::EditError> {
+    session
+        .partitions()
+        .into_iter()
+        .nth(index as usize)
+        .map(|(name, _)| name)
+        .ok_or_else(|| {
+            ade_core::edit::EditError::NotEditable(format!(
+                "no partition {index}; this disk has {}",
+                session.partitions().len()
+            ))
+        })
+}
+
+/// Add a partition to a partitioned disk (F-038, D-024 part 5): in the first
+/// unused cylinders that hold `spec->megabytes` (0: the largest unused run),
+/// formatted with its filesystem and volume name, not bootable. On success
+/// `*out_index` (if not null) is its index among the disk's partitions.
+///
+/// # Safety
+/// `image` a live handle or null; `spec` readable or null, its strings
+/// NUL-terminated or null; `out_index` writable or null; `out_message` as for
+/// [`ade_edit_mkdir`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ade_partition_add(
+    image: *mut AdeImage,
+    spec: *const AdePartitionSpec,
+    out_index: *mut u32,
+    out_message: *mut *mut c_char,
+) -> AdeResult {
+    use ade_core::create::{self, PartitionSize};
+    // SAFETY: the caller's contract.
+    let Some(spec) = (unsafe { spec.as_ref() }) else {
+        return AdeResult::NullArgument;
+    };
+    // SAFETY: the caller's contract, for each string.
+    let (name, kind, volume) = match unsafe {
+        (
+            optional_text(spec.name),
+            optional_text(spec.type_name),
+            optional_text(spec.volume_name),
+        )
+    } {
+        (Ok(Some(n)), Ok(k), Ok(v)) => (n.to_owned(), k, v.map(str::to_owned)),
+        (Ok(None), _, _) => return AdeResult::NullArgument,
+        _ => return AdeResult::BadEncoding,
+    };
+    let kind = kind.unwrap_or(create::DEFAULT_TYPE);
+    let Some(filesystem) = create::dostype(kind) else {
+        set_message(
+            out_message,
+            &create::CreateError::UnknownType(kind.to_owned()).to_string(),
+        );
+        return AdeResult::NotFound;
+    };
+    let size = if spec.megabytes == 0 {
+        PartitionSize::Rest
+    } else {
+        PartitionSize::Megabytes(spec.megabytes)
+    };
+    let mut index = 0usize;
+    let result = table_edit(image, out_message, |s| {
+        index = s.add_partition(&name, size, filesystem, volume.as_deref())?;
+        Ok(())
+    });
+    if result == AdeResult::Ok && !out_index.is_null() {
+        // SAFETY: checked non-null; the caller promises it is writable.
+        unsafe { *out_index = u32::try_from(index).unwrap_or(u32::MAX) };
+    }
+    result
+}
+
+/// Delete partition `partition` and its volume. Its blocks are left as they
+/// were; Undo puts it back.
+///
+/// # Safety
+/// `image` a live handle or null; `out_message` as for [`ade_edit_mkdir`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ade_partition_delete(
+    image: *mut AdeImage,
+    partition: u32,
+    out_message: *mut *mut c_char,
+) -> AdeResult {
+    table_edit(image, out_message, |s| {
+        let name = partition_name(s, partition)?;
+        s.delete_partition(&name)
+    })
+}
+
+/// Rename partition `partition`'s drive to `name` (UTF-8: `WORK`).
+///
+/// # Safety
+/// `image` a live handle or null; `name` NUL-terminated or null;
+/// `out_message` as for [`ade_edit_mkdir`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ade_partition_rename(
+    image: *mut AdeImage,
+    partition: u32,
+    name: *const c_char,
+    out_message: *mut *mut c_char,
+) -> AdeResult {
+    // SAFETY: the caller's contract.
+    let name = match unsafe { optional_text(name) } {
+        Ok(Some(n)) => n.to_owned(),
+        Ok(None) => return AdeResult::NullArgument,
+        Err(code) => return code,
+    };
+    table_edit(image, out_message, |s| {
+        let old = partition_name(s, partition)?;
+        s.rename_partition(&old, &name)
+    })
+}
+
+/// Mark partition `partition` bootable at `priority` (-128 to 127), or not
+/// bootable.
+///
+/// # Safety
+/// `image` a live handle or null; `out_message` as for [`ade_edit_mkdir`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ade_partition_set_boot(
+    image: *mut AdeImage,
+    partition: u32,
+    bootable: bool,
+    priority: i32,
+    out_message: *mut *mut c_char,
+) -> AdeResult {
+    if bootable && !(-128..=127).contains(&priority) {
+        set_message(out_message, "a boot priority is -128 to 127");
+        return AdeResult::Refused;
+    }
+    table_edit(image, out_message, |s| {
+        let name = partition_name(s, partition)?;
+        s.set_partition_boot(&name, bootable.then_some(priority))
+    })
+}
+
 /// Zero file slack, free blocks, or both, as one undo step. `out_report`
 /// receives a line per part — blocks zeroed, bytes that held something, and
 /// each file left alone with why — freed with [`ade_string_free`]. Wiping

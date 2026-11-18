@@ -3014,3 +3014,218 @@ fn a_partitioned_disk_is_made_through_the_abi() {
     }
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// The drive names and dostypes of an open image's partitions, and which are
+/// bootable.
+///
+/// # Safety
+/// `image` must be a live handle.
+unsafe fn table_of(image: *const ade::AdeImage) -> Vec<(Vec<u8>, u32, bool)> {
+    // SAFETY: the caller's contract.
+    unsafe {
+        let table = ade::ade_partitions_open(image);
+        let mut out = Vec::new();
+        for i in 0..ade::ade_partitions_count(table) {
+            let mut p = std::mem::zeroed::<ade::AdePartition>();
+            ade::ade_partitions_entry(table, i, &raw mut p);
+            out.push((
+                std::slice::from_raw_parts(p.name.data, p.name.len).to_vec(),
+                p.dostype,
+                p.bootable,
+            ));
+        }
+        ade::ade_partitions_free(table);
+        out
+    }
+}
+
+#[test]
+fn a_partition_table_is_edited_through_the_abi() {
+    use std::ptr::null_mut as none;
+    let dir = std::env::temp_dir().join(format!("ade-abi-ptable-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let c = |name: &str| CString::new(dir.join(name).to_str().unwrap()).unwrap();
+    let (made, saved) = (c("made.hdf"), c("saved.hdf"));
+    let text = |s: &str| CString::new(s).unwrap();
+    let (dh0, dh1, data, ofs, work, ffs) = (
+        text("DH0"),
+        text("DH1"),
+        text("Data"),
+        text("ofs"),
+        text("WORK"),
+        text("ffs"),
+    );
+    let first = ade::AdePartitionSpec {
+        name: dh0.as_ptr(),
+        megabytes: 4,
+        type_name: std::ptr::null(),
+        volume_name: std::ptr::null(),
+    };
+    let second = ade::AdePartitionSpec {
+        name: dh1.as_ptr(),
+        megabytes: 0,
+        type_name: ofs.as_ptr(),
+        volume_name: data.as_ptr(),
+    };
+    // SAFETY: valid strings and specs; handles and messages freed once.
+    unsafe {
+        assert_eq!(
+            ade::ade_create_partitioned(
+                made.as_ptr(),
+                12,
+                &raw const first,
+                1,
+                std::ptr::null(),
+                none()
+            ),
+            AdeResult::Ok
+        );
+        let image = ade::ade_image_open(made.as_ptr(), std::ptr::null(), none());
+
+        let mut index = u32::MAX;
+        assert_eq!(
+            ade::ade_partition_add(image, &raw const second, &raw mut index, none()),
+            AdeResult::Ok
+        );
+        assert_eq!(index, 1);
+        assert_eq!(table_of(image)[1], (b"DH1".to_vec(), 0x444F_5300, false));
+        assert_eq!(
+            ade::ade_partition_rename(image, 1, work.as_ptr(), none()),
+            AdeResult::Ok
+        );
+        assert_eq!(
+            ade::ade_partition_set_boot(image, 1, true, -3, none()),
+            AdeResult::Ok
+        );
+        assert_eq!(
+            ade::ade_partition_set_boot(image, 0, false, 0, none()),
+            AdeResult::Ok
+        );
+        assert_eq!(
+            ade::ade_edit_format_as(image, 1, bytes_of(b"Fast"), ffs.as_ptr(), none()),
+            AdeResult::Ok
+        );
+        assert_eq!(
+            table_of(image),
+            vec![
+                (b"DH0".to_vec(), 0x444F_5303, false),
+                (b"WORK".to_vec(), 0x444F_5301, true)
+            ]
+        );
+        assert_eq!(ade::ade_partition_delete(image, 0, none()), AdeResult::Ok);
+        assert_eq!(table_of(image).len(), 1);
+        assert_eq!(ade::ade_edit_undo(image), AdeResult::Ok);
+        assert_eq!(table_of(image).len(), 2, "undo puts DH0 back");
+
+        // Saved, the table is what was made.
+        assert_eq!(
+            ade::ade_image_save_as(image, saved.as_ptr(), none()),
+            AdeResult::Ok
+        );
+        ade::ade_image_free(image);
+        let reopened = ade::ade_image_open(saved.as_ptr(), std::ptr::null(), none());
+        assert_eq!(table_of(reopened)[1], (b"WORK".to_vec(), 0x444F_5301, true));
+        ade::ade_image_free(reopened);
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_partition_table_edit_that_cannot_be_is_refused_with_why() {
+    use std::ptr::null_mut as none;
+    let dir = std::env::temp_dir().join(format!("ade-abi-ptable-no-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let c = |name: &str| CString::new(dir.join(name).to_str().unwrap()).unwrap();
+    let made = c("made.hdf");
+    let (dh0, dh1) = (CString::new("DH0").unwrap(), CString::new("DH1").unwrap());
+    let parts = [
+        ade::AdePartitionSpec {
+            name: dh0.as_ptr(),
+            megabytes: 4,
+            type_name: std::ptr::null(),
+            volume_name: std::ptr::null(),
+        },
+        ade::AdePartitionSpec {
+            name: dh1.as_ptr(),
+            megabytes: 0,
+            type_name: std::ptr::null(),
+            volume_name: std::ptr::null(),
+        },
+    ];
+    let second = parts[1];
+    // SAFETY: valid strings and specs; handles and messages freed once.
+    unsafe {
+        assert_eq!(
+            ade::ade_create_partitioned(
+                made.as_ptr(),
+                12,
+                parts.as_ptr(),
+                2,
+                std::ptr::null(),
+                none()
+            ),
+            AdeResult::Ok
+        );
+        let image = ade::ade_image_open(made.as_ptr(), std::ptr::null(), none());
+        // Refused, with why, and nothing changed.
+        let mut why: *mut std::ffi::c_char = std::ptr::null_mut();
+        assert_eq!(
+            ade::ade_partition_rename(image, 1, dh0.as_ptr(), &raw mut why),
+            AdeResult::Refused
+        );
+        assert!(
+            CStr::from_ptr(why)
+                .to_string_lossy()
+                .contains("already named")
+        );
+        ade::ade_string_free(why);
+        assert_eq!(
+            ade::ade_partition_delete(image, 9, none()),
+            AdeResult::Refused
+        );
+        assert_eq!(
+            ade::ade_partition_set_boot(image, 1, true, 200, none()),
+            AdeResult::Refused
+        );
+        assert_eq!(
+            ade::ade_partition_add(image, &raw const second, none(), none()),
+            AdeResult::Refused,
+            "DH1 is named, and the disk is full"
+        );
+        assert_eq!(table_of(image).len(), 2, "nothing changed");
+
+        ade::ade_image_free(image);
+
+        // A floppy has no table to edit; null is tolerated.
+        let floppy = c("floppy.adf");
+        ade::ade_create(floppy.as_ptr(), std::ptr::null(), std::ptr::null(), 0, 0);
+        let plain = ade::ade_image_open(floppy.as_ptr(), std::ptr::null(), none());
+        assert_eq!(
+            ade::ade_partition_delete(plain, 0, none()),
+            AdeResult::Refused
+        );
+        ade::ade_image_free(plain);
+        assert_eq!(
+            ade::ade_partition_delete(none(), 0, none()),
+            AdeResult::NullArgument
+        );
+        assert_eq!(
+            ade::ade_partition_add(image_null(), std::ptr::null(), none(), none()),
+            AdeResult::NullArgument
+        );
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+fn bytes_of(b: &'static [u8]) -> ade::AdeBytes {
+    ade::AdeBytes {
+        data: b.as_ptr(),
+        len: b.len(),
+    }
+}
+
+const fn image_null() -> *mut ade::AdeImage {
+    std::ptr::null_mut()
+}

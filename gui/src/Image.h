@@ -711,6 +711,54 @@ public:
         r.message = take(why);
         return r;
     }
+    /// Quick-format as another filesystem, `type` being one of
+    /// ade_create_type_name's; on a hard disk the partition's table entry
+    /// changes with it.
+    EditResult formatAs(quint32 partition, const QByteArray &name, const QByteArray &type) {
+        EditResult r;
+        char *why = nullptr;
+        r.code = ade_edit_format_as(m_raw, partition, view(name), type.constData(), &why);
+        r.message = take(why);
+        return r;
+    }
+
+    // Editing a hard disk's partition table (F-038). Partitions are by index,
+    // and an edit can change which partition an index means: read the table
+    // again after one.
+    /// Add a partition; `megabytes` 0 takes the largest unused run. On
+    /// success `block` is its index.
+    EditResult addPartition(const QByteArray &drive, quint32 megabytes, const QByteArray &type,
+                            const QByteArray &volume) {
+        const AdePartitionSpec spec{drive.constData(), megabytes,
+                                    type.isEmpty() ? nullptr : type.constData(),
+                                    volume.isEmpty() ? nullptr : volume.constData()};
+        EditResult r;
+        char *why = nullptr;
+        r.code = ade_partition_add(m_raw, &spec, &r.block, &why);
+        r.message = take(why);
+        return r;
+    }
+    EditResult deletePartition(quint32 partition) {
+        EditResult r;
+        char *why = nullptr;
+        r.code = ade_partition_delete(m_raw, partition, &why);
+        r.message = take(why);
+        return r;
+    }
+    EditResult renamePartition(quint32 partition, const QByteArray &drive) {
+        EditResult r;
+        char *why = nullptr;
+        r.code = ade_partition_rename(m_raw, partition, drive.constData(), &why);
+        r.message = take(why);
+        return r;
+    }
+    EditResult setPartitionBoot(quint32 partition, bool bootable, int priority) {
+        EditResult r;
+        char *why = nullptr;
+        r.code = ade_partition_set_boot(m_raw, partition, bootable, priority, &why);
+        r.message = take(why);
+        return r;
+    }
     /// Zero file slack, free blocks or both. On success `message` is the
     /// report; otherwise why not.
     EditResult wipe(quint32 partition, bool slack, bool free) {

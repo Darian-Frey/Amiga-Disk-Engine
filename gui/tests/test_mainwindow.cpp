@@ -189,6 +189,8 @@ private slots:
     void newDiskIsOfferedAndItsTypesComeFromTheEngine();
     void newDiskMakesAPartitionedHardDisk();
     void newDiskSaysWhyAPartitionPlanIsNotADisk();
+    void aPartitionTableIsEditedFromTheWindow();
+    void partitionsAreAddedAndReformattedThroughTheirDialogs();
     void aFileThatIsNotADiskImageIsDeclinedRatherThanShown();
     void thereIsAHelpMenuWithAnAboutBox();
     void theAboutBoxTakesItsVersionFromTheEngine();
@@ -1648,6 +1650,40 @@ void fillNewDisk(MainWindow &window, int megabytes,
 }
 
 // File ▸ New disk..., as a person reaches it.
+// The Disk menu's item called `text`, looking into its submenus too.
+QAction *diskAction(MainWindow &window, const QString &text) {
+    for (QAction *top : window.menuBar()->actions()) {
+        if (!top->text().contains(QStringLiteral("Disk"))) continue;
+        QList<QMenu *> menus{top->menu()};
+        while (!menus.isEmpty()) {
+            for (QAction *item : menus.takeFirst()->actions()) {
+                if (item->menu()) menus << item->menu();
+                if (item->text().remove(QLatin1Char('&')).startsWith(text)) return item;
+            }
+        }
+    }
+    return nullptr;
+}
+
+// A hard disk of `megabytes` with one partition, DH0, of `first` MB, made
+// through the ABI into the test's folder.
+QString partitionedDisk(const QTemporaryDir &dir, const QString &name, uint32_t megabytes,
+                        uint32_t first) {
+    const QString path = dir.filePath(name);
+    const AdePartitionSpec dh0{"DH0", first, nullptr, nullptr};
+    if (ade_create_partitioned(path.toLocal8Bit().constData(), megabytes, &dh0, 1, nullptr,
+                               nullptr) != ADE_OK) {
+        return {};
+    }
+    return path;
+}
+
+// Select a row as a click does.
+void select(MainWindow &window, QTreeWidgetItem *item) {
+    auto *tree = browser(window);
+    tree->selectionModel()->select(tree->indexFromItem(item), QItemSelectionModel::ClearAndSelect);
+}
+
 QAction *newDiskAction(MainWindow &window) {
     for (QAction *top : window.menuBar()->actions()) {
         if (!top->text().contains(QStringLiteral("File"))) continue;
@@ -1712,6 +1748,124 @@ void TestMainWindow::newDiskSaysWhyAPartitionPlanIsNotADisk() {
              qPrintable(errors.first()));
     QVERIFY(!QFileInfo::exists(path));
     QCOMPARE(browser(window)->topLevelItemCount(), 0);
+}
+
+void TestMainWindow::aPartitionTableIsEditedFromTheWindow() {
+    // F-038: every table edit from the window, on a disk ADE made, each an
+    // edit like any other — the rows rebuilt, Undo taking it back.
+    MainWindow window;
+    QStringList errors;
+    QObject::connect(&window, &MainWindow::errorOccurred, &window,
+                     [&errors](const QString &message) { errors << message; });
+    window.setDeleteConfirmation([](const QString &) { return true; });
+    const QString path = partitionedDisk(m_dir, QStringLiteral("table.hdf"), 12, 4);
+    QVERIFY(!path.isEmpty());
+    window.openImage(path);
+    auto *tree = browser(window);
+    const auto row = [tree](int i) { return tree->topLevelItem(0)->child(i); };
+    QCOMPARE(tree->topLevelItem(0)->childCount(), 1);
+
+    QVERIFY(window.addPartition(tree->topLevelItem(0), QStringLiteral("DH1"), 0,
+                                QStringLiteral("ofs"), QStringLiteral("Data")));
+    QCOMPARE(tree->topLevelItem(0)->childCount(), 2);
+    QVERIFY(row(1)->text(0).startsWith(QStringLiteral("DH1")));
+    QVERIFY(row(1)->text(0).contains(QStringLiteral("\"Data\"")));
+    QVERIFY(!row(1)->text(0).contains(QStringLiteral("bootable")));
+
+    QVERIFY(window.renamePartition(row(1), QStringLiteral("WORK")));
+    QVERIFY(row(1)->text(0).startsWith(QStringLiteral("WORK")));
+    QVERIFY(window.setPartitionBoot(row(1), true, -2));
+    QVERIFY(row(1)->text(0).contains(QStringLiteral("bootable")));
+    QVERIFY(window.formatDiskAs(row(1), QStringLiteral("Fast"), QStringLiteral("ffs")));
+    QVERIFY(row(1)->text(0).contains(QStringLiteral("\"Fast\"")));
+    QVERIFY(window.makeFolder(row(1), QStringLiteral("Docs")));
+
+    QVERIFY(window.deletePartition(row(0)));
+    QCOMPARE(tree->topLevelItem(0)->childCount(), 1);
+    QVERIFY(row(0)->text(0).startsWith(QStringLiteral("WORK")));
+    QVERIFY(childNamed(row(0), QStringLiteral("Docs")));
+    QVERIFY(window.undoEdit());
+    QCOMPARE(tree->topLevelItem(0)->childCount(), 2);
+    QVERIFY(row(0)->text(0).startsWith(QStringLiteral("DH0")));
+    QVERIFY2(errors.isEmpty(), qPrintable(errors.join(QLatin1Char('\n'))));
+
+    // Refused with why: a name taken; a row in no partition.
+    QVERIFY(!window.renamePartition(row(1), QStringLiteral("dh0")));
+    QVERIFY(errors.last().contains(QStringLiteral("already named")));
+    QVERIFY(!window.deletePartition(tree->topLevelItem(0)));
+    QVERIFY(errors.last().contains(QStringLiteral("Choose a partition")));
+}
+
+void TestMainWindow::partitionsAreAddedAndReformattedThroughTheirDialogs() {
+    MainWindow window;
+    QStringList errors;
+    QObject::connect(&window, &MainWindow::errorOccurred, &window,
+                     [&errors](const QString &message) { errors << message; });
+    const QString path = partitionedDisk(m_dir, QStringLiteral("dialogs.hdf"), 12, 4);
+    QVERIFY(!path.isEmpty());
+    window.openImage(path);
+    auto *tree = browser(window);
+    QAction *add = diskAction(window, QStringLiteral("Add partition"));
+    QAction *rename = diskAction(window, QStringLiteral("Rename partition"));
+    QAction *format = diskAction(window, QStringLiteral("Format"));
+    QVERIFY(add && rename && format);
+
+    // Add on the disk's own row; the partition edits only on a partition.
+    select(window, tree->topLevelItem(0));
+    QVERIFY(add->isEnabled());
+    QVERIFY(!rename->isEnabled());
+
+    QTimer::singleShot(0, &window, [] {
+        auto *dialog = qobject_cast<QDialog *>(QApplication::activeModalWidget());
+        QVERIFY(dialog);
+        auto *drive = dialog->findChild<QLineEdit *>(QStringLiteral("addPartitionDrive"));
+        QCOMPARE(drive->text(), QStringLiteral("DH1"));  // the first name not taken
+        drive->setText(QStringLiteral("DH7"));
+        dialog->findChild<QCheckBox *>(QStringLiteral("addPartitionRest"))->setChecked(false);
+        dialog->findChild<QSpinBox *>(QStringLiteral("addPartitionSize"))->setValue(2);
+        auto *type = dialog->findChild<QComboBox *>(QStringLiteral("addPartitionType"));
+        type->setCurrentIndex(type->findData(QStringLiteral("ofs")));
+        dialog->findChild<QLineEdit *>(QStringLiteral("addPartitionVolume"))
+            ->setText(QStringLiteral("Small"));
+        const QString shots = qEnvironmentVariable("ADE_GUI_SHOTS");
+        if (!shots.isEmpty()) dialog->grab().save(shots + QStringLiteral("/add-partition.png"));
+        dialog->accept();
+    });
+    add->trigger();
+    QVERIFY2(errors.isEmpty(), qPrintable(errors.join(QLatin1Char('\n'))));
+    QTreeWidgetItem *dh7 = tree->topLevelItem(0)->child(1);
+    QVERIFY(dh7 && dh7->text(0).startsWith(QStringLiteral("DH7")));
+    QVERIFY(dh7->text(0).contains(QStringLiteral("\"Small\"")));
+    QVERIFY(dh7->text(0).contains(QStringLiteral("4096 blocks")));
+
+    select(window, dh7);
+    QVERIFY(rename->isEnabled() && format->isEnabled());
+    QTimer::singleShot(0, &window, [] {
+        auto *dialog = qobject_cast<QDialog *>(QApplication::activeModalWidget());
+        QVERIFY(dialog);
+        dialog->findChild<QLineEdit *>(QStringLiteral("formatName"))
+            ->setText(QStringLiteral("Cached"));
+        auto *type = dialog->findChild<QComboBox *>(QStringLiteral("formatType"));
+        QCOMPARE(type->currentData().toString(), QString());  // keeps it, by default
+        type->setCurrentIndex(type->findData(QStringLiteral("ffs-dc")));
+        const QString shots = qEnvironmentVariable("ADE_GUI_SHOTS");
+        if (!shots.isEmpty()) dialog->grab().save(shots + QStringLiteral("/format.png"));
+        dialog->accept();
+    });
+    format->trigger();
+    QVERIFY2(errors.isEmpty(), qPrintable(errors.join(QLatin1Char('\n'))));
+    QVERIFY(tree->topLevelItem(0)->child(1)->text(0).contains(QStringLiteral("\"Cached\"")));
+    // Saved, the table says what the window did.
+    AdePartition p{};
+    QVERIFY(window.saveImageAs(tree->topLevelItem(0), m_dir.filePath(QStringLiteral("dialogs-saved.hdf"))));
+    AdeImage *saved =
+        ade_image_open(m_dir.filePath(QStringLiteral("dialogs-saved.hdf")).toLocal8Bit().constData(),
+                       nullptr, nullptr);
+    AdePartitions *table = ade_partitions_open(saved);
+    QVERIFY(ade_partitions_entry(table, 1, &p) == ADE_OK);
+    QCOMPARE(p.dostype, uint32_t(0x444F5305));
+    ade_partitions_free(table);
+    ade_image_free(saved);
 }
 
 void TestMainWindow::aFileThatIsNotADiskImageIsDeclinedRatherThanShown() {
