@@ -12,6 +12,7 @@
     clippy::indexing_slicing,
     clippy::panic,
     clippy::manual_assert_eq,
+    clippy::cast_possible_truncation,
     reason = "test scaffolding over disks it makes; disks are compared with assert!, since \
               assert_eq! would print megabytes of each"
 )]
@@ -364,4 +365,118 @@ fn renaming_a_partition_on_a_real_disk_changes_one_block() {
     assert_eq!(changed.len(), 1, "{changed:?}");
     assert_eq!(table(s.bytes())[0].0, "SYS");
     assert_eq!(warnings(s.bytes(), "SYS"), Vec::<String>::new());
+}
+
+fn pattern(len: usize, seed: u8) -> Vec<u8> {
+    (0..len)
+        .map(|i| (i as u8).wrapping_mul(31).wrapping_add(seed) ^ (i >> 8) as u8)
+        .collect()
+}
+
+#[test]
+fn a_partition_grows_into_the_cylinders_after_it_and_its_files_with_it() {
+    // The rootblock moves to the middle of the grown partition; the entries
+    // in the root, its cache on a dircache volume, and the bitmap follow.
+    for kind in ["ffs-intl", "ofs", "ffs-dc", "ofs-dc"] {
+        let original = disk(24, &[&format!("DH0:6:{kind}")]);
+        let mut s = session(original);
+        let root = s.root();
+        let dir = s.make_dir(root, b"Box").unwrap();
+        let inner = pattern(70_000, 3);
+        s.add_file(dir, b"inner", &inner).unwrap();
+        s.add_file(root, b"top", b"at the top").unwrap();
+        let before = s.bytes().to_vec();
+        let old_root = s.root();
+
+        s.grow_partition("DH0", PartitionSize::Rest).unwrap();
+        let parts = table(s.bytes());
+        assert_eq!(
+            parts[0].1 + parts[0].2,
+            24 * 2048,
+            "{kind}: to the end of the disk"
+        );
+        assert_eq!(
+            read(s.bytes(), "DH0", "top").as_deref(),
+            Some(&b"at the top"[..]),
+            "{kind}"
+        );
+        assert!(
+            read(s.bytes(), "DH0", "Box/inner") == Some(inner.clone()),
+            "{kind}"
+        );
+        assert_eq!(warnings(s.bytes(), "DH0"), Vec::<String>::new(), "{kind}");
+        assert!(s.root() > old_root, "{kind}: the rootblock moved");
+
+        // The grown volume takes files into its new blocks.
+        let big = pattern(9_000_000, 9);
+        s.add_file(s.root(), b"big", &big).unwrap();
+        assert!(read(s.bytes(), "DH0", "big") == Some(big), "{kind}");
+        assert_eq!(warnings(s.bytes(), "DH0"), Vec::<String>::new(), "{kind}");
+        assert!(s.undo() && s.undo());
+        assert!(
+            s.bytes() == before.as_slice(),
+            "{kind}: Undo takes it all back"
+        );
+    }
+}
+
+#[test]
+fn a_partition_grown_past_25_bitmap_pages_gets_an_extension_chain() {
+    let mut s = session(disk(160, &["DH0:40"]));
+    let data = pattern(300_000, 5);
+    s.add_file(s.root(), b"kept", &data).unwrap();
+    s.grow_partition("DH0", PartitionSize::Megabytes(120))
+        .unwrap();
+    let parts = table(s.bytes());
+    assert_eq!(parts[0].2, 120 * 2048);
+    // 245,760 blocks need 61 bitmap pages: 25 from the rootblock, 36 listed
+    // by one extension block.
+    let at = (usize::try_from(parts[0].1).unwrap() + s.root() as usize) * 512;
+    let bm_ext = ade_core::layers::endian::u32_at(s.bytes(), at + 512 - 96).unwrap();
+    assert_ne!(bm_ext, 0);
+    assert!(read(s.bytes(), "DH0", "kept") == Some(data));
+    assert_eq!(warnings(s.bytes(), "DH0"), Vec::<String>::new());
+}
+
+#[test]
+fn growing_is_refused_where_it_cannot_be_and_nothing_changes() {
+    let mut s = session(disk(16, &["DH0:4", "DH1:rest"]));
+    let before = s.bytes().to_vec();
+    let refused = |r: Result<(), EditError>, says: &str| {
+        let e = r.unwrap_err();
+        assert!(e.to_string().contains(says), "{e}");
+    };
+    refused(
+        s.grow_partition("DH0", PartitionSize::Rest),
+        "no unused cylinders",
+    );
+    refused(
+        s.grow_partition("DH1", PartitionSize::Megabytes(2)),
+        "no unused cylinders",
+    );
+    refused(s.grow_partition("DH9", PartitionSize::Rest), "no partition");
+    assert!(s.bytes() == before.as_slice());
+
+    // A file across the block the rootblock would move to: ADE allocates
+    // from the rootblock up, so 1.3 MB from the middle of 4 MB reaches the
+    // middle of 6 MB.
+    let mut s = session(disk(12, &["DH0:4"]));
+    s.select_partition("DH0").unwrap();
+    s.add_file(s.root(), b"wide", &pattern(1_300_000, 1))
+        .unwrap();
+    let before = s.bytes().to_vec();
+    refused(
+        s.grow_partition("DH0", PartitionSize::Megabytes(3)),
+        "never shrinks",
+    );
+    refused(
+        s.grow_partition("DH0", PartitionSize::Megabytes(13)),
+        "can grow by 7 MB",
+    );
+    refused(
+        s.grow_partition("DH0", PartitionSize::Megabytes(6)),
+        "rootblock would be at block",
+    );
+    assert!(s.bytes() == before.as_slice());
+    assert_eq!(s.partition(), Some("DH0"));
 }

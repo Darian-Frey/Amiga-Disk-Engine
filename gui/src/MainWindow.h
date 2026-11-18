@@ -164,6 +164,9 @@ public:
     bool renamePartition(QTreeWidgetItem *item, const QString &drive);
     /// Mark the partition `item` is in bootable at `priority`, or not.
     bool setPartitionBoot(QTreeWidgetItem *item, bool bootable, int priority);
+    /// Grow the partition `item` is in into the unused space after it, to
+    /// `megabytes` in all (0: all of it), and its volume with it.
+    bool growPartition(QTreeWidgetItem *item, quint32 megabytes);
     /// Delete the partition `item` is in, and its volume, if the delete
     /// confirmation agrees.
     bool deletePartition(QTreeWidgetItem *item);
@@ -241,6 +244,7 @@ private slots:
     void renamePartitionSelected();
     void bootPartitionSelected();
     void deletePartitionSelected();
+    void growPartitionSelected();
     void filesDropped(QTreeWidgetItem *target, const QList<QUrl> &urls);
     void extractSelected();
     void search();
@@ -471,6 +475,7 @@ private:
     QAction *m_renamePartition = nullptr;
     QAction *m_bootPartition = nullptr;
     QAction *m_deletePartition = nullptr;
+    QAction *m_growPartition = nullptr;
     // A table edit's outcome: said, and the disk's rows rebuilt, or why not.
     bool tableEdited(Open &open, const ade::EditResult &r, const QString &done);
     Confirm m_confirmWipe;

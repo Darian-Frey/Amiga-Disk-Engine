@@ -342,6 +342,139 @@ impl Session {
         Ok(table.parts.len())
     }
 
+    /// Grow partition `wanted` into the unused cylinders straight after it —
+    /// to `size` in all, or with `Rest` all of them — and its volume with it
+    /// (D-024 part 5). AmigaDOS puts a volume's rootblock in the middle of
+    /// its partition, so the rootblock moves, the entries in the root and its
+    /// cache follow, and the bitmap grows to map the new blocks
+    /// (`ade_filesystem::grow`). Shrinking is never done, nor moving a
+    /// partition, nor growing one whose volume is not sound: repair it first.
+    ///
+    /// # Errors
+    /// [`EditError::NotEditable`] for a partition that is not there, holds no
+    /// volume ADE can mount or a damaged one, has no unused cylinders after
+    /// it for the size, or whose rootblock would land on a block in use;
+    /// [`EditError::WouldDamage`] should the result fail a check.
+    pub fn grow_partition(&mut self, wanted: &str, size: PartitionSize) -> Result<(), EditError> {
+        let table = self.read_table()?;
+        let index = Self::table_index(&table, wanted)?;
+        let Some(part) = table.parts.get(index).cloned() else {
+            return Err(refuse(format!("no partition {wanted:?}")));
+        };
+        let name = part.name_lossy();
+        let per = u64::from(part.surfaces.saturating_mul(part.blocks_per_track));
+        if per == 0 || part.block_size != 512 {
+            return Err(refuse(format!(
+                "{name}'s geometry is not one ADE grows: 512-byte blocks in whole cylinders"
+            )));
+        }
+        // The unused cylinders straight after it: up to the next partition,
+        // the end of the RDB's partition range, or the end of the disk.
+        let end = part.first_block().saturating_add(part.block_count());
+        let rdb_per = u64::from(table.rdb.cylinder_blocks.max(1));
+        let limit = table
+            .parts
+            .iter()
+            .map(Partition::first_block)
+            .filter(|&b| b >= end)
+            .chain([
+                u64::from(table.rdb.hi_cylinder)
+                    .saturating_add(1)
+                    .saturating_mul(rdb_per),
+                (self.bytes.len() as u64) / 512,
+            ])
+            .min()
+            .unwrap_or(end);
+        let spare = limit.saturating_sub(end).checked_div(per).unwrap_or(0);
+        let now = u64::from(part.high_cylinder.saturating_sub(part.low_cylinder)).saturating_add(1);
+        let wanted_cylinders = match size {
+            PartitionSize::Rest => now.saturating_add(spare),
+            PartitionSize::Megabytes(m) => u64::from(m).saturating_mul(2048).div_ceil(per),
+        };
+        if spare == 0 {
+            return Err(refuse(format!(
+                "{name} has no unused cylinders straight after it to grow into"
+            )));
+        }
+        if wanted_cylinders <= now {
+            return Err(refuse(format!(
+                "{name} is already {} MB; ADE grows a partition, never shrinks one",
+                now.saturating_mul(per) / 2048
+            )));
+        }
+        if wanted_cylinders > now.saturating_add(spare) {
+            return Err(refuse(format!(
+                "{name} can grow by {} MB, into the unused cylinders straight after it",
+                spare.saturating_mul(per) / 2048
+            )));
+        }
+
+        // Its volume, sound, as it stands; the selection goes back to what it
+        // was either way.
+        let prefer = self.partition().map(str::to_owned);
+        self.select_partition(&name)?;
+        let grown = self.grow_selected(&name, &part, wanted_cylinders, per);
+        if let Some(back) = &prefer {
+            let _ = self.select_partition(back);
+        }
+        grown
+    }
+
+    /// [`Self::grow_partition`] once `part` is selected and its size checked.
+    fn grow_selected(
+        &mut self,
+        name: &str,
+        part: &Partition,
+        wanted_cylinders: u64,
+        per: u64,
+    ) -> Result<(), EditError> {
+        let prefer = Some(name.to_owned());
+        if let Some(why) = &self.unsound {
+            return Err(EditError::Unsound(format!("{why}; repair {name} first")));
+        }
+        let (report, in_use) = self.examine_in_use();
+        let faults: Vec<String> = report
+            .findings
+            .iter()
+            .filter(|f| f.severity >= Severity::Warning && f.code != "free-blocks-hold-data")
+            .map(|f| format!("{}: {}", f.code, f.message))
+            .collect();
+        if report.examined.is_none() || !faults.is_empty() {
+            return Err(refuse(format!(
+                "{name} must be sound to grow; repair it first ({})",
+                faults.join("; ")
+            )));
+        }
+        let blocks = u32::try_from(wanted_cylinders.saturating_mul(per))
+            .map_err(|_| refuse("that is past what a volume can address"))?;
+        let new =
+            Geometry::new(blocks, 1, 1, 512, part.reserved).map_err(|e| refuse(e.to_string()))?;
+        let span = usize::try_from(new.total_bytes()).unwrap_or(usize::MAX);
+        let volume = self
+            .bytes
+            .get(self.offset..self.offset.saturating_add(span))
+            .ok_or_else(|| refuse("the grown partition is past the end of the disk"))?;
+        let grown = ade_filesystem::grow::grow_writes(volume, self.geometry, new, &in_use)
+            .map_err(|e| refuse(format!("{name}: {e}")))?;
+
+        let start = u32::try_from(part.first_block()).unwrap_or(u32::MAX);
+        let mut writes: Writes = grown
+            .into_iter()
+            .map(|(b, raw)| (start.saturating_add(b), raw))
+            .collect();
+        let mut entry = self.device_block(part.block)?;
+        let high = u32::try_from(
+            u64::from(part.low_cylinder)
+                .saturating_add(wanted_cylinders)
+                .saturating_sub(1),
+        )
+        .unwrap_or(u32::MAX);
+        let _ = ade_endian::put_u32(&mut entry, 0xa8, high);
+        rdb::reseal(&mut entry);
+        writes.insert(part.block, entry);
+        self.commit_table(&writes, Some(name), prefer.as_deref())
+    }
+
     /// Unused runs of whole cylinders within the RDB's partition range and
     /// the disk, as (first cylinder, count), in order.
     fn free_cylinders(&self, table: &Table, per: u32) -> Vec<(u32, u32)> {

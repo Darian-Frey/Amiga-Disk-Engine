@@ -971,6 +971,13 @@ AdeResult ade_edit_format_as(AdeImage *image, uint32_t partition, AdeBytes name,
  * name; not bootable. `*out_index` (if not NULL) is its index. */
 AdeResult ade_partition_add(AdeImage *image, const AdePartitionSpec *spec,
                             uint32_t *out_index, char **out_message);
+/* Grow a partition into the unused cylinders straight after it -- to
+ * `megabytes` in all, or 0 for all of them -- and its volume with it: the
+ * rootblock moves to the middle of the larger partition, as AmigaDOS
+ * expects, and the bitmap grows. Never shrinks; refused for a volume that is
+ * not sound, or whose new rootblock would land on a block in use. */
+AdeResult ade_partition_grow(AdeImage *image, uint32_t partition, uint32_t megabytes,
+                             char **out_message);
 /* Delete a partition and its volume; its blocks are left as they were. */
 AdeResult ade_partition_delete(AdeImage *image, uint32_t partition, char **out_message);
 /* Rename a partition's drive: `name` is UTF-8, "WORK". */

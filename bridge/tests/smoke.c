@@ -452,6 +452,8 @@ int main(int argc, char **argv) {
             uint32_t added = 99;
             check(ade_partition_add(device, &again, &added, NULL) == ADE_OK && added == 1,
                   "and a partition added in its place");
+            check(ade_partition_grow(device, 1, 0, NULL) == ADE_REFUSED,
+                  "a partition with nothing unused after it does not grow");
             check(ade_partition_rename(device, 7, "X", NULL) == ADE_REFUSED &&
                       ade_partition_add(NULL, &again, NULL, NULL) == ADE_NULL_ARGUMENT,
                   "a partition that is not there is refused; NULL is tolerated");

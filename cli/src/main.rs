@@ -566,7 +566,7 @@ fn usage() {
         "    ade format <image> [--name=NAME] [--type=T] --output=<new>  quick-format it in place; \
          --type for another filesystem"
             .to_owned(),
-        "    ade partition add|delete|rename|boot <image> ... --output=<new>  edit a hard disk's \
+        "    ade partition add|delete|rename|boot|grow <image> ... --output=<new>  edit a hard disk's \
          partition table (F-038)"
             .to_owned(),
         "    ade wipe <image> --slack|--free --output=<new>  zero file slack, or free blocks too"
@@ -726,7 +726,7 @@ fn open_for_editing(
 type TableChange =
     Box<dyn FnOnce(&mut ade_core::edit::Session) -> Result<String, ade_core::edit::EditError>>;
 
-/// `ade partition add|delete|rename|boot <image> …`: edit a partitioned
+/// `ade partition add|delete|rename|boot|grow <image> …`: edit a partitioned
 /// disk's table (F-038, D-024 part 5), saved to `--output` as every edit is.
 fn partition_command(args: &Args) -> ExitCode {
     if args.format == Format::Json {
@@ -777,7 +777,8 @@ fn partition_change(args: &Args) -> Result<TableChange, ExitCode> {
     let usage_error = || {
         eprintln!(
             "ade: partition add <image> NAME:SIZE[:TYPE[:VOLUME]] | delete <image> NAME | \
-             rename <image> NAME NEW | boot <image> NAME <PRIORITY|off>, with --output=<new>"
+             rename <image> NAME NEW | boot <image> NAME <PRIORITY|off> | grow <image> \
+             NAME <SIZE|rest>, with --output=<new>"
         );
         ExitCode::from(EXIT_USAGE)
     };
@@ -806,6 +807,24 @@ fn partition_change(args: &Args) -> Result<TableChange, ExitCode> {
                     spec.name,
                     kind.to_ascii_lowercase(),
                     spec.volume.as_deref().unwrap_or(&spec.name)
+                ))
+            })
+        }
+        ("grow", 4) => {
+            let name = p(2).to_owned();
+            let size = if p(3).eq_ignore_ascii_case("rest") {
+                create::PartitionSize::Rest
+            } else if let Some(m) = p(3).parse::<u32>().ok().filter(|m| *m > 0) {
+                create::PartitionSize::Megabytes(m)
+            } else {
+                eprintln!("ade: grow takes the new size in megabytes, or rest");
+                return Err(ExitCode::from(EXIT_USAGE));
+            };
+            Box::new(move |s| {
+                s.grow_partition(&name, size)?;
+                Ok(format!(
+                    "grew {name} and its volume; its rootblock moved to the middle of the \
+                     larger partition, as AmigaDOS expects"
                 ))
             })
         }

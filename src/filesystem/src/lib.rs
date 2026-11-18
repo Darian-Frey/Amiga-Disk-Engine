@@ -10,6 +10,7 @@
 
 pub mod edit;
 pub mod format;
+pub mod grow;
 
 pub mod bitmap;
 pub mod bootblock;

@@ -176,3 +176,70 @@ fn a_table_edit_that_is_not_one_is_refused_and_nothing_is_written() {
     assert!(err.contains("--output"), "{err}");
     let _ = fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn a_partition_grows_with_its_files_and_refuses_what_it_cannot() {
+    let dir = scratch("grow");
+    let (made, filled, grown, out) = (
+        at(&dir, "made.hdf"),
+        at(&dir, "filled.hdf"),
+        at(&dir, "grown.hdf"),
+        at(&dir, "out.hdf"),
+    );
+    run(&["create", &made, "--size=16", "--partition=DH0:4"]);
+    let note = dir.join("note.txt");
+    fs::write(&note, b"still here").unwrap();
+    let (code, _, err) = run(&[
+        "put",
+        &made,
+        note.to_str().unwrap(),
+        "--partition=DH0",
+        &format!("--output={filled}"),
+    ]);
+    assert_eq!(code, 0, "{err}");
+
+    let (code, out_text, err) = run(&[
+        "partition",
+        "grow",
+        &filled,
+        "DH0",
+        "rest",
+        &format!("--output={grown}"),
+    ]);
+    assert_eq!(code, 0, "{err}");
+    assert!(out_text.contains("grew DH0"), "{out_text}");
+    let (_, info, _) = run(&["info", &grown]);
+    assert!(info.contains("block 64 + 32704 x 512"), "{info}");
+    let (code, report, _) = run(&["check", &grown, "--partition=DH0"]);
+    assert_eq!(code, 0, "{report}");
+    let (_, listing, _) = run(&["ls", &grown, "--partition=DH0"]);
+    assert!(listing.contains("note.txt"), "{listing}");
+
+    let output = format!("--output={out}");
+    for (args, says) in [
+        (
+            vec!["partition", "grow", &grown, "DH0", "rest"],
+            "no unused cylinders",
+        ),
+        (
+            vec!["partition", "grow", &filled, "DH0", "2"],
+            "never shrinks",
+        ),
+        (
+            vec!["partition", "grow", &filled, "DH0", "40"],
+            "can grow by",
+        ),
+        (
+            vec!["partition", "grow", &filled, "DH0", "big"],
+            "megabytes, or rest",
+        ),
+    ] {
+        let mut full = args.clone();
+        full.push(&output);
+        let (code, _, err) = run(&full);
+        assert_eq!(code, 2, "{args:?}: {err}");
+        assert!(err.contains(says), "{args:?}: {err}");
+        assert!(!dir.join("out.hdf").exists(), "{args:?} wrote a file");
+    }
+    let _ = fs::remove_dir_all(&dir);
+}

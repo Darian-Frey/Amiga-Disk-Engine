@@ -898,7 +898,20 @@ A table is never regenerated: a real disk's RDB may carry a filesystem (`FSHD` a
 - **Add:** the first run of whole cylinders between `LoCylinder` and `HiCylinder` that no partition uses and that holds the size; a `PART` in the first block from the RDSK to `RDBBlocksHi`, before the partition cylinders, that no list (`PART`, `FSHD`, `LSEG`, `BADB`) occupies; chained at the end; `HighRDSKBlock` raised to it; the volume quick-formatted. Not bootable.
 - **Another filesystem:** a reformat, writing the new dostype into the partition's bootblock and the `PART`'s `DosType` (0xc0) together — never the table alone, which would leave the two disagreeing (FAQ §6.3).
 
+- **Grow:** the `PART`'s `HighCyl` raised into unused cylinders straight after it, and its volume grown to match — see below.
+
 Every edit is kept only if the table still passes the checks an edit session opens with (D-024 part 3), and a partition it formatted examines clean.
+
+### Growing a volume (F-038, 2026-11-18)
+
+AmigaDOS keeps no pointer to a volume's rootblock: it computes it from the partition's size, as the middle block (C-007). A grown partition's rootblock is therefore somewhere else, and what names the old one must follow. On an AmigaDOS volume that is short:
+
+- **The rootblock**, copied to its new block, naming the new bitmap and marked valid. The old one is left as it was, free.
+- **Each entry directly in the root**, whose header's `parent` (BSIZE−12) names the rootblock; reached through the root's hash chains.
+- **The root's directory-cache blocks** on a `DOS\4`/`DOS\5` volume, whose `parent` (offset 8) names it too.
+- **The bitmap**, grown to map the new blocks: the pages the larger volume needs, and a `bm_ext` chain past 25, written in blocks nothing uses — after the new rootblock first, as `Format` puts it — with every block in use before still marked used (orphans included: a game may keep data there), the old rootblock and pages freed, and the bits past the volume's end cleared as a format leaves them.
+
+Nothing else on the volume refers to the root. Where the new rootblock would land on a block a file or directory uses, growing is refused, naming the block, rather than moving the file out of the way; so is growing a volume that is not sound. AmigaDOS in FS-UAE reads the files of grown OFS and dircache FFS partitions — those in the root, which name the moved rootblock, and those in folders — and writes a 3 MB file into each grown volume.
 
 ## Hardfiles (HDF)
 

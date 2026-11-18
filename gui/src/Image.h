@@ -738,6 +738,15 @@ public:
         r.message = take(why);
         return r;
     }
+    /// Grow a partition into the unused space after it; `megabytes` 0 takes
+    /// all of it.
+    EditResult growPartition(quint32 partition, quint32 megabytes) {
+        EditResult r;
+        char *why = nullptr;
+        r.code = ade_partition_grow(m_raw, partition, megabytes, &why);
+        r.message = take(why);
+        return r;
+    }
     EditResult deletePartition(quint32 partition) {
         EditResult r;
         char *why = nullptr;

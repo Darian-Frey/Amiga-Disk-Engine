@@ -11,6 +11,22 @@ Effort vocabulary: trivial | small | medium | large.
 
 ## Suggested
 
+### IMP-028 The AmigaDOS harness locks hardfiles by unit number, which a script can repeat and a partitioned disk need not have
+**Status:** suggested
+**Effort:** small
+**Found:** 2026-11-18, growing partitions (F-038): a run hung on *Volume Grown is write protected*, which looked like a fault in ADE's dircache format until it was traced, by probing, to the script.
+
+**Where:** [src/api/tests/amigados.rs](../src/api/tests/amigados.rs) `run_with`, which appends `C:Lock DH<n>: ON` for each hardfile after the script's commands, and the boot folder's FS-UAE entry.
+
+**What it does.** Three traps, each met:
+- **A drive locked twice hangs the Amiga** on a *write protected* requester — on OFS and FFS alike, though intermittently, so an early pass looked like evidence. A script that locks `DH1:` itself, as one naturally does after writing there, collides with the harness's own lock.
+- **On a partitioned disk the harness's names are a guess.** It locks `DH1:` for the first hardfile; a disk whose partitions are named otherwise has no `DH1:`, and AmigaDOS asks for the volume — another requester, another hang.
+- **A bootable partition at priority 0 ties with the boot folder**, and which Kickstart boots is not fixed: booting the partition runs nothing, and the run times out showing *Can't find SYS:Locale*. `ade create` makes the first partition bootable at 0, as HDToolBox does, so every test that boots such a disk depends on the tie-break; the table-editing and growing tests lower it to -5, and `amigados_mounts_and_fills_a_partitioned_disk_ade_creates` does not.
+
+**What would be better.** `run_with` locks only drives the script has not, and for a partitioned hardfile by its partitions' own drive names, read from the table; and the boot folder is given a boot priority above any partition (`hard_drive_0_priority`), so no disk under test can win.
+
+**Trade-offs.** The harness learns to read a partition table — ADE's own reader, which is the thing under test; the names it needs could instead be passed in by each test.
+
 ### IMP-027 A format, and an added partition, build a blank copy of the whole volume to read its blocks off
 **Status:** suggested
 **Effort:** small

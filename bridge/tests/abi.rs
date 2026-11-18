@@ -3229,3 +3229,65 @@ fn bytes_of(b: &'static [u8]) -> ade::AdeBytes {
 const fn image_null() -> *mut ade::AdeImage {
     std::ptr::null_mut()
 }
+
+#[test]
+fn a_partition_is_grown_through_the_abi() {
+    use std::ptr::null_mut as none;
+    let dir = std::env::temp_dir().join(format!("ade-abi-grow-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let made = CString::new(dir.join("made.hdf").to_str().unwrap()).unwrap();
+    let dh0 = CString::new("DH0").unwrap();
+    let spec = ade::AdePartitionSpec {
+        name: dh0.as_ptr(),
+        megabytes: 4,
+        type_name: std::ptr::null(),
+        volume_name: std::ptr::null(),
+    };
+    // SAFETY: valid strings and specs; handles and messages freed once.
+    unsafe {
+        assert_eq!(
+            ade::ade_create_partitioned(
+                made.as_ptr(),
+                16,
+                &raw const spec,
+                1,
+                std::ptr::null(),
+                none()
+            ),
+            AdeResult::Ok
+        );
+        let image = ade::ade_image_open(made.as_ptr(), std::ptr::null(), none());
+        let blocks = |image| {
+            let table = ade::ade_partitions_open(image);
+            let mut p = std::mem::zeroed::<ade::AdePartition>();
+            ade::ade_partitions_entry(table, 0, &raw mut p);
+            ade::ade_partitions_free(table);
+            (p.blocks, p.mounts)
+        };
+        assert_eq!(blocks(image), (8192, true));
+        assert_eq!(ade::ade_partition_grow(image, 0, 10, none()), AdeResult::Ok);
+        assert_eq!(blocks(image), (20480, true));
+        let mut why: *mut std::ffi::c_char = std::ptr::null_mut();
+        assert_eq!(
+            ade::ade_partition_grow(image, 0, 5, &raw mut why),
+            AdeResult::Refused
+        );
+        assert!(
+            CStr::from_ptr(why)
+                .to_string_lossy()
+                .contains("never shrinks")
+        );
+        ade::ade_string_free(why);
+        assert_eq!(ade::ade_partition_grow(image, 0, 0, none()), AdeResult::Ok);
+        assert_eq!(blocks(image), (32704, true), "the rest of the disk");
+        assert_eq!(ade::ade_edit_undo(image), AdeResult::Ok);
+        assert_eq!(blocks(image), (20480, true));
+        assert_eq!(
+            ade::ade_partition_grow(none(), 0, 0, none()),
+            AdeResult::NullArgument
+        );
+        ade::ade_image_free(image);
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}

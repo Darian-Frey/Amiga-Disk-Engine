@@ -2990,6 +2990,32 @@ pub unsafe extern "C" fn ade_partition_add(
     result
 }
 
+/// Grow partition `partition` into the unused cylinders straight after it —
+/// to `megabytes` in all, or 0 for all of them — and its volume with it: the
+/// rootblock moves to the middle of the larger partition, as AmigaDOS
+/// expects, and the bitmap grows (D-024 part 5). Never shrinks.
+///
+/// # Safety
+/// `image` a live handle or null; `out_message` as for [`ade_edit_mkdir`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ade_partition_grow(
+    image: *mut AdeImage,
+    partition: u32,
+    megabytes: u32,
+    out_message: *mut *mut c_char,
+) -> AdeResult {
+    use ade_core::create::PartitionSize;
+    let size = if megabytes == 0 {
+        PartitionSize::Rest
+    } else {
+        PartitionSize::Megabytes(megabytes)
+    };
+    table_edit(image, out_message, |s| {
+        let name = partition_name(s, partition)?;
+        s.grow_partition(&name, size)
+    })
+}
+
 /// Delete partition `partition` and its volume. Its blocks are left as they
 /// were; Undo puts it back.
 ///

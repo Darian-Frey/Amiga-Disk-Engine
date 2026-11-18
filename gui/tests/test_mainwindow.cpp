@@ -191,6 +191,7 @@ private slots:
     void newDiskSaysWhyAPartitionPlanIsNotADisk();
     void aPartitionTableIsEditedFromTheWindow();
     void partitionsAreAddedAndReformattedThroughTheirDialogs();
+    void aPartitionGrowsWithItsFilesFromTheWindow();
     void aFileThatIsNotADiskImageIsDeclinedRatherThanShown();
     void thereIsAHelpMenuWithAnAboutBox();
     void theAboutBoxTakesItsVersionFromTheEngine();
@@ -1866,6 +1867,48 @@ void TestMainWindow::partitionsAreAddedAndReformattedThroughTheirDialogs() {
     QCOMPARE(p.dostype, uint32_t(0x444F5305));
     ade_partitions_free(table);
     ade_image_free(saved);
+}
+
+void TestMainWindow::aPartitionGrowsWithItsFilesFromTheWindow() {
+    // D-024 part 5: grown into the unused space after it, its files stay.
+    MainWindow window;
+    QStringList errors;
+    QObject::connect(&window, &MainWindow::errorOccurred, &window,
+                     [&errors](const QString &message) { errors << message; });
+    const QString path = partitionedDisk(m_dir, QStringLiteral("grow.hdf"), 16, 4);
+    QVERIFY(!path.isEmpty());
+    window.openImage(path);
+    auto *tree = browser(window);
+    const auto dh0 = [tree] { return tree->topLevelItem(0)->child(0); };
+    QVERIFY(window.makeFolder(dh0(), QStringLiteral("Kept")));
+    QVERIFY(dh0()->text(0).contains(QStringLiteral("8192 blocks")));
+
+    QVERIFY(window.growPartition(dh0(), 10));
+    QVERIFY(dh0()->text(0).contains(QStringLiteral("20480 blocks")));
+    QVERIFY(childNamed(dh0(), QStringLiteral("Kept")));
+
+    // Through its dialog: all of what is left.
+    select(window, dh0());
+    QAction *grow = diskAction(window, QStringLiteral("Grow partition"));
+    QVERIFY(grow && grow->isEnabled());
+    QTimer::singleShot(0, &window, [] {
+        auto *dialog = qobject_cast<QDialog *>(QApplication::activeModalWidget());
+        QVERIFY(dialog);
+        QVERIFY(dialog->findChild<QCheckBox *>(QStringLiteral("growPartitionAll"))->isChecked());
+        const QString shots = qEnvironmentVariable("ADE_GUI_SHOTS");
+        if (!shots.isEmpty()) dialog->grab().save(shots + QStringLiteral("/grow-partition.png"));
+        dialog->accept();
+    });
+    grow->trigger();
+    QVERIFY2(errors.isEmpty(), qPrintable(errors.join(QLatin1Char('\n'))));
+    QVERIFY(dh0()->text(0).contains(QStringLiteral("32704 blocks")));
+    QVERIFY(childNamed(dh0(), QStringLiteral("Kept")));
+
+    // Nothing left to grow into: refused, with why.
+    QVERIFY(!window.growPartition(dh0(), 0));
+    QVERIFY(errors.last().contains(QStringLiteral("no unused cylinders")));
+    QVERIFY(window.undoEdit());
+    QVERIFY(dh0()->text(0).contains(QStringLiteral("20480 blocks")));
 }
 
 void TestMainWindow::aFileThatIsNotADiskImageIsDeclinedRatherThanShown() {

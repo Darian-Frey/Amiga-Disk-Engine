@@ -1262,3 +1262,111 @@ fn amigados_mounts_a_partition_table_ade_has_edited() {
     }
     assert!(Session::from_bytes(after).is_ok());
 }
+
+#[test]
+fn amigados_reads_and_fills_partitions_ade_has_grown() {
+    // F-038, D-024 part 5: growing a partition moves its volume's rootblock
+    // to the middle of the larger partition, since AmigaDOS computes it from
+    // the partition's size; the root's entries, its cache and the bitmap
+    // follow. AmigaDOS must find the files that were there, write a large
+    // one into the grown space, and read it back.
+    use ade_core::create::{self, PartitionSize, PartitionSpec};
+    let Some(setup) = setup() else { return };
+    let dir = scratch("rdbgrow");
+    fs::create_dir_all(&dir).unwrap();
+    let made = dir.join("made.hdf");
+    let spec = |name: &str, megabytes, type_name: &str, volume: &str| PartitionSpec {
+        name: name.to_owned(),
+        size: PartitionSize::Megabytes(megabytes),
+        type_name: Some(type_name.to_owned()),
+        volume: Some(volume.to_owned()),
+    };
+    // DH1, a dircache FFS; a spacer, deleted to leave 6 MB unused after DH1;
+    // DH2, OFS, with the rest of the disk unused after it.
+    create::partitioned(
+        &made,
+        32,
+        &[
+            spec("DH1", 6, "ffs-dc", "Grown"),
+            spec("GAP", 6, "ffs", "Gap"),
+            spec("DH2", 6, "ofs", "Small"),
+        ],
+        "ffs-intl",
+        WHEN,
+    )
+    .unwrap();
+    let mut s = Session::from_bytes(fs::read(&made).unwrap()).unwrap();
+    s.set_clock(Some(WHEN));
+    s.delete_partition("GAP").unwrap();
+    // Below the boot folder: at the same priority, which boots is not
+    // fixed, and booting DH1 runs nothing.
+    s.set_partition_boot("DH1", Some(-5)).unwrap();
+    let kept = pattern(120_000, 51);
+    for partition in ["DH1", "DH2"] {
+        s.select_partition(partition).unwrap();
+        let root = s.root();
+        let folder = s.make_dir(root, b"Box").unwrap();
+        s.add_file(folder, b"kept.bin", &kept).unwrap();
+        s.add_file(root, b"top.txt", b"in the root").unwrap();
+    }
+    s.grow_partition("DH1", PartitionSize::Rest).unwrap();
+    s.grow_partition("DH2", PartitionSize::Rest).unwrap();
+    let disk = dir.join("grown.hdf");
+    fs::write(&disk, s.bytes()).unwrap();
+    drop(s);
+
+    let big = pattern(3_000_000, 52);
+    let commands = "C:Copy Grown:Box/kept.bin SYS:out/dh1-kept\n\
+                    C:Copy Grown:top.txt SYS:out/dh1-top\n\
+                    C:Copy Small:Box/kept.bin SYS:out/dh2-kept\n\
+                    C:Copy Small:top.txt SYS:out/dh2-top\n\
+                    C:Copy SYS:in/big Grown:big.bin\n\
+                    C:Copy SYS:in/big Small:big.bin\n\
+                    C:Copy Grown:big.bin SYS:out/dh1-big\n\
+                    C:Copy Small:big.bin SYS:out/dh2-big\n\
+                    C:Info >SYS:out/info\n\
+                    C:Lock DH2: ON\n";
+    let outcome = run_with(
+        &setup,
+        "rdbgrow",
+        (&[], &[&disk]),
+        &[("big", &big)],
+        commands,
+        Duration::from_secs(150),
+    )
+    .unwrap();
+    let info = fs::read_to_string(outcome.out.join("info")).unwrap_or_default();
+    let got = |name: &str| fs::read(outcome.out.join(name)).ok();
+    for (partition, kind) in [("dh1", "dircache FFS"), ("dh2", "OFS")] {
+        assert!(
+            got(&format!("{partition}-kept")) == Some(kept.clone()),
+            "{kind}: a file in a folder, after growing\n{info}"
+        );
+        assert_eq!(
+            got(&format!("{partition}-top")).as_deref(),
+            Some(&b"in the root"[..]),
+            "{kind}: a file in the root, which names the moved rootblock\n{info}"
+        );
+        assert!(
+            got(&format!("{partition}-big")) == Some(big.clone()),
+            "{kind}: a large file in the grown space\n{info}"
+        );
+    }
+
+    let after = fs::read(&disk).unwrap();
+    for name in ["DH1", "DH2"] {
+        assert!(
+            read_in_partition(&after, name, "big.bin") == Some(big.clone()),
+            "{name}"
+        );
+        assert!(
+            read_in_partition(&after, name, "Box/kept.bin") == Some(kept.clone()),
+            "{name}"
+        );
+        assert!(
+            partition_faults(&after, name).is_empty(),
+            "{name}: {:?}",
+            partition_faults(&after, name)
+        );
+    }
+}

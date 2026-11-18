@@ -853,13 +853,18 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
     m_bootPartition->setToolTip(QStringLiteral(
         "Whether Kickstart may boot from this partition, and before which others."));
     connect(m_bootPartition, &QAction::triggered, this, &MainWindow::bootPartitionSelected);
+    m_growPartition = partitions->addAction(QStringLiteral("&Grow partition..."));
+    m_growPartition->setToolTip(QStringLiteral(
+        "Grow the partition into unused space straight after it, its files with it."));
+    connect(m_growPartition, &QAction::triggered, this, &MainWindow::growPartitionSelected);
     m_deletePartition = partitions->addAction(QStringLiteral("&Delete partition..."));
     m_deletePartition->setToolTip(QStringLiteral(
         "Remove the partition and its volume from the table. Its blocks are left as they "
         "were; Undo brings it back until you save."));
     connect(m_deletePartition, &QAction::triggered, this,
             &MainWindow::deletePartitionSelected);
-    for (QAction *a : {m_addPartition, m_renamePartition, m_bootPartition, m_deletePartition}) {
+    for (QAction *a : {m_addPartition, m_renamePartition, m_bootPartition, m_growPartition,
+                       m_deletePartition}) {
         a->setEnabled(false);
     }
 
@@ -3080,6 +3085,18 @@ bool MainWindow::setPartitionBoot(QTreeWidgetItem *item, bool bootable, int prio
                                 : QStringLiteral("%1 is not bootable").arg(drive));
 }
 
+bool MainWindow::growPartition(QTreeWidgetItem *item, quint32 megabytes) {
+    Open *open = imageFor(item);
+    quint32 index = 0;
+    QString drive;
+    if (!open || !partitionAt(item, open->image, &index, &drive)) {
+        emit errorOccurred(QStringLiteral("Choose a partition to grow first."));
+        return false;
+    }
+    const ade::EditResult r = open->image.growPartition(index, megabytes);
+    return tableEdited(*open, r, QStringLiteral("Grew %1").arg(drive));
+}
+
 bool MainWindow::deletePartition(QTreeWidgetItem *item) {
     Open *open = imageFor(item);
     quint32 index = 0;
@@ -3205,6 +3222,45 @@ void MainWindow::bootPartitionSelected() {
 }
 
 void MainWindow::deletePartitionSelected() { deletePartition(m_selected); }
+
+void MainWindow::growPartitionSelected() {
+    Open *open = imageFor(m_selected);
+    quint32 index = 0;
+    QString drive;
+    if (!open || !partitionAt(m_selected, open->image, &index, &drive)) return;
+    QDialog dialog(this);
+    dialog.setWindowTitle(QStringLiteral("Grow %1").arg(drive));
+    auto *said = new QLabel(QStringLiteral("Into the unused space straight after it. Its files "
+                                           "stay; AmigaDOS keeps a volume's rootblock in the "
+                                           "middle of its partition, so ADE moves it."),
+                            &dialog);
+    said->setWordWrap(true);
+    auto *all = new QCheckBox(QStringLiteral("All of the unused space after it"), &dialog);
+    all->setObjectName(QStringLiteral("growPartitionAll"));
+    all->setChecked(true);
+    auto *size = new QSpinBox(&dialog);
+    size->setObjectName(QStringLiteral("growPartitionSize"));
+    size->setRange(1, 4096);
+    size->setSuffix(QStringLiteral(" MB in all"));
+    AdePartition p{};
+    open->image.partitions().at(index, &p);
+    size->setValue(static_cast<int>(qMin<quint64>(4096, quint64(p.blocks) * 512 / 1048576 + 1)));
+    size->setEnabled(false);
+    connect(all, &QCheckBox::toggled, size, [size](bool everything) { size->setEnabled(!everything); });
+    auto *form = new QFormLayout;
+    form->addRow(said);
+    form->addRow(all);
+    form->addRow(QStringLiteral("New size"), size);
+    auto *buttons =
+        new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
+    connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+    connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+    auto *layout = new QVBoxLayout(&dialog);
+    layout->addLayout(form);
+    layout->addWidget(buttons);
+    if (dialog.exec() != QDialog::Accepted) return;
+    growPartition(m_selected, all->isChecked() ? 0u : static_cast<quint32>(size->value()));
+}
 
 void MainWindow::wipeSlackSelected() { wipeDisk(m_selected, false); }
 
@@ -3441,7 +3497,7 @@ void MainWindow::updateEditActions() {
                         open->image.partitions();
     const bool onPartition = device && partitionOf(m_selected) != ADE_WHOLE_IMAGE;
     if (m_addPartition) m_addPartition->setEnabled(device);
-    for (QAction *a : {m_renamePartition, m_bootPartition, m_deletePartition}) {
+    for (QAction *a : {m_renamePartition, m_bootPartition, m_growPartition, m_deletePartition}) {
         if (a) a->setEnabled(onPartition);
     }
     const bool entry = plain && isEditableEntry(m_selected, m_tree);
