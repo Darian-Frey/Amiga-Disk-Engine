@@ -44,6 +44,7 @@
 
 use ade_block::{Geometry, checksum};
 use ade_endian::put_u32;
+use std::collections::BTreeMap;
 
 use crate::dostype::Dostype;
 
@@ -192,6 +193,72 @@ pub fn blank_into(
     name: &[u8],
     created: Stamp,
 ) -> Result<(), FormatError> {
+    if u64::try_from(image.len()).ok() != Some(geometry.total_bytes()) {
+        return Err(FormatError::TooSmall {
+            blocks: geometry.total_blocks(),
+        });
+    }
+    format_with(&mut Whole(image), geometry, dostype, name, created)
+}
+
+/// The blocks a quick format writes, and what goes in each — every reserved
+/// block (zeros but the dostype, as a fresh format leaves the boot area), the
+/// rootblock, the bitmap and its `bm_ext` chain, and on a dircache volume
+/// the root's empty cache — without the rest of the volume (IMP-027). Laid
+/// over zeros, they are exactly [`blank_named`]; laid over an existing
+/// volume, they are a quick format of it.
+///
+/// # Errors
+/// As [`blank`].
+pub fn blank_blocks(
+    geometry: Geometry,
+    dostype: Dostype,
+    name: &[u8],
+    created: Stamp,
+) -> Result<BTreeMap<u64, Vec<u8>>, FormatError> {
+    let bsize = geometry.block_size() as usize;
+    let mut blocks: BTreeMap<u64, Vec<u8>> = (0..u64::from(geometry.reserved()))
+        .map(|b| (b, vec![0u8; bsize]))
+        .collect();
+    format_with(&mut blocks, geometry, dostype, name, created)?;
+    Ok(blocks)
+}
+
+/// Where a format writes: a whole volume, or only the blocks it writes.
+trait Sink {
+    /// Block `b`, `bsize` bytes, to write into — zeros where nothing has
+    /// been written — or `None` past the end.
+    fn block(&mut self, b: u64, bsize: usize) -> Option<&mut [u8]>;
+}
+
+/// A whole volume's bytes.
+struct Whole<'a>(&'a mut [u8]);
+
+impl Sink for Whole<'_> {
+    fn block(&mut self, b: u64, bsize: usize) -> Option<&mut [u8]> {
+        let at = usize::try_from(b).ok()?.checked_mul(bsize)?;
+        self.0.get_mut(at..at.checked_add(bsize)?)
+    }
+}
+
+impl Sink for BTreeMap<u64, Vec<u8>> {
+    fn block(&mut self, b: u64, bsize: usize) -> Option<&mut [u8]> {
+        Some(
+            self.entry(b)
+                .or_insert_with(|| vec![0u8; bsize])
+                .as_mut_slice(),
+        )
+    }
+}
+
+/// The quick format itself, into `sink`.
+fn format_with(
+    sink: &mut impl Sink,
+    geometry: Geometry,
+    dostype: Dostype,
+    name: &[u8],
+    created: Stamp,
+) -> Result<(), FormatError> {
     check_name(name)?;
     let block_size = geometry.block_size() as usize;
     let total = geometry.total_blocks();
@@ -223,18 +290,14 @@ pub fn blank_into(
         return Err(FormatError::TooSmall { blocks: total });
     }
 
-    if u64::try_from(image.len()).ok() != Some(geometry.total_bytes()) {
-        return Err(FormatError::TooSmall { blocks: total });
-    }
-    let image = &mut *image;
-    write_bootblock(image, dostype);
+    write_bootblock(sink, geometry, dostype);
     let in_rootblock = layout
         .pages
         .get(..layout.pages.len().min(BM_PAGES))
         .unwrap_or(&[]);
     let first_extension = layout.extensions.first().map(|(block, _)| *block);
     write_rootblock(
-        image,
+        sink,
         geometry,
         name,
         created,
@@ -243,12 +306,12 @@ pub fn blank_into(
         cache,
     );
     if let Some(cache) = cache {
-        write_empty_cache(image, geometry, cache, root);
+        write_empty_cache(sink, geometry, cache, root);
     }
-    write_extensions(image, geometry, &layout.extensions);
+    write_extensions(sink, geometry, &layout.extensions);
     let mut also_used: Vec<u64> = layout.extensions.iter().map(|(block, _)| *block).collect();
     also_used.extend(cache);
-    write_bitmap(image, geometry, root, &layout.pages, &also_used);
+    write_bitmap(sink, geometry, root, &layout.pages, &also_used);
     let _ = block_size;
     Ok(())
 }
@@ -307,12 +370,11 @@ fn lay_out_bitmap(start: u64, pages: u64, block_size: u32) -> BitmapLayout {
 
 /// Each `bm_ext` block: the bitmap blocks it lists, then the next extension
 /// in its last long (0 for the last). It carries no checksum (SPEC §Bitmap).
-fn write_extensions(image: &mut [u8], geometry: Geometry, extensions: &[(u64, Vec<u64>)]) {
+fn write_extensions(sink: &mut impl Sink, geometry: Geometry, extensions: &[(u64, Vec<u64>)]) {
     let bsize = geometry.block_size() as usize;
     for (i, (block, listed)) in extensions.iter().enumerate() {
         let next = extensions.get(i.saturating_add(1)).map_or(0, |(b, _)| *b);
-        let at = usize::try_from(*block).unwrap_or(0).saturating_mul(bsize);
-        let Some(raw) = image.get_mut(at..at.saturating_add(bsize)) else {
+        let Some(raw) = sink.block(*block, bsize) else {
             return;
         };
         for (slot, page) in listed.iter().enumerate() {
@@ -395,13 +457,15 @@ pub fn is_format_fill(block: &[u8]) -> bool {
 /// them. Not the checksum, which would make the disk bootable (BUG-023), and
 /// not the rootblock pointer, which `Format` leaves zero and readers must not
 /// trust anyway (C-007).
-fn write_bootblock(image: &mut [u8], dostype: Dostype) {
-    let _ = put_u32(image, 0, dostype.raw());
+fn write_bootblock(sink: &mut impl Sink, geometry: Geometry, dostype: Dostype) {
+    if let Some(block) = sink.block(0, geometry.block_size() as usize) {
+        let _ = put_u32(block, 0, dostype.raw());
+    }
 }
 
 /// The rootblock, per SPEC §Rootblock.
 fn write_rootblock(
-    image: &mut [u8],
+    sink: &mut impl Sink,
     geometry: Geometry,
     name: &[u8],
     created: Stamp,
@@ -410,8 +474,7 @@ fn write_rootblock(
     cache: Option<u64>,
 ) {
     let bsize = geometry.block_size() as usize;
-    let at = usize::try_from(root).unwrap_or(0).saturating_mul(bsize);
-    let Some(block) = image.get_mut(at..at.saturating_add(bsize)) else {
+    let Some(block) = sink.block(root, bsize) else {
         return;
     };
 
@@ -480,10 +543,9 @@ fn write_rootblock(
 /// An empty dircache block for the directory at `owner`, as `Format
 /// DIRCACHE` writes the root's: type 33, its own number, its parent, no
 /// records, no next block, sealed (SPEC §Directory cache blocks).
-fn write_empty_cache(image: &mut [u8], geometry: Geometry, block: u64, owner: u64) {
+fn write_empty_cache(sink: &mut impl Sink, geometry: Geometry, block: u64, owner: u64) {
     let bsize = geometry.block_size() as usize;
-    let at = usize::try_from(block).unwrap_or(0).saturating_mul(bsize);
-    let Some(raw) = image.get_mut(at..at.saturating_add(bsize)) else {
+    let Some(raw) = sink.block(block, bsize) else {
         return;
     };
     let _ = put_u32(raw, 0x00, crate::dircache::T_DIRCACHE);
@@ -501,7 +563,7 @@ fn write_empty_cache(image: &mut [u8], geometry: Geometry, block: u64, owner: u6
 /// fresh disk would report itself completely full and every write to it would
 /// fail for want of space.
 fn write_bitmap(
-    image: &mut [u8],
+    sink: &mut impl Sink,
     geometry: Geometry,
     root: u64,
     bitmap: &[u64],
@@ -521,10 +583,7 @@ fn write_bitmap(
     let per_block = bits_per_bitmap_block(geometry.block_size());
 
     for (page, block_number) in bitmap.iter().enumerate() {
-        let at = usize::try_from(*block_number)
-            .unwrap_or(0)
-            .saturating_mul(bsize);
-        let Some(block) = image.get_mut(at..at.saturating_add(bsize)) else {
+        let Some(block) = sink.block(*block_number, bsize) else {
             return;
         };
 

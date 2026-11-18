@@ -27,8 +27,10 @@ Effort vocabulary: trivial | small | medium | large.
 
 **Trade-offs.** The harness learns to read a partition table — ADE's own reader, which is the thing under test; the names it needs could instead be passed in by each test.
 
+## Applied
+
 ### IMP-027 A format, and an added partition, build a blank copy of the whole volume to read its blocks off
-**Status:** suggested
+**Status:** applied
 **Effort:** small
 **Found:** 2026-11-17, sharing `format`'s block list with adding a partition (F-038).
 
@@ -40,7 +42,9 @@ Effort vocabulary: trivial | small | medium | large.
 
 **Trade-offs.** Two forms of one layout to keep in step; the test that a format lays out what `Format` does would need to cover both, or the map form would have to be the only one.
 
-## Applied
+**Measured before applying, 2026-11-18: the premise was half right.** On Linux the blank volume never cost resident memory — a zeroed allocation is mapped lazily, and only the dozen blocks a format writes are ever touched — so `ade format` on a 500 MB hardfile peaked at 516 MB, one copy of the disk, and adding a partition on 600 MB at 618 MB. What it did cost was address space: under a 900 MB cap (`ulimit -v`, roughly what strict overcommit enforces, and what Windows' commit limit charges), the same format failed with *memory allocation of 524288000 bytes failed*. Applied anyway, by decision, for that.
+
+**Applied 2026-11-18, as proposed.** The formatter writes through a sink — the whole volume for `blank_named` and `blank_into`, which `create` needs, or a map of only the blocks a format writes for the new `format::blank_blocks` — and `quick_format_writes` takes its blocks from `blank_blocks` instead of mounting a blank volume built for the purpose, so the two cannot disagree. Every reserved block is in the map, zeroed, so a format still clears the old boot area. `src/filesystem/tests/format_blocks.rs` lays the map over zeros and requires the whole format byte for byte, for all six filesystems on floppies, odd sizes and a 100 MB hard disk with a `bm_ext` chain. Under the 900 MB cap the format now succeeds, as does adding a partition under 1 GB; resident memory is unchanged at 516 MB.
 
 ### IMP-026 The partition-table check at open does not hold partitions to the cylinders the RDB reserves for them
 **Status:** applied

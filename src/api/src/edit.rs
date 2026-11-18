@@ -1567,39 +1567,25 @@ fn target_name(areas: &[Area], index: usize) -> String {
 /// The blocks a quick format writes on a volume of `geometry`, and what it
 /// writes there: the reserved blocks, the rootblock, the bitmap and its
 /// `bm_ext` chain, and on a dircache volume the root's empty cache (BUG-025).
-/// Read off a blank volume rather than computed, so they cannot disagree
-/// with what `blank_named` laid out. Every other block is left as it is.
+/// The formatter names them itself (`format::blank_blocks`), so they cannot
+/// disagree with what a whole format lays out — and no volume-sized blank is
+/// built to read them off (IMP-027). Every other block is left as it is.
 fn quick_format_writes(
     geometry: Geometry,
     dostype: ade_filesystem::dostype::Dostype,
     name: &[u8],
     when: Stamp,
 ) -> Result<Writes, EditError> {
-    let blank = ade_filesystem::format::blank_named(geometry, dostype, name, when)
+    let blocks = ade_filesystem::format::blank_blocks(geometry, dostype, name, when)
         .map_err(|e| EditError::NotEditable(e.to_string()))?;
-    let mut blocks: Vec<u32> = (0..geometry.reserved()).collect();
-    {
-        let blank_view = Draft::new(&blank, geometry);
-        let fresh = Volume::mount(&blank_view).map_err(EditError::Lookup)?;
-        blocks.push(fresh.root());
-        let map =
-            ade_filesystem::bitmap::Bitmap::read(&blank_view, fresh.geometry(), fresh.rootblock())
-                .map_err(|e| EditError::NotEditable(e.to_string()))?;
-        blocks.extend(map.blocks.iter().chain(&map.extensions));
-        if fresh.rootblock().dircache != 0 {
-            blocks.push(fresh.rootblock().dircache);
-        }
-    }
-    let bsize = geometry.block_size() as usize;
-    Ok(blocks
+    blocks
         .into_iter()
-        .filter_map(|b| {
-            let at = (b as usize).saturating_mul(bsize);
-            blank
-                .get(at..at.saturating_add(bsize))
-                .map(|raw| (b, raw.to_vec()))
+        .map(|(b, raw)| {
+            u32::try_from(b).map(|b| (b, raw)).map_err(|_| {
+                EditError::NotEditable(format!("block {b} is past what a volume addresses"))
+            })
         })
-        .collect())
+        .collect()
 }
 
 /// The places on a partitioned disk an edit can go: one per partition, in
