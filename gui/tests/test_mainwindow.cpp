@@ -192,6 +192,7 @@ private slots:
     void aPartitionTableIsEditedFromTheWindow();
     void partitionsAreAddedAndReformattedThroughTheirDialogs();
     void aPartitionGrowsWithItsFilesFromTheWindow();
+    void aPartitionGoesOutToAHardfileAndBackIn();
     void aFileThatIsNotADiskImageIsDeclinedRatherThanShown();
     void thereIsAHelpMenuWithAnAboutBox();
     void theAboutBoxTakesItsVersionFromTheEngine();
@@ -1909,6 +1910,98 @@ void TestMainWindow::aPartitionGrowsWithItsFilesFromTheWindow() {
     QVERIFY(errors.last().contains(QStringLiteral("no unused cylinders")));
     QVERIFY(window.undoEdit());
     QVERIFY(dh0()->text(0).contains(QStringLiteral("20480 blocks")));
+}
+
+void TestMainWindow::aPartitionGoesOutToAHardfileAndBackIn() {
+    MainWindow window;
+    QStringList errors;
+    QObject::connect(&window, &MainWindow::errorOccurred, &window,
+                     [&errors](const QString &message) { errors << message; });
+    QStringList reports;
+    QObject::connect(&window, &MainWindow::reported, &window,
+                     [&reports](const QString &, const QString &message) { reports << message; });
+    const QString path = partitionedDisk(m_dir, QStringLiteral("convert.hdf"), 16, 4);
+    QVERIFY(!path.isEmpty());
+    window.openImage(path);
+    auto *tree = browser(window);
+    const auto disk = [tree] { return tree->topLevelItem(0); };
+    QVERIFY(window.makeFolder(disk()->child(0), QStringLiteral("Kept")));
+
+    // Out, through the menu: the edit not yet saved goes with it.
+    select(window, disk()->child(0));
+    QAction *save = diskAction(window, QStringLiteral("Save partition as hardfile"));
+    QAction *add = diskAction(window, QStringLiteral("Add partition from hardfile"));
+    QAction *wrap = diskAction(window, QStringLiteral("Make a partitioned disk"));
+    QVERIFY(save && save->isEnabled());
+    QVERIFY(add && add->isEnabled());
+    QVERIFY(wrap && !wrap->isEnabled());
+    const QString hdz = m_dir.filePath(QStringLiteral("DH0.hdz"));
+    QString suggested;
+    window.setHardfileSaveChooser([&](const QString &name) {
+        suggested = name;
+        return hdz;
+    });
+    save->trigger();
+    QVERIFY2(errors.isEmpty(), qPrintable(errors.join(QLatin1Char('\n'))));
+    QCOMPARE(suggested, QStringLiteral("DH0.hdf"));
+    QVERIFY(reports.last().contains(QStringLiteral("drive name (DH0)")));
+    QVERIFY(QFileInfo(hdz).size() > 0 && QFileInfo(hdz).size() < 1000000);
+
+    // Again: refused, since it is there.
+    save->trigger();
+    QCOMPARE(errors.size(), 1);
+    QVERIFY(errors.takeLast().contains(QStringLiteral("refusing to overwrite")));
+
+    // Back in, through the menu, under the first free drive name; undoable.
+    window.setHardfileOpenChooser([&](const QString &) { return hdz; });
+    QTimer::singleShot(0, &window, [] {
+        auto *dialog = qobject_cast<QDialog *>(QApplication::activeModalWidget());
+        QVERIFY(dialog);
+        auto *drive = dialog->findChild<QLineEdit *>();
+        QCOMPARE(drive->text(), QStringLiteral("DH1"));
+        const QString shots = qEnvironmentVariable("ADE_GUI_SHOTS");
+        if (!shots.isEmpty()) dialog->grab().save(shots + QStringLiteral("/import.png"));
+        dialog->accept();
+    });
+    add->trigger();
+    QVERIFY2(errors.isEmpty(), qPrintable(errors.join(QLatin1Char('\n'))));
+    QCOMPARE(disk()->childCount(), 2);
+    disk()->child(1)->setExpanded(true);
+    QVERIFY(childNamed(disk()->child(1), QStringLiteral("Kept")));
+    QVERIFY(window.undoEdit());
+    QCOMPARE(disk()->childCount(), 1);
+
+    // A row that is in no partition has none to save.
+    QVERIFY(!window.exportPartition(disk(), m_dir.filePath(QStringLiteral("no.hdf"))));
+    QVERIFY(errors.takeLast().contains(QStringLiteral("Choose a partition")));
+
+    // The volume on its own, made a disk and opened, through the menu.
+    window.openImage(hdz);
+    auto *lone = tree->topLevelItem(1);
+    QVERIFY(lone);
+    select(window, lone);
+    QVERIFY(wrap->isEnabled());
+    QVERIFY(!save->isEnabled());
+    QVERIFY(!add->isEnabled());
+    const QString made = m_dir.filePath(QStringLiteral("wrapped.hdf"));
+    window.setHardfileSaveChooser([&](const QString &name) {
+        suggested = name;
+        return made;
+    });
+    QTimer::singleShot(0, &window, [] {
+        auto *dialog = qobject_cast<QDialog *>(QApplication::activeModalWidget());
+        QVERIFY(dialog);
+        dialog->findChild<QLineEdit *>()->setText(QStringLiteral("WORK"));
+        dialog->accept();
+    });
+    wrap->trigger();
+    QVERIFY2(errors.isEmpty(), qPrintable(errors.join(QLatin1Char('\n'))));
+    QCOMPARE(suggested, QStringLiteral("DH0 partitioned.hdf"));
+    auto *device = tree->topLevelItem(2);
+    QVERIFY(device);
+    QCOMPARE(device->childCount(), 1);
+    QVERIFY(device->child(0)->text(0).contains(QStringLiteral("WORK")));
+    QVERIFY(reports.last().contains(QStringLiteral("Kickstart")));
 }
 
 void TestMainWindow::aFileThatIsNotADiskImageIsDeclinedRatherThanShown() {

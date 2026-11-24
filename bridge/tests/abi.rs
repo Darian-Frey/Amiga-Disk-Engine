@@ -3291,3 +3291,148 @@ fn a_partition_is_grown_through_the_abi() {
     }
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one disk taken there and back: each step reads what the last made"
+)]
+fn a_partition_goes_out_to_a_hardfile_and_back_in_through_the_abi() {
+    use std::ptr::null_mut as none;
+    let dir = std::env::temp_dir().join(format!("ade-abi-reshape-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let at = |name: &str| CString::new(dir.join(name).to_str().unwrap()).unwrap();
+    let (made, out, hdz, new) = (at("made.hdf"), at("out.hdf"), at("out.hdz"), at("new.hdf"));
+    let [dh0, dh1, dh7] = ["DH0", "DH1", "DH7"].map(|n| CString::new(n).unwrap());
+    let spec = ade::AdePartitionSpec {
+        name: dh0.as_ptr(),
+        megabytes: 4,
+        type_name: std::ptr::null(),
+        volume_name: std::ptr::null(),
+    };
+    // SAFETY: valid strings and specs; handles and messages freed once.
+    unsafe {
+        let count = |image| {
+            let table = ade::ade_partitions_open(image);
+            let n = ade::ade_partitions_count(table);
+            ade::ade_partitions_free(table);
+            n
+        };
+        let mut said: *mut std::ffi::c_char = none();
+        let mut why: *mut std::ffi::c_char = none();
+        let text = |s: *mut std::ffi::c_char| {
+            let t = CStr::from_ptr(s).to_string_lossy().into_owned();
+            ade::ade_string_free(s);
+            t
+        };
+        assert_eq!(
+            ade::ade_create_partitioned(
+                made.as_ptr(),
+                16,
+                &raw const spec,
+                1,
+                std::ptr::null(),
+                none()
+            ),
+            AdeResult::Ok
+        );
+        let image = ade::ade_image_open(made.as_ptr(), std::ptr::null(), none());
+        // An edit not yet saved goes out with it.
+        let name = bytes_of(b"Unsaved");
+        let mut block = 0u32;
+        assert_eq!(
+            ade::ade_edit_mkdir(image, 0, 4096, name, &raw mut block, none()),
+            AdeResult::Ok
+        );
+        let export = |path: &CString, partition, z, said, why| {
+            ade::ade_partition_export(image, partition, path.as_ptr(), z, said, why)
+        };
+        assert_eq!(export(&out, 0, false, &raw mut said, none()), AdeResult::Ok);
+        assert!(text(said).contains("drive name (DH0)"));
+        assert_eq!(export(&hdz, 0, true, none(), none()), AdeResult::Ok);
+        assert_eq!(
+            export(&out, 0, false, none(), &raw mut why),
+            AdeResult::AlreadyExists
+        );
+        assert!(text(why).contains("refusing to overwrite"));
+        why = none();
+        assert_eq!(
+            export(&new, 5, false, none(), &raw mut why),
+            AdeResult::Refused
+        );
+        assert!(text(why).contains("no partition 5"));
+        let raw = std::fs::read(dir.join("out.hdf")).unwrap();
+        assert_eq!(raw.len(), 4 * 1024 * 1024);
+        assert!(raw.windows(7).any(|w| w == b"Unsaved"));
+
+        // Back in, from the HDZ; one undo step.
+        let mut index = 9u32;
+        assert_eq!(
+            ade::ade_partition_import(
+                image,
+                dh1.as_ptr(),
+                hdz.as_ptr(),
+                &raw mut index,
+                &raw mut said,
+                none()
+            ),
+            AdeResult::Ok
+        );
+        assert_eq!((index, count(image)), (1, 2));
+        assert_eq!(text(said), "", "whole cylinders: nothing to say");
+        why = none();
+        assert_eq!(
+            ade::ade_partition_import(
+                image,
+                dh1.as_ptr(),
+                hdz.as_ptr(),
+                none(),
+                none(),
+                &raw mut why
+            ),
+            AdeResult::Refused
+        );
+        assert!(text(why).contains("already named"));
+        assert_eq!(ade::ade_edit_undo(image), AdeResult::Ok);
+        assert_eq!(count(image), 1);
+
+        // The hardfile into a disk of its own; a partitioned one is refused.
+        let lone = ade::ade_image_open(out.as_ptr(), std::ptr::null(), none());
+        let wrap = |of, said, why| {
+            ade::ade_volume_to_disk(of, dh7.as_ptr(), new.as_ptr(), false, said, why)
+        };
+        why = none();
+        assert_eq!(wrap(image, none(), &raw mut why), AdeResult::Refused);
+        assert!(text(why).contains("already a partitioned"));
+        assert_eq!(wrap(lone, &raw mut said, none()), AdeResult::Ok);
+        assert!(text(said).contains("Kickstart"));
+        let device = ade::ade_image_open(new.as_ptr(), std::ptr::null(), none());
+        assert_eq!(count(device), 1);
+        ade::ade_image_free(device);
+        why = none();
+        assert_eq!(
+            export(&out, 0, false, none(), &raw mut why),
+            AdeResult::AlreadyExists
+        );
+        ade::ade_string_free(why);
+
+        let null = std::ptr::null();
+        assert_eq!(wrap(null, none(), none()), AdeResult::NullArgument);
+        assert_eq!(
+            ade::ade_partition_export(image, 0, null.cast(), false, none(), none()),
+            AdeResult::NullArgument
+        );
+        assert_eq!(
+            ade::ade_partition_import(none(), dh1.as_ptr(), hdz.as_ptr(), none(), none(), none()),
+            AdeResult::NullArgument
+        );
+        assert_eq!(
+            ade::ade_partition_import(image, null.cast(), hdz.as_ptr(), none(), none(), none()),
+            AdeResult::NullArgument
+        );
+        ade::ade_image_free(lone);
+        ade::ade_image_free(image);
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}

@@ -738,6 +738,44 @@ public:
         r.message = take(why);
         return r;
     }
+    /// Add a partition holding the volume in the image file at `path`, byte
+    /// for byte. On success `message` is what to know of it, perhaps nothing.
+    EditResult importPartition(const QByteArray &drive, const QString &path) {
+        EditResult r;
+        char *report = nullptr;
+        char *why = nullptr;
+        r.code = ade_partition_import(m_raw, drive.constData(), path.toUtf8().constData(),
+                                      &r.block, &report, &why);
+        const QString said = take(report);
+        const QString refused = take(why);
+        r.message = r.ok() ? said : refused;
+        return r;
+    }
+    /// Copy a partition out to a hardfile, or an HDZ; nothing here changes.
+    /// On success `message` is what a reader of it should know.
+    EditResult exportPartition(quint32 partition, const QString &path, bool compressed) const {
+        EditResult r;
+        char *report = nullptr;
+        char *why = nullptr;
+        r.code = ade_partition_export(m_raw, partition, path.toUtf8().constData(), compressed,
+                                      &report, &why);
+        const QString said = take(report);
+        const QString refused = take(why);
+        r.message = r.ok() ? said : refused;
+        return r;
+    }
+    /// Make a new partitioned disk of this image's volume, as `drive`.
+    EditResult volumeToDisk(const QByteArray &drive, const QString &path, bool compressed) const {
+        EditResult r;
+        char *report = nullptr;
+        char *why = nullptr;
+        r.code = ade_volume_to_disk(m_raw, drive.constData(), path.toUtf8().constData(),
+                                    compressed, &report, &why);
+        const QString said = take(report);
+        const QString refused = take(why);
+        r.message = r.ok() ? said : refused;
+        return r;
+    }
     /// Grow a partition into the unused space after it; `megabytes` 0 takes
     /// all of it.
     EditResult growPartition(quint32 partition, quint32 megabytes) {

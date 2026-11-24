@@ -11,6 +11,21 @@ Effort vocabulary: trivial | small | medium | large.
 
 ## Suggested
 
+### IMP-030 The emulator sometimes stalls part-way through a large write to a partitioned hardfile
+**Status:** suggested
+**Effort:** medium
+**Found:** 2026-11-24: `amigados_reads_and_fills_partitions_ade_has_grown` timed out in a full run, and again in 1 of 8 runs alone.
+
+**Where:** [src/api/tests/amigados.rs](../src/api/tests/amigados.rs), or FS-UAE beneath it.
+
+**What happens.** The script runs — earlier files are copied out — and then stops inside a copy of 3 MB, with no requester, for as long as it is given. The bitmap of the volume being written is left flagged invalid, as any interrupted write leaves it. Measured with the same two copies on a 32 MB partitioned disk, 20 runs each: volumes ADE grew, 4 stalls; volumes ADE created at that size, 0; **volumes AmigaDOS's own `Format` made, 5**. So it does not need anything ADE wrote into the volumes; what the runs share is the table and the emulator. 0 of 20 against 4 and 5 may be chance or may be a clue, and the stalls were not shown to be at the same place.
+
+**"Can't find SYS:Locale" is not a symptom.** It is on the screen of every run, since the Workbench disk has no `Locale` drawer. IMP-028 and the entry for it read it as the sign of booting the wrong disk; a screen showing only that says the script started, and nothing more.
+
+**What would be better.** Know where it stalls: have the script write a marker after each command, and find whether it is the emulator's hardfile thread (uncached, or a different controller) or AmigaDOS. Until then a retry would hide a real failure, so there is none.
+
+**Trade-offs.** Time in FS-UAE, for a fault in the test rig rather than in ADE; but D-024 part 2 makes this oracle the one partitioned writes rest on, and its reversal condition names a flaky harness.
+
 ## Applied
 
 ### IMP-029 Reading a large image holds it whole, two or three times over
@@ -59,7 +74,7 @@ A 4,000 MB hardfile opens, lists, checks and scans in 3–4 MB. Checking an *emp
 
 **Trade-offs.** The harness learns to read a partition table — ADE's own reader, which is the thing under test; the names it needs could instead be passed in by each test.
 
-**Applied 2026-11-24, with the names passed in.** Each test gives `run_with` a hardfile and the drives AmigaDOS makes of it, rather than the harness reading them with the reader under test; every one is locked once, including second partitions the harness used not to know of, and a script that calls `C:Lock` itself is refused before the emulator starts. The boot folder has `hard_drive_0_priority = 4`: above any partition a test makes bootable, below DF0's 5 so that BUG-023's floppy is still offered first. The growing test no longer lowers `DH1`, and the table-editing test raises it to 3, so the guard does not rest on a tie falling well: with the priority line removed that test times out, and with it passes. `amigados_mounts_and_fills_a_partitioned_disk_ade_creates`, which failed intermittently, passed eight runs in eight; that its failures were the tie is inferred, not seen.
+**Applied 2026-11-24, with the names passed in.** Each test gives `run_with` a hardfile and the drives AmigaDOS makes of it, rather than the harness reading them with the reader under test; every one is locked once, including second partitions the harness used not to know of, and a script that calls `C:Lock` itself is refused before the emulator starts. The boot folder has `hard_drive_0_priority = 4`: above any partition a test makes bootable, below DF0's 5 so that BUG-023's floppy is still offered first. The growing test no longer lowers `DH1`, and the table-editing test raises it to 3, so the guard does not rest on a tie falling well: with the priority line removed that test times out, and with it passes. `amigados_mounts_and_fills_a_partitioned_disk_ade_creates`, which failed intermittently, passed eight runs in eight; that its failures were the tie is inferred, not seen. *Corrected the same day: they may not have been. "Can't find SYS:Locale" is on every run's screen, and a stall that has nothing to do with booting was found (IMP-030). The priority is still needed — a partition above the boot folder does take the boot — but it is not shown to have fixed that failure.*
 
 ### IMP-027 A format, and an added partition, build a blank copy of the whole volume to read its blocks off
 **Status:** applied

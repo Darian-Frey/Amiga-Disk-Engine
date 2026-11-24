@@ -846,6 +846,12 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
     m_addPartition->setToolTip(QStringLiteral(
         "A new partition in unused space on this hard disk, formatted. Not bootable."));
     connect(m_addPartition, &QAction::triggered, this, &MainWindow::addPartitionSelected);
+    m_importPartition = partitions->addAction(QStringLiteral("Add partition from &hardfile..."));
+    m_importPartition->setToolTip(QStringLiteral(
+        "A new partition holding the volume in a hardfile, HDZ or floppy image, byte for "
+        "byte.\nNot bootable."));
+    connect(m_importPartition, &QAction::triggered, this,
+            &MainWindow::importPartitionSelected);
     m_renamePartition = partitions->addAction(QStringLiteral("&Rename partition..."));
     connect(m_renamePartition, &QAction::triggered, this,
             &MainWindow::renamePartitionSelected);
@@ -863,8 +869,21 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
         "were; Undo brings it back until you save."));
     connect(m_deletePartition, &QAction::triggered, this,
             &MainWindow::deletePartitionSelected);
+    partitions->addSeparator();
+    m_exportPartition = partitions->addAction(QStringLiteral("&Save partition as hardfile..."));
+    m_exportPartition->setToolTip(QStringLiteral(
+        "Copy the partition out to a hardfile or HDZ of its own, byte for byte, as it now "
+        "stands.\nNothing on this disk changes."));
+    connect(m_exportPartition, &QAction::triggered, this,
+            &MainWindow::exportPartitionSelected);
+    m_volumeToDisk = partitions->addAction(QStringLiteral("&Make a partitioned disk of this..."));
+    m_volumeToDisk->setToolTip(QStringLiteral(
+        "A new partitioned hard disk with this disk's volume as its one, bootable, "
+        "partition.\nNothing on this disk changes."));
+    connect(m_volumeToDisk, &QAction::triggered, this, &MainWindow::volumeToDiskSelected);
     for (QAction *a : {m_addPartition, m_renamePartition, m_bootPartition, m_growPartition,
-                       m_deletePartition}) {
+                       m_deletePartition, m_importPartition, m_exportPartition,
+                       m_volumeToDisk}) {
         a->setEnabled(false);
     }
 
@@ -3115,12 +3134,9 @@ bool MainWindow::deletePartition(QTreeWidgetItem *item) {
     return tableEdited(*open, r, QStringLiteral("Deleted %1 from %2").arg(drive, open->name));
 }
 
-void MainWindow::addPartitionSelected() {
-    Open *open = imageFor(m_selected);
-    if (!open) return;
-    // A drive name no partition has yet: DH0, DH1, ...
+QString MainWindow::freeDriveName(const Open &open) {
     QStringList taken;
-    if (const ade::Partitions table = open->image.partitions()) {
+    if (const ade::Partitions table = open.image.partitions()) {
         for (size_t i = 0; i < table.count(); ++i) {
             AdePartition p{};
             if (table.at(i, &p)) taken << ade::latin1(p.name).toUpper();
@@ -3128,10 +3144,121 @@ void MainWindow::addPartitionSelected() {
     }
     int n = 0;
     while (taken.contains(QStringLiteral("DH%1").arg(n))) ++n;
+    return QStringLiteral("DH%1").arg(n);
+}
 
+// Whether a file to be written is to be an HDZ: only its name says.
+static bool namedCompressed(const QString &path) {
+    return path.endsWith(QStringLiteral(".hdz"), Qt::CaseInsensitive);
+}
+
+bool MainWindow::importPartition(QTreeWidgetItem *item, const QString &drive,
+                                 const QString &path) {
+    Open *open = item ? imageFor(item) : editTarget();
+    if (!open || path.isEmpty()) return false;
+    const ade::EditResult r = open->image.importPartition(drive.toUtf8(), path);
+    if (!tableEdited(*open, r,
+                     QStringLiteral("Added %1 to %2, from %3")
+                         .arg(drive, open->name, QFileInfo(path).fileName()))) {
+        return false;
+    }
+    if (!r.message.isEmpty()) emit reported(QStringLiteral("Added %1").arg(drive), r.message);
+    return true;
+}
+
+bool MainWindow::exportPartition(QTreeWidgetItem *item, const QString &path) {
+    Open *open = imageFor(item);
+    quint32 index = 0;
+    QString drive;
+    if (!open || !partitionAt(item, open->image, &index, &drive)) {
+        emit errorOccurred(QStringLiteral("Choose a partition to save first."));
+        return false;
+    }
+    if (path.isEmpty()) return false;
+    const ade::EditResult r = open->image.exportPartition(index, path, namedCompressed(path));
+    if (!r.ok()) {
+        emit errorOccurred(
+            QStringLiteral("Could not save %1 as %2: %3").arg(drive, path, r.message));
+        return false;
+    }
+    statusBar()->showMessage(QStringLiteral("Saved %1 as %2").arg(drive, path));
+    emit reported(QStringLiteral("Saved %1").arg(drive), r.message);
+    return true;
+}
+
+bool MainWindow::volumeToDisk(QTreeWidgetItem *item, const QString &drive, const QString &path) {
+    Open *open = item ? imageFor(item) : editTarget();
+    if (!open || path.isEmpty()) return false;
+    const ade::EditResult r =
+        open->image.volumeToDisk(drive.toUtf8(), path, namedCompressed(path));
+    if (!r.ok()) {
+        emit errorOccurred(QStringLiteral("Could not make a partitioned disk of %1: %2")
+                               .arg(open->name, r.message));
+        return false;
+    }
+    // Not as a disk New disk made: what is in it is somebody's data, so its
+    // first save asks and keeps the original, as for any disk (D-020).
+    openImage(path);
+    emit reported(QStringLiteral("Made %1").arg(QFileInfo(path).fileName()), r.message);
+    return true;
+}
+
+QString MainWindow::chooseHardfileSave(const QString &suggested) {
+    return m_chooseHardfileSave
+               ? m_chooseHardfileSave(suggested)
+               : QFileDialog::getSaveFileName(
+                     this, QStringLiteral("Save as..."), QDir::homePath() + "/" + suggested,
+                     QStringLiteral("Hard disk images (*.hdf *.hdz)"));
+}
+
+void MainWindow::importPartitionSelected() {
+    Open *open = imageFor(m_selected);
+    if (!open) return;
+    const QString path =
+        m_chooseHardfileOpen
+            ? m_chooseHardfileOpen(QString())
+            : QFileDialog::getOpenFileName(
+                  this, QStringLiteral("Add which volume?"), QDir::homePath(),
+                  QStringLiteral("Volumes (*.hdf *.hdz *.adf *.adz);;All files (*)"));
+    if (path.isEmpty()) return;
+    bool ok = false;
+    const QString drive =
+        QInputDialog::getText(this, QStringLiteral("Add partition from hardfile"),
+                              QStringLiteral("The drive's name — what AmigaDOS mounts it as.\nIts "
+                                             "volume keeps its own name."),
+                              QLineEdit::Normal, freeDriveName(*open), &ok);
+    if (ok && !drive.trimmed().isEmpty()) importPartition(m_selected, drive.trimmed(), path);
+}
+
+void MainWindow::exportPartitionSelected() {
+    Open *open = imageFor(m_selected);
+    quint32 index = 0;
+    QString drive;
+    if (!open || !partitionAt(m_selected, open->image, &index, &drive)) return;
+    exportPartition(m_selected, chooseHardfileSave(QStringLiteral("%1.hdf").arg(drive)));
+}
+
+void MainWindow::volumeToDiskSelected() {
+    Open *open = m_selected ? imageFor(m_selected) : editTarget();
+    if (!open) return;
+    bool ok = false;
+    const QString drive = QInputDialog::getText(
+        this, QStringLiteral("Make a partitioned disk"),
+        QStringLiteral("The partition's drive name — what AmigaDOS mounts it as.\nIts volume "
+                       "keeps its own name."),
+        QLineEdit::Normal, QStringLiteral("DH0"), &ok);
+    if (!ok || drive.trimmed().isEmpty()) return;
+    const QString suggested =
+        QStringLiteral("%1 partitioned.hdf").arg(QFileInfo(open->name).completeBaseName());
+    volumeToDisk(m_selected, drive.trimmed(), chooseHardfileSave(suggested));
+}
+
+void MainWindow::addPartitionSelected() {
+    Open *open = imageFor(m_selected);
+    if (!open) return;
     QDialog dialog(this);
     dialog.setWindowTitle(QStringLiteral("Add partition to %1").arg(open->name));
-    auto *drive = new QLineEdit(QStringLiteral("DH%1").arg(n), &dialog);
+    auto *drive = new QLineEdit(freeDriveName(*open), &dialog);
     drive->setObjectName(QStringLiteral("addPartitionDrive"));
     auto *rest = new QCheckBox(QStringLiteral("All of the largest unused space"), &dialog);
     rest->setObjectName(QStringLiteral("addPartitionRest"));
@@ -3497,7 +3624,10 @@ void MainWindow::updateEditActions() {
                         open->image.partitions();
     const bool onPartition = device && partitionOf(m_selected) != ADE_WHOLE_IMAGE;
     if (m_addPartition) m_addPartition->setEnabled(device);
-    for (QAction *a : {m_renamePartition, m_bootPartition, m_growPartition, m_deletePartition}) {
+    if (m_importPartition) m_importPartition->setEnabled(device);
+    if (m_volumeToDisk) m_volumeToDisk->setEnabled(plain && !open->image.partitions());
+    for (QAction *a : {m_renamePartition, m_bootPartition, m_growPartition, m_deletePartition,
+                       m_exportPartition}) {
         if (a) a->setEnabled(onPartition);
     }
     const bool entry = plain && isEditableEntry(m_selected, m_tree);

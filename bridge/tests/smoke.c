@@ -454,6 +454,26 @@ int main(int argc, char **argv) {
                   "and a partition added in its place");
             check(ade_partition_grow(device, 1, 0, NULL) == ADE_REFUSED,
                   "a partition with nothing unused after it does not grow");
+            /* Out to a hardfile and into a disk of its own (F-038). */
+            char lone_path[4096];
+            char wrapped_path[4096];
+            snprintf(lone_path, sizeof lone_path, "%s.lone.hdz", argv[3]);
+            snprintf(wrapped_path, sizeof wrapped_path, "%s.wrapped.hdf", argv[3]);
+            remove(lone_path);
+            remove(wrapped_path);
+            char *notes = NULL;
+            check(ade_partition_export(device, 0, lone_path, true, &notes, NULL) == ADE_OK &&
+                      notes != NULL,
+                  "a partition is saved as an HDZ, with what to know of it");
+            ade_string_free(notes);
+            AdeImage *lone = ade_image_open(lone_path, NULL, NULL);
+            check(ade_volume_to_disk(lone, "DH5", wrapped_path, false, NULL, NULL) == ADE_OK,
+                  "and its volume made a partitioned disk");
+            ade_image_free(lone);
+            check(ade_partition_import(device, "DH6", lone_path, NULL, NULL, NULL) == ADE_REFUSED,
+                  "a disk with no room for a volume refuses it");
+            remove(lone_path);
+            remove(wrapped_path);
             check(ade_partition_rename(device, 7, "X", NULL) == ADE_REFUSED &&
                       ade_partition_add(NULL, &again, NULL, NULL) == ADE_NULL_ARGUMENT,
                   "a partition that is not there is refused; NULL is tolerated");

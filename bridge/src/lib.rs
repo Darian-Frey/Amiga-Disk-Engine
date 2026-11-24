@@ -2990,6 +2990,152 @@ pub unsafe extern "C" fn ade_partition_add(
     result
 }
 
+/// The code a refused conversion earns.
+fn reshape_code(e: &ade_core::reshape::ReshapeError) -> AdeResult {
+    use ade_core::reshape::ReshapeError;
+    match e {
+        ReshapeError::Refused(_) => AdeResult::Refused,
+        ReshapeError::Exists => AdeResult::AlreadyExists,
+        ReshapeError::Io(_) => AdeResult::Io,
+    }
+}
+
+/// Make a conversion from the handle's image as it now stands, to `path`.
+///
+/// # Safety
+/// `path` NUL-terminated or null; `out_report` and `out_message` as
+/// `out_message` is for [`ade_edit_mkdir`].
+unsafe fn reshape(
+    image: *const AdeImage,
+    path: *const c_char,
+    out_report: *mut *mut c_char,
+    out_message: *mut *mut c_char,
+    convert: impl FnOnce(
+        &Image,
+        &Inspection,
+        &std::path::Path,
+    ) -> Result<ade_core::reshape::Reshaped, ade_core::reshape::ReshapeError>,
+) -> AdeResult {
+    // SAFETY: the caller's contract.
+    let path = match unsafe { optional_text(path) } {
+        Ok(Some(p)) => p.to_owned(),
+        Ok(None) => return AdeResult::NullArgument,
+        Err(code) => return code,
+    };
+    with_image(image, AdeResult::NullArgument, |image| {
+        let Some(open) = image.image.as_ref() else {
+            set_message(out_message, "ADE could not read this image's blocks");
+            return AdeResult::Refused;
+        };
+        match convert(open, &image.inspection, std::path::Path::new(&path)) {
+            Ok(made) => {
+                set_message(out_report, &made.notes.join("\n"));
+                AdeResult::Ok
+            }
+            Err(e) => {
+                set_message(out_message, &e.to_string());
+                reshape_code(&e)
+            }
+        }
+    })
+}
+
+/// Copy partition `partition` out to `path` as a standalone hardfile, byte
+/// for byte, or with `compressed` as an HDZ (F-038). The image as it now
+/// stands, edits not yet saved included; nothing in it changes. Never over an
+/// existing file. `out_report` receives what a reader of the hardfile should
+/// know, a line each — that it has no drive name, for one.
+///
+/// # Safety
+/// `image` a live handle or null; `path` NUL-terminated or null; `out_report`
+/// and `out_message` as `out_message` is for [`ade_edit_mkdir`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ade_partition_export(
+    image: *const AdeImage,
+    partition: u32,
+    path: *const c_char,
+    compressed: bool,
+    out_report: *mut *mut c_char,
+    out_message: *mut *mut c_char,
+) -> AdeResult {
+    // SAFETY: the caller's contract, passed on.
+    unsafe {
+        reshape(image, path, out_report, out_message, |open, about, path| {
+            let index = partition as usize;
+            ade_core::reshape::partition_out(open, about, index, path, compressed)
+        })
+    }
+}
+
+/// Make a new partitioned disk at `path` whose one partition, the bootable
+/// `name`, is this image's volume byte for byte (F-038). Otherwise as
+/// [`ade_partition_export`].
+///
+/// # Safety
+/// As [`ade_partition_export`], and `name` NUL-terminated or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ade_volume_to_disk(
+    image: *const AdeImage,
+    name: *const c_char,
+    path: *const c_char,
+    compressed: bool,
+    out_report: *mut *mut c_char,
+    out_message: *mut *mut c_char,
+) -> AdeResult {
+    // SAFETY: the caller's contract.
+    let name = match unsafe { optional_text(name) } {
+        Ok(Some(n)) => n.to_owned(),
+        Ok(None) => return AdeResult::NullArgument,
+        Err(code) => return code,
+    };
+    // SAFETY: the caller's contract, passed on.
+    unsafe {
+        reshape(image, path, out_report, out_message, |open, about, path| {
+            ade_core::reshape::into_new_disk(open, about, &name, path, compressed)
+        })
+    }
+}
+
+/// Add a partition called `name` holding the volume in the image file at
+/// `path` — a hardfile, an HDZ or a floppy image — byte for byte, in the
+/// first unused cylinders it fits (F-038); not bootable. One undo step. On
+/// success `*out_index` (if not null) is its index, and `out_report` receives
+/// what to know of it, or an empty string.
+///
+/// # Safety
+/// `image` a live handle or null; `name` and `path` NUL-terminated or null;
+/// `out_index` writable or null; `out_report` and `out_message` as
+/// `out_message` is for [`ade_edit_mkdir`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ade_partition_import(
+    image: *mut AdeImage,
+    name: *const c_char,
+    path: *const c_char,
+    out_index: *mut u32,
+    out_report: *mut *mut c_char,
+    out_message: *mut *mut c_char,
+) -> AdeResult {
+    // SAFETY: the caller's contract, for each string.
+    let (name, path) = match unsafe { (optional_text(name), optional_text(path)) } {
+        (Ok(Some(n)), Ok(Some(p))) => (n.to_owned(), PathBuf::from(p)),
+        (Err(code), _) | (_, Err(code)) => return code,
+        _ => return AdeResult::NullArgument,
+    };
+    let mut made = None;
+    let result = table_edit(image, out_message, |s| {
+        made = Some(s.import_partition(&name, &path)?);
+        Ok(())
+    });
+    if let Some(made) = made.filter(|_| result == AdeResult::Ok) {
+        set_message(out_report, made.note.as_deref().unwrap_or(""));
+        if !out_index.is_null() {
+            // SAFETY: checked non-null; the caller promises it is writable.
+            unsafe { *out_index = u32::try_from(made.index).unwrap_or(u32::MAX) };
+        }
+    }
+    result
+}
+
 /// Grow partition `partition` into the unused cylinders straight after it —
 /// to `megabytes` in all, or 0 for all of them — and its volume with it: the
 /// rootblock moves to the middle of the larger partition, as AmigaDOS

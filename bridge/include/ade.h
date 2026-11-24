@@ -971,6 +971,28 @@ AdeResult ade_edit_format_as(AdeImage *image, uint32_t partition, AdeBytes name,
  * name; not bootable. `*out_index` (if not NULL) is its index. */
 AdeResult ade_partition_add(AdeImage *image, const AdePartitionSpec *spec,
                             uint32_t *out_index, char **out_message);
+/* Add a partition called `name` holding the volume in the image file at
+ * `path` -- a hardfile, an HDZ or a floppy image -- byte for byte, in the
+ * first unused cylinders it fits; not bootable. Refused for an image that is
+ * not one sound volume. `*out_index` (if not NULL) is its index; `out_report`
+ * (if not NULL) gets what to know of it, perhaps "", freed with
+ * ade_string_free. */
+AdeResult ade_partition_import(AdeImage *image, const char *name, const char *path,
+                               uint32_t *out_index, char **out_report, char **out_message);
+/* Copy a partition out to `path` as a standalone hardfile, byte for byte, or
+ * with `compressed` as an HDZ. The image as it now stands, unsaved edits
+ * included; nothing in it changes. Never over an existing file
+ * (ADE_ALREADY_EXISTS). Refused where a hardfile could not say what the
+ * partition does: blocks not of 512 bytes, reserved blocks not 2.
+ * `out_report` (if not NULL) gets what a reader of the hardfile should know,
+ * a line each, freed with ade_string_free. */
+AdeResult ade_partition_export(const AdeImage *image, uint32_t partition, const char *path,
+                               bool compressed, char **out_report, char **out_message);
+/* Make a new partitioned disk at `path` whose one partition, the bootable
+ * `name`, is this unpartitioned image's volume byte for byte. Otherwise as
+ * ade_partition_export. */
+AdeResult ade_volume_to_disk(const AdeImage *image, const char *name, const char *path,
+                             bool compressed, char **out_report, char **out_message);
 /* Grow a partition into the unused cylinders straight after it -- to
  * `megabytes` in all, or 0 for all of them -- and its volume with it: the
  * rootblock moves to the middle of the larger partition, as AmigaDOS

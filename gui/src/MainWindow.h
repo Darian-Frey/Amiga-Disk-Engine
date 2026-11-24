@@ -164,6 +164,15 @@ public:
     bool renamePartition(QTreeWidgetItem *item, const QString &drive);
     /// Mark the partition `item` is in bootable at `priority`, or not.
     bool setPartitionBoot(QTreeWidgetItem *item, bool bootable, int priority);
+    /// Add a partition to the disk `item` belongs to holding the volume in
+    /// the image file at `path`, byte for byte.
+    bool importPartition(QTreeWidgetItem *item, const QString &drive, const QString &path);
+    /// Copy the partition `item` is in out to a new hardfile at `path` — an
+    /// HDZ if it is named one. Not an edit: nothing in the disk changes.
+    bool exportPartition(QTreeWidgetItem *item, const QString &path);
+    /// Make a new partitioned disk at `path` (an HDZ if it is named one) with
+    /// the volume of the disk `item` belongs to as `drive`, and open it.
+    bool volumeToDisk(QTreeWidgetItem *item, const QString &drive, const QString &path);
     /// Grow the partition `item` is in into the unused space after it, to
     /// `megabytes` in all (0: all of it), and its volume with it.
     bool growPartition(QTreeWidgetItem *item, quint32 megabytes);
@@ -207,6 +216,12 @@ public:
     using ChoosePath = std::function<QString(const QString &suggested)>;
     void setNewDiskPathChooser(ChoosePath choose) { m_chooseNewDiskPath = std::move(choose); }
 
+    /// Where a converted hardfile is saved, given the name it suggests, and
+    /// which one is added as a partition; empty cancels. Each defaults to a
+    /// file dialog; a test replaces it.
+    void setHardfileSaveChooser(ChoosePath choose) { m_chooseHardfileSave = std::move(choose); }
+    void setHardfileOpenChooser(ChoosePath choose) { m_chooseHardfileOpen = std::move(choose); }
+
     // How many images are open. Several can be, which is what makes
     // cross-image search meaningful.
     size_t imageCount() const { return m_images.size(); }
@@ -245,6 +260,9 @@ private slots:
     void bootPartitionSelected();
     void deletePartitionSelected();
     void growPartitionSelected();
+    void importPartitionSelected();
+    void exportPartitionSelected();
+    void volumeToDiskSelected();
     void filesDropped(QTreeWidgetItem *target, const QList<QUrl> &urls);
     void extractSelected();
     void search();
@@ -476,6 +494,14 @@ private:
     QAction *m_bootPartition = nullptr;
     QAction *m_deletePartition = nullptr;
     QAction *m_growPartition = nullptr;
+    QAction *m_importPartition = nullptr;
+    QAction *m_exportPartition = nullptr;
+    QAction *m_volumeToDisk = nullptr;
+    ChoosePath m_chooseHardfileSave;
+    ChoosePath m_chooseHardfileOpen;
+    // A name no partition of the disk has yet: DH0, DH1, ...
+    static QString freeDriveName(const Open &open);
+    QString chooseHardfileSave(const QString &suggested);
     // A table edit's outcome: said, and the disk's rows rebuilt, or why not.
     bool tableEdited(Open &open, const ade::EditResult &r, const QString &done);
     Confirm m_confirmWipe;

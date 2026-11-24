@@ -26,7 +26,7 @@ use ade_filesystem::rdb::{self, END_OF_LIST, NewPartition, NewTable, Partition};
 use ade_filesystem::volume::Volume;
 
 use crate::create::{HEADS, MAX_PARTITIONED_MB, SECTORS, TABLE_CYLINDERS};
-use crate::inspect::inspect_in_place;
+use crate::inspect::{Inspection, inspect_in_place};
 use crate::{Image, Input};
 
 /// Why a conversion was not made.
@@ -113,7 +113,30 @@ pub fn convert(
     output: &Path,
     compressed: bool,
 ) -> Result<Reshaped, ReshapeError> {
-    let image = open(input)?;
+    let (image, inspection) = open(input)?;
+    if image.rdb().ok().flatten().is_none() {
+        return into_new_disk(&image, &inspection, partition, output, compressed);
+    }
+    let (parts, _) = image
+        .partitions()
+        .map_err(|e| refuse(format!("the partition table cannot be read: {e}")))?;
+    let index = crate::find_partition(&parts, partition).map_err(refuse)?;
+    partition_out(&image, &inspection, index, output, compressed)
+}
+
+/// [`convert`] out of an image already open — as it now stands, edits not
+/// yet saved included — by the partition's index in its table.
+///
+/// # Errors
+/// [`ReshapeError`].
+pub fn partition_out(
+    image: &Image,
+    inspection: &Inspection,
+    index: usize,
+    output: &Path,
+    compressed: bool,
+) -> Result<Reshaped, ReshapeError> {
+    whole(image, inspection)?;
     let (parts, faults) = image
         .partitions()
         .map_err(|e| refuse(format!("the partition table cannot be read: {e}")))?;
@@ -122,43 +145,66 @@ pub fn convert(
             "the partition table cannot be read: {fault}"
         )));
     }
-    let has_table = image.rdb().ok().flatten().is_some();
-    let mut made = if has_table {
-        let index = crate::find_partition(&parts, partition).map_err(refuse)?;
-        let part = parts
-            .get(index)
-            .ok_or_else(|| refuse("no such partition"))?;
-        out_of(&image, part, output, compressed)?
-    } else {
-        into_new(&image, partition, output, compressed)?
-    };
-    if compressed {
-        made.to = Kind::Gzip;
-    }
-    Ok(made)
+    let part = parts
+        .get(index)
+        .ok_or_else(|| refuse(format!("no partition {index}; it has {}", parts.len())))?;
+    out_of(image, part, output, compressed)
 }
 
-fn open(path: &Path) -> Result<Image, ReshapeError> {
+/// [`convert`] into a new disk, from an image already open, with the volume
+/// as partition `name`.
+///
+/// # Errors
+/// [`ReshapeError`].
+pub fn into_new_disk(
+    image: &Image,
+    inspection: &Inspection,
+    name: &str,
+    output: &Path,
+    compressed: bool,
+) -> Result<Reshaped, ReshapeError> {
+    whole(image, inspection)?;
+    if image.rdb().ok().flatten().is_some() {
+        return Err(refuse("it is already a partitioned disk"));
+    }
+    into_new(image, name, output, compressed)
+}
+
+fn open(path: &Path) -> Result<(Image, Inspection), ReshapeError> {
     let input = Input::open(path)?;
     let inspection = input.inspect();
-    let kind = inspection.detection.kind;
-    if !matches!(kind, Kind::Adf { .. } | Kind::Hardfile | Kind::RigidDisk) {
-        return Err(refuse(format!(
-            "{kind} is not a volume or a partitioned disk; convert it to a sector image first"
-        )));
-    }
-    let size = inspection.size;
+    // Asked first: most other containers would not open as an image at all.
+    sectors(&inspection)?;
     let image = input.into_image().map_err(|e| match e {
         crate::InspectionError::Io(e) => ReshapeError::Io(e),
         crate::InspectionError::Geometry(_) => refuse(e.to_string()),
     })?;
+    whole(&image, &inspection)?;
+    Ok((image, inspection))
+}
+
+/// Whether the container is sectors, so that its blocks are all it holds.
+fn sectors(inspection: &Inspection) -> Result<(), ReshapeError> {
+    let kind = inspection.detection.kind;
+    if matches!(kind, Kind::Adf { .. } | Kind::Hardfile | Kind::RigidDisk) {
+        return Ok(());
+    }
+    Err(refuse(format!(
+        "{kind} is not a volume or a partitioned disk; convert it to a sector image first"
+    )))
+}
+
+/// Whether the mounted image is everything in the container.
+fn whole(image: &Image, inspection: &Inspection) -> Result<(), ReshapeError> {
+    sectors(inspection)?;
     let blocks = image.geometry().total_bytes();
-    if kind != Kind::RigidDisk && blocks != size {
+    if inspection.detection.kind != Kind::RigidDisk && blocks != inspection.size {
         return Err(refuse(format!(
-            "the volume is {blocks} bytes of the image's {size}, and the rest would be lost"
+            "the volume is {blocks} bytes of the image's {}, and the rest would be lost",
+            inspection.size
         )));
     }
-    Ok(image)
+    Ok(())
 }
 
 /// A volume ADE can put in a partition: its name and dostype.
@@ -239,7 +285,11 @@ fn out_of(
     let written = write_out(output, compressed, size, &[], &bytes, 0)?;
     Ok(Reshaped {
         from: Kind::RigidDisk,
-        to: Kind::Hardfile,
+        to: if compressed {
+            Kind::Gzip
+        } else {
+            Kind::Hardfile
+        },
         partition: name,
         volume,
         bytes: written,
@@ -361,7 +411,11 @@ fn into_new(
     ));
     Ok(Reshaped {
         from,
-        to: Kind::RigidDisk,
+        to: if compressed {
+            Kind::Gzip
+        } else {
+            Kind::RigidDisk
+        },
         partition: name.to_owned(),
         volume: Some(held.name),
         bytes: written,
@@ -452,7 +506,7 @@ pub(crate) struct Incoming {
 }
 
 pub(crate) fn incoming(path: &Path) -> Result<Incoming, ReshapeError> {
-    let image = open(path)?;
+    let (image, _) = open(path)?;
     if image.rdb().ok().flatten().is_some() {
         return Err(refuse(
             "it is a partitioned disk, not a volume; convert one of its partitions to a \
