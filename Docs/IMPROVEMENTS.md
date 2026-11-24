@@ -11,8 +11,10 @@ Effort vocabulary: trivial | small | medium | large.
 
 ## Suggested
 
+## Applied
+
 ### IMP-028 The AmigaDOS harness locks hardfiles by unit number, which a script can repeat and a partitioned disk need not have
-**Status:** suggested
+**Status:** applied
 **Effort:** small
 **Found:** 2026-11-18, growing partitions (F-038): a run hung on *Volume Grown is write protected*, which looked like a fault in ADE's dircache format until it was traced, by probing, to the script.
 
@@ -27,7 +29,7 @@ Effort vocabulary: trivial | small | medium | large.
 
 **Trade-offs.** The harness learns to read a partition table — ADE's own reader, which is the thing under test; the names it needs could instead be passed in by each test.
 
-## Applied
+**Applied 2026-11-24, with the names passed in.** Each test gives `run_with` a hardfile and the drives AmigaDOS makes of it, rather than the harness reading them with the reader under test; every one is locked once, including second partitions the harness used not to know of, and a script that calls `C:Lock` itself is refused before the emulator starts. The boot folder has `hard_drive_0_priority = 4`: above any partition a test makes bootable, below DF0's 5 so that BUG-023's floppy is still offered first. The growing test no longer lowers `DH1`, and the table-editing test raises it to 3, so the guard does not rest on a tie falling well: with the priority line removed that test times out, and with it passes. `amigados_mounts_and_fills_a_partitioned_disk_ade_creates`, which failed intermittently, passed eight runs in eight; that its failures were the tie is inferred, not seen.
 
 ### IMP-027 A format, and an added partition, build a blank copy of the whole volume to read its blocks off
 **Status:** applied

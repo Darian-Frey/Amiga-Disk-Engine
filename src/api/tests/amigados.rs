@@ -13,12 +13,15 @@
 //! and a fresh clone are unaffected. The ROM and Workbench are copyrighted
 //! and never enter the repository (D-010).
 //!
-//! Three things a run must respect, each found by a run that did not:
+//! Four things a run must respect, each found by a run that did not:
 //! - **A requester waits forever.** "Please insert volume" stalls the script,
 //!   so every run has a limit and fails with the emulator's log when the
 //!   marker has not appeared.
 //! - **AmigaDOS writes lazily.** Stopped at the marker, a floppy is left
 //!   half-written; the script locks it and waits before leaving the marker.
+//! - **Locking is the harness's, and so is booting.** A drive locked twice, or
+//!   one that does not exist, is a requester; a partition that ties with the
+//!   boot folder may boot instead (IMP-028).
 //! - **Scripts are Latin-1**, as AmigaDOS reads them.
 
 #![allow(
@@ -138,14 +141,47 @@ fn run(
     run_with(setup, name, (floppies, &[]), inputs, commands, limit)
 }
 
-/// As [`run`], with `hardfiles` mounted as `DH1:`, `DH2:` … beside the
-/// floppies. A raw hardfile is given FS-UAE's default geometry — 32 sectors,
+/// A hardfile to mount, and the drives AmigaDOS makes of it: its unit's
+/// `DH<n>:` for a raw one, its partitions' own names for a partitioned one.
+/// The test says which, since the reader that could is under test.
+struct Hardfile<'a> {
+    path: &'a Path,
+    drives: &'a [&'a str],
+}
+
+/// The boot folder's boot priority: above any partition a test makes
+/// bootable — a tie at 0 boots either (IMP-028) — and below DF0's 5, so that
+/// a floppy is still offered first (BUG-023).
+const BOOT_PRIORITY: i32 = 4;
+
+/// The startup-sequence: `commands`, then every drive locked — which flushes
+/// it — and the marker.
+fn startup(name: &str, commands: &str, floppies: usize, hardfiles: &[Hardfile]) -> String {
+    assert!(
+        !commands.to_ascii_lowercase().contains("c:lock "),
+        "{name}: the harness locks the drives; a second lock hangs the Amiga (IMP-028)"
+    );
+    let mut script = String::from(PRELUDE);
+    script.push_str(commands);
+    for drive in 0..floppies {
+        let _ = writeln!(script, "C:Lock DF{drive}: ON");
+    }
+    for drive in hardfiles.iter().flat_map(|h| h.drives) {
+        let _ = writeln!(script, "C:Lock {drive}: ON");
+    }
+    script.push_str("C:Wait 3\nEcho \"done\" >SYS:out/done\nEndCLI\n");
+    script
+}
+
+/// As [`run`], with `hardfiles` mounted as units 1, 2 … beside the floppies.
+/// Every drive named is locked when the script ends, and by nothing else: a
+/// drive locked twice hangs on a requester (IMP-028). A raw hardfile is given FS-UAE's default geometry — 32 sectors,
 /// 1 surface, 2 reserved blocks — which is the shape ADE writes, and which
 /// stops at 65,535 cylinders: a little under 1 GB.
 fn run_with(
     setup: &Setup,
     name: &str,
-    (floppies, hardfiles): (&[&Path], &[&Path]),
+    (floppies, hardfiles): (&[&Path], &[Hardfile]),
     inputs: &[(&str, &[u8])],
     commands: &str,
     limit: Duration,
@@ -168,20 +204,13 @@ fn run_with(
     }
     fs::write(boot.join("S/cr"), b"\n").unwrap();
 
-    let mut script = String::from(PRELUDE);
-    script.push_str(commands);
-    for drive in 0..floppies.len() {
-        let _ = writeln!(script, "C:Lock DF{drive}: ON");
-    }
-    for unit in 1..=hardfiles.len() {
-        let _ = writeln!(script, "C:Lock DH{unit}: ON");
-    }
-    script.push_str("C:Wait 3\nEcho \"done\" >SYS:out/done\nEndCLI\n");
+    let script = startup(name, commands, floppies.len(), hardfiles);
     fs::write(boot.join("S/Startup-Sequence"), latin1(&script)).unwrap();
 
     let mut config = format!(
         "[fs-uae]\namiga_model = A1200\nkickstart_file = {}\n\
          hard_drive_0 = {}\nhard_drive_0_label = Boot\n\
+         hard_drive_0_priority = {BOOT_PRIORITY}\n\
          writable_floppy_images = 1\nfloppy_drive_speed = 0\n\
          fullscreen = 0\nuae_sound_output = none\nbase_dir = {}\n",
         setup.kickstart.display(),
@@ -192,7 +221,12 @@ fn run_with(
         let _ = writeln!(config, "floppy_drive_{drive} = {}", floppy.display());
     }
     for (unit, hardfile) in hardfiles.iter().enumerate() {
-        let _ = writeln!(config, "hard_drive_{} = {}", unit + 1, hardfile.display());
+        let _ = writeln!(
+            config,
+            "hard_drive_{} = {}",
+            unit + 1,
+            hardfile.path.display()
+        );
     }
     let cfg = dir.join("run.fs-uae");
     fs::write(&cfg, config).unwrap();
@@ -953,7 +987,19 @@ fn large_hardfiles_need_a_bitmap_chain_and_amigados_reads_and_writes_both_ways()
     let outcome = run_with(
         &setup,
         "bighd-1",
-        (&[], &[&ade_made, &zeros]),
+        (
+            &[],
+            &[
+                Hardfile {
+                    path: &ade_made,
+                    drives: &["DH1"],
+                },
+                Hardfile {
+                    path: &zeros,
+                    drives: &["DH2"],
+                },
+            ],
+        ),
         &[("theirs", &theirs)],
         commands,
         Duration::from_secs(120),
@@ -988,7 +1034,19 @@ fn large_hardfiles_need_a_bitmap_chain_and_amigados_reads_and_writes_both_ways()
     let outcome = run_with(
         &setup,
         "bighd-2",
-        (&[], &[&ade_made, &zeros]),
+        (
+            &[],
+            &[
+                Hardfile {
+                    path: &ade_made,
+                    drives: &["DH1"],
+                },
+                Hardfile {
+                    path: &zeros,
+                    drives: &["DH2"],
+                },
+            ],
+        ),
         &[],
         "C:Copy Fmt:from-ade.bin SYS:out/from-ade\n",
         Duration::from_secs(90),
@@ -1066,12 +1124,17 @@ fn amigados_reads_and_writes_the_partitions_ade_edits_on_a_partitioned_disk() {
                     C:Copy DH2:Dir/payload.bin SYS:out/ofs\n\
                     C:Copy DH1:hello.txt SYS:out/hello\n\
                     C:Copy SYS:in/theirs DH2:theirs.bin\n\
-                    C:MakeDir DH1:Theirs\n\
-                    C:Lock DH2: ON\n";
+                    C:MakeDir DH1:Theirs\n";
     let outcome = run_with(
         &setup,
         "rdb",
-        (&[], &[&disk]),
+        (
+            &[],
+            &[Hardfile {
+                path: &disk,
+                drives: &["DH1", "DH2"],
+            }],
+        ),
         &[("theirs", &theirs)],
         commands,
         Duration::from_secs(120),
@@ -1139,12 +1202,17 @@ fn amigados_mounts_and_fills_a_partitioned_disk_ade_creates() {
                     C:Copy SYS:in/theirs Old:Box/theirs.bin\n\
                     C:Copy Fast:theirs.bin SYS:out/fast\n\
                     C:Copy Old:Box/theirs.bin SYS:out/old\n\
-                    C:Info >SYS:out/info\n\
-                    C:Lock DH2: ON\n";
+                    C:Info >SYS:out/info\n";
     let outcome = run_with(
         &setup,
         "rdbmade",
-        (&[], &[&disk]),
+        (
+            &[],
+            &[Hardfile {
+                path: &disk,
+                drives: &["DH1", "DH2"],
+            }],
+        ),
         &[("theirs", &theirs)],
         commands,
         Duration::from_secs(120),
@@ -1178,7 +1246,7 @@ fn amigados_mounts_and_fills_a_partitioned_disk_ade_creates() {
 fn amigados_mounts_a_partition_table_ade_has_edited() {
     // F-038, D-024 part 5: a table changed by every edit ADE makes to one —
     // a partition deleted and another added in its place, one added in the
-    // rest of the disk, a drive renamed, a boot priority lowered, a partition
+    // rest of the disk, a drive renamed, a boot priority raised, a partition
     // reformatted as another filesystem — mounts under AmigaDOS, which
     // writes into each partition and reads back; ADE reads what it wrote.
     use ade_core::create::{self, PartitionSize, PartitionSpec};
@@ -1212,8 +1280,10 @@ fn amigados_mounts_a_partition_table_ade_has_edited() {
     s.add_partition("DH3", PartitionSize::Rest, dostype(5), Some("Three"))
         .unwrap();
     s.rename_partition("DH3", "DH5").unwrap();
-    // Lowered, never raised: the boot folder must stay the one that boots.
-    s.set_partition_boot("DH1", Some(-5)).unwrap();
+    // Above 0, where a tie might pass by luck: only the boot folder's own
+    // priority keeps DH1 from booting instead, and running nothing.
+    s.set_partition_boot("DH1", Some(BOOT_PRIORITY - 1))
+        .unwrap();
     s.select_partition("DH2").unwrap();
     s.format_as(Some(b"TwoFFS"), Some(dostype(1))).unwrap();
     let disk = dir.join("edited.hdf");
@@ -1227,13 +1297,17 @@ fn amigados_mounts_a_partition_table_ade_has_edited() {
                     C:Copy DH1:a.bin SYS:out/one\n\
                     C:Copy DH2:b.bin SYS:out/two\n\
                     C:Copy DH5:c.bin SYS:out/three\n\
-                    C:Info >SYS:out/info\n\
-                    C:Lock DH2: ON\n\
-                    C:Lock DH5: ON\n";
+                    C:Info >SYS:out/info\n";
     let outcome = run_with(
         &setup,
         "rdbedit",
-        (&[], &[&disk]),
+        (
+            &[],
+            &[Hardfile {
+                path: &disk,
+                drives: &["DH1", "DH2", "DH5"],
+            }],
+        ),
         &[("theirs", &theirs)],
         commands,
         Duration::from_secs(120),
@@ -1298,9 +1372,6 @@ fn amigados_reads_and_fills_partitions_ade_has_grown() {
     let mut s = Session::from_bytes(fs::read(&made).unwrap()).unwrap();
     s.set_clock(Some(WHEN));
     s.delete_partition("GAP").unwrap();
-    // Below the boot folder: at the same priority, which boots is not
-    // fixed, and booting DH1 runs nothing.
-    s.set_partition_boot("DH1", Some(-5)).unwrap();
     let kept = pattern(120_000, 51);
     for partition in ["DH1", "DH2"] {
         s.select_partition(partition).unwrap();
@@ -1324,12 +1395,17 @@ fn amigados_reads_and_fills_partitions_ade_has_grown() {
                     C:Copy SYS:in/big Small:big.bin\n\
                     C:Copy Grown:big.bin SYS:out/dh1-big\n\
                     C:Copy Small:big.bin SYS:out/dh2-big\n\
-                    C:Info >SYS:out/info\n\
-                    C:Lock DH2: ON\n";
+                    C:Info >SYS:out/info\n";
     let outcome = run_with(
         &setup,
         "rdbgrow",
-        (&[], &[&disk]),
+        (
+            &[],
+            &[Hardfile {
+                path: &disk,
+                drives: &["DH1", "DH2"],
+            }],
+        ),
         &[("big", &big)],
         commands,
         Duration::from_secs(150),
