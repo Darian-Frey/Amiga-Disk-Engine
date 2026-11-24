@@ -11,8 +11,10 @@ Effort vocabulary: trivial | small | medium | large.
 
 ## Suggested
 
+## Applied
+
 ### IMP-030 The emulator sometimes stalls part-way through a large write to a partitioned hardfile
-**Status:** suggested
+**Status:** applied
 **Effort:** medium
 **Found:** 2026-11-24: `amigados_reads_and_fills_partitions_ade_has_grown` timed out in a full run, and again in 1 of 8 runs alone.
 
@@ -26,7 +28,16 @@ Effort vocabulary: trivial | small | medium | large.
 
 **Trade-offs.** Time in FS-UAE, for a fault in the test rig rather than in ADE; but D-024 part 2 makes this oracle the one partitioned writes rest on, and its reversal condition names a flaky harness.
 
-## Applied
+**Applied 2026-11-24.** Reproduced outside the suite with a step file after each command, the emulator sampled and its threads traced at each stall. The Amiga is idle and the emulator alive — the screen refreshes, at a few per cent of a core — while its `filesys`, `hardfile` and `ide` threads all wait for work: a reply has gone missing somewhere between them and AmigaDOS. Every stall of the first kind was in a copy to or from the OFS partition, which makes the most separate transfers. With eight such copies a run, on volumes ADE made and never grew, 16 runs a side:
+
+| | stalls |
+|---|---|
+| as the harness was | 4 of 16 |
+| a background process that writes a file and waits, in a loop | 0 of 16 |
+| a background process that only waits, in a loop | 0 of 16 |
+| the hardfile on FS-UAE's IDE controller | 1 of 16, and twice as slow |
+
+So growing had nothing to do with it, and the 0 of 20 above was chance. The harness starts the third: `S:awake`, which touches no disk, so it cannot make a write succeed that would have failed. **Why it works is not known** — FS-UAE's package here has no symbols, and it was not debugged further; a lost wake-up that any later task switch makes good would fit. It may be the cause of the older intermittent failure IMP-028 describes; that failure left nothing to tell.
 
 ### IMP-029 Reading a large image holds it whole, two or three times over
 **Status:** applied

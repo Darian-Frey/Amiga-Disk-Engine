@@ -13,7 +13,7 @@
 //! and a fresh clone are unaffected. The ROM and Workbench are copyrighted
 //! and never enter the repository (D-010).
 //!
-//! Four things a run must respect, each found by a run that did not:
+//! Five things a run must respect, each found by a run that did not:
 //! - **A requester waits forever.** "Please insert volume" stalls the script,
 //!   so every run has a limit and fails with the emulator's log when the
 //!   marker has not appeared.
@@ -22,6 +22,8 @@
 //! - **Locking is the harness's, and so is booting.** A drive locked twice, or
 //!   one that does not exist, is a requester; a partition that ties with the
 //!   boot folder may boot instead (IMP-028).
+//! - **The machine must not be idle.** FS-UAE can lose a reply and sleep for
+//!   good; a process waiting in the background stops it (IMP-030).
 //! - **Scripts are Latin-1**, as AmigaDOS reads them.
 
 #![allow(
@@ -125,7 +127,15 @@ Assign ENV: RAM:ENV
 Assign T: RAM:T
 Assign LOCALE: SYS:Locale
 Assign KEYMAPS: DEVS:Keymaps
+Run >NIL: <NIL: C:Execute S:awake
 ";
+
+/// Run in the background for as long as the machine is: a process that does
+/// nothing but wait. Without one, FS-UAE now and then stops part-way through
+/// a long copy with the Amiga idle and every I/O thread asleep, as if a reply
+/// had been lost: 4 runs in 16 of a script made to show it, and 0 in 32 with
+/// it (IMP-030). Why it helps is not known. It touches no disk.
+const AWAKE: &str = "Lab again\nC:Wait 2\nSkip again BACK\n";
 
 /// Boot Workbench 3.1 with `floppies` in DF0 and DF1, run `commands`, and
 /// return when the script says it is done. `inputs` are copied into the boot
@@ -203,6 +213,7 @@ fn run_with(
         fs::write(boot.join("in").join(file), bytes).unwrap();
     }
     fs::write(boot.join("S/cr"), b"\n").unwrap();
+    fs::write(boot.join("S/awake"), AWAKE).unwrap();
 
     let script = startup(name, commands, floppies.len(), hardfiles);
     fs::write(boot.join("S/Startup-Sequence"), latin1(&script)).unwrap();
