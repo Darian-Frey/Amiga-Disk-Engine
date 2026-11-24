@@ -89,13 +89,33 @@ fn dms_output_is_refused_and_dms_input_is_merely_missing() {
 }
 
 #[test]
-fn writing_compressed_images_is_not_implemented() {
-    // ADE inflates but does not deflate. Saying so plainly beats emitting a
-    // "compressed" file made of stored blocks that is larger than its input.
-    assert!(matches!(
-        conversion(ADF, Kind::Gzip),
-        Conversion::NotImplemented { .. }
-    ));
+fn writing_compressed_images_is_lossless_from_sector_images_only() {
+    for from in [ADF, Kind::Hardfile, Kind::RigidDisk] {
+        assert_eq!(conversion(from, Kind::Gzip), Conversion::Lossless);
+    }
+    for from in [Kind::Gzip, Kind::Scp, Kind::Unknown] {
+        assert_ne!(conversion(from, Kind::Gzip), Conversion::Lossless, "{from}");
+    }
+}
+
+#[test]
+fn a_compressed_image_holds_every_byte() {
+    let image = ade_fixtures::Volume::dd(1).named("Packed").build();
+    let packed = ade_core::convert::convert_bytes(image.clone(), Kind::Gzip).unwrap();
+    assert!(packed.len() < image.len() / 10);
+    let back = ade_core::convert::convert_bytes(packed, ADF).unwrap();
+    assert_eq!(
+        ade_core::layers::block::checksum::crc32(&back),
+        ade_core::layers::block::checksum::crc32(&image)
+    );
+}
+
+#[test]
+fn a_partitioned_disk_is_never_a_byte_copy_of_a_volume() {
+    // The matrix says it can be done; doing it takes a partition's name, so
+    // the form without one must not hand the volume back as a device.
+    let image = ade_fixtures::Volume::dd(1).build();
+    assert!(ade_core::convert::convert_bytes(image, Kind::RigidDisk).is_err());
 }
 
 #[test]

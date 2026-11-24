@@ -645,6 +645,42 @@ fn a_partitioned_create_emits_exactly_these_fields() {
 }
 
 #[test]
+fn a_partition_conversion_emits_exactly_these_fields() {
+    // Schema 1.22 → 1.23: `ade convert --partition` (F-038).
+    use ade_core::layers::container::Kind;
+    let json = ade_core::reshape::Reshaped {
+        from: Kind::RigidDisk,
+        to: Kind::Hardfile,
+        partition: "DH0".to_owned(),
+        volume: Some("Work".to_owned()),
+        bytes: 1024,
+        notes: vec!["a note".to_owned()],
+    }
+    .to_json(std::path::Path::new("x.hdf"))
+    .versioned();
+    compare(
+        "convert --partition",
+        &paths(&json),
+        &[
+            "schema",
+            "from",
+            "to",
+            "from_label",
+            "to_label",
+            "conversion",
+            "conversion.kind",
+            "conversion.possible",
+            "conversion.reason",
+            "written",
+            "bytes",
+            "partition",
+            "volume",
+            "notes",
+        ],
+    );
+}
+
+#[test]
 fn convert_emits_exactly_these_fields() {
     use ade_core::layers::container::Kind;
     let json = ade_core::convert::converted_json(

@@ -49,6 +49,8 @@ use crate::health::{self, Severity};
 
 mod table;
 
+pub use table::Imported;
+
 /// How much memory the undo history may hold.
 ///
 /// Sixty floppies, or one hard disk. Past this the oldest step is dropped:

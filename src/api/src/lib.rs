@@ -23,6 +23,7 @@ pub mod inspect;
 pub mod json;
 pub mod layout;
 pub mod project;
+pub mod reshape;
 pub mod scan;
 pub mod specs;
 pub mod unpack;
@@ -36,6 +37,7 @@ pub use health::{
     damaged_blocks, examine, examine_partition, image_block_counts, image_damage,
 };
 pub use input::Input;
+pub(crate) use inspect::find_partition;
 pub use inspect::{
     Compression, Description, Fault, Image, Inspection, InspectionError, MAX_DECOMPRESSED,
     MAX_DESCRIPTION, PartitionInfo, RdbInfo, TrackTable, VolumeInfo, entry_to_json,

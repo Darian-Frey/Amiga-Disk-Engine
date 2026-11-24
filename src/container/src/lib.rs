@@ -18,6 +18,7 @@
 //! The caller reports both.
 
 pub mod bytes;
+pub mod deflate;
 pub mod file;
 
 pub mod extended;

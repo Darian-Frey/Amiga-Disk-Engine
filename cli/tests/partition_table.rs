@@ -243,3 +243,58 @@ fn a_partition_grows_with_its_files_and_refuses_what_it_cannot() {
     }
     let _ = fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn a_partition_is_converted_out_and_a_volume_back_in() {
+    let dir = scratch("convert");
+    let disk = at(&dir, "disk.hdf");
+    let args = ["create", &disk, "--size=20", "--partition=DH0:8:ffs:Work"];
+    assert_eq!(run(&args).0, 0);
+    let out = at(&dir, "out.hdf");
+    let hdz = at(&dir, "out.hdz");
+    for file in [&out, &hdz] {
+        let (code, text, err) = run(&["convert", &disk, file, "--partition=dh0"]);
+        assert_eq!(code, 0, "{err}");
+        assert!(text.contains("partition DH0 (volume \"Work\")"), "{text}");
+    }
+    let (code, text, _) = run(&["check", &hdz]);
+    assert_eq!(code, 0, "{text}");
+
+    // Back: a new disk with just it, and into one that exists.
+    let new = at(&dir, "new.hdf");
+    let (code, text, err) = run(&["convert", &hdz, &new, "--partition=DH3"]);
+    assert_eq!(code, 0, "{err}");
+    assert!(text.contains("partitioned disk with DH3"), "{text}");
+    assert!(text.contains("Kickstart"), "{text}");
+    assert_eq!(run(&["check", &new, "--partition=DH3"]).0, 0);
+    let both = at(&dir, "both.hdf");
+    let output = format!("--output={both}");
+    let (code, text, err) = run(&["partition", "import", &disk, "DH1", &out, &output]);
+    assert_eq!(code, 0, "{err}");
+    assert!(text.contains("holding volume \"Work\""), "{text}");
+    assert_eq!(run(&["check", &both, "--partition=DH1"]).0, 0);
+
+    // JSON, and what is refused.
+    let third = at(&dir, "third.hdf");
+    let args = ["convert", &disk, &third, "--partition=DH0", "--format=json"];
+    let (code, json, _) = run(&args);
+    assert_eq!(code, 0);
+    assert!(
+        json.contains("\"partition\": \"DH0\"") || json.contains("\"partition\":\"DH0\""),
+        "{json}"
+    );
+    let (code, _, err) = run(&["convert", &disk, &out, "--partition=DH0"]);
+    assert!(code != 0 && err.contains("refusing to overwrite"), "{err}");
+    let adf = at(&dir, "no.adf");
+    let (code, _, err) = run(&["convert", &disk, &adf, "--partition=DH0"]);
+    assert!(code != 0 && err.contains(".hdf or .hdz"), "{err}");
+    let (code, _, err) = run(&[
+        "convert",
+        &disk,
+        &at(&dir, "r.hdf"),
+        "--raw",
+        "--partition=DH0",
+    ]);
+    assert!(code != 0 && err.contains("--raw"), "{err}");
+    let _ = fs::remove_dir_all(&dir);
+}

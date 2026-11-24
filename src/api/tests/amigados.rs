@@ -1446,3 +1446,120 @@ fn amigados_reads_and_fills_partitions_ade_has_grown() {
         );
     }
 }
+
+/// A hardfile of exactly `blocks` in `dir`, holding `kept` at `Box/kept.bin`.
+fn volume_file(dir: &Path, name: &str, blocks: u32, flags: u8, kept: &[u8]) -> PathBuf {
+    let geometry = Geometry::new(blocks, 1, 1, 512, 2).unwrap();
+    let blank = format::blank(geometry, dostype(flags), name, WHEN).unwrap();
+    let mut s = Session::from_bytes(blank).unwrap();
+    s.set_clock(Some(WHEN));
+    let root = s.root();
+    let folder = s.make_dir(root, b"Box").unwrap();
+    s.add_file(folder, b"kept.bin", kept).unwrap();
+    let path = dir.join(format!("{name}.hdf"));
+    fs::write(&path, s.bytes()).unwrap();
+    path
+}
+
+#[test]
+fn amigados_mounts_volumes_converted_into_partitions_and_out_of_them() {
+    // F-038: a volume copied byte for byte into a partition, in an existing
+    // disk and in a new one, and a partition copied out as a hardfile. The
+    // volumes are the sizes that matter: whole cylinders of the disk; not, so
+    // that the partition has its own cylinders; and an odd number of blocks,
+    // whose only cylinder is one block. AmigaDOS computes each rootblock from
+    // the partition's size, so it mounts only if that is exact.
+    use ade_core::create::{self, PartitionSize, PartitionSpec};
+    use ade_core::reshape;
+    let Some(setup) = setup() else { return };
+    let dir = scratch("reshape");
+    fs::create_dir_all(&dir).unwrap();
+    let kept = pattern(70_000, 61);
+    let volume = |name: &str, blocks, flags| volume_file(&dir, name, blocks, flags, &kept);
+    let base = dir.join("base.hdf");
+    let first = PartitionSpec {
+        name: "DH1".to_owned(),
+        size: PartitionSize::Megabytes(4),
+        type_name: Some("ffs".to_owned()),
+        volume: Some("First".to_owned()),
+    };
+    create::partitioned(&base, 24, &[first], "ffs", WHEN).unwrap();
+    let mut s = Session::from_bytes(fs::read(&base).unwrap()).unwrap();
+    s.import_partition("DH2", &volume("Whole", 8192, 5))
+        .unwrap();
+    s.import_partition("DH3", &volume("Part", 8200, 1)).unwrap();
+    s.import_partition("DH4", &volume("Odd", 8195, 0)).unwrap();
+    let disk = dir.join("disk.hdf");
+    fs::write(&disk, s.bytes()).unwrap();
+    drop(s);
+    let new = dir.join("new.hdf");
+    reshape::convert(&volume("Newly", 6001, 1), "DH8", &new, false).unwrap();
+    // In and out again, from a disk that is not mounted: two volumes of one
+    // name are one to AmigaDOS.
+    let between = dir.join("between.hdf");
+    reshape::convert(&volume("Lone", 8192, 3), "DH0", &between, false).unwrap();
+    let lone = dir.join("out.hdf");
+    reshape::convert(&between, "DH0", &lone, false).unwrap();
+
+    let theirs = pattern(50_000, 62);
+    let volumes = ["Whole", "Part", "Odd", "Newly", "Lone"];
+    let mut commands = String::new();
+    for v in volumes {
+        let _ = write!(
+            commands,
+            "C:Copy {v}:Box/kept.bin SYS:out/{v}-kept\nC:Copy SYS:in/theirs {v}:theirs.bin\n\
+             C:Copy {v}:theirs.bin SYS:out/{v}-theirs\n"
+        );
+    }
+    commands.push_str("C:Info >SYS:out/info\n");
+    let outcome = run_with(
+        &setup,
+        "reshape",
+        (
+            &[],
+            &[
+                Hardfile {
+                    path: &disk,
+                    drives: &["DH1", "DH2", "DH3", "DH4"],
+                },
+                Hardfile {
+                    path: &new,
+                    drives: &["DH8"],
+                },
+                Hardfile {
+                    path: &lone,
+                    drives: &["Lone"],
+                },
+            ],
+        ),
+        &[("theirs", &theirs)],
+        &commands,
+        Duration::from_secs(150),
+    )
+    .unwrap();
+    let info = fs::read_to_string(outcome.out.join("info")).unwrap_or_default();
+    for v in volumes {
+        let got = |what: &str| fs::read(outcome.out.join(format!("{v}-{what}"))).ok();
+        assert!(got("kept") == Some(kept.clone()), "{v}: read\n{info}");
+        assert!(
+            got("theirs") == Some(theirs.clone()),
+            "{v}: written\n{info}"
+        );
+    }
+    assert_eq!(outcome.resets, 1, "the Amiga booted once\n{info}");
+    for (path, name) in [
+        (&disk, "DH1"),
+        (&disk, "DH2"),
+        (&disk, "DH3"),
+        (&disk, "DH4"),
+        (&new, "DH8"),
+    ] {
+        let after = fs::read(path).unwrap();
+        assert!(
+            partition_faults(&after, name).is_empty(),
+            "{name}: {:?}",
+            partition_faults(&after, name)
+        );
+    }
+    assert!(faults_on(&lone).is_empty(), "{:?}", faults_on(&lone));
+}

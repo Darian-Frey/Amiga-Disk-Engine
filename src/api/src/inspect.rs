@@ -1629,6 +1629,26 @@ impl Image {
     }
 }
 
+/// The partition `wanted` names — by drive name, any case, else by index —
+/// or why there is none, naming those there are.
+pub(crate) fn find_partition(parts: &[Partition], wanted: &str) -> Result<usize, String> {
+    parts
+        .iter()
+        .position(|p| p.name_lossy().eq_ignore_ascii_case(wanted))
+        .or_else(|| wanted.parse::<usize>().ok().filter(|i| *i < parts.len()))
+        .ok_or_else(|| {
+            let names: Vec<String> = parts.iter().map(Partition::name_lossy).collect();
+            format!(
+                "no partition {wanted:?}; this device has {}",
+                if names.is_empty() {
+                    "none".to_owned()
+                } else {
+                    names.join(", ")
+                }
+            )
+        })
+}
+
 impl Image {
     /// The partition `wanted` names — by drive name, any case (`dh1`), or by
     /// index (`1`) — as an [`Area`], or why there is none: no partition
@@ -1639,17 +1659,8 @@ impl Image {
         if parts.is_empty() {
             return Err(format!("no partition table, so no partition {wanted:?}"));
         }
-        let found = parts
-            .iter()
-            .find(|p| p.name_lossy().eq_ignore_ascii_case(wanted))
-            .or_else(|| wanted.parse::<usize>().ok().and_then(|i| parts.get(i)))
-            .ok_or_else(|| {
-                let names: Vec<String> = parts.iter().map(Partition::name_lossy).collect();
-                format!(
-                    "no partition {wanted:?}; this device has {}",
-                    names.join(", ")
-                )
-            })?;
+        let found = find_partition(&parts, wanted)?;
+        let found = parts.get(found).ok_or("no such partition")?;
         let window = self.partition_window(found).map_err(|e| e.to_string())?;
         Ok(Area {
             first_block: window.start(),

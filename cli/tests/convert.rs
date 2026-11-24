@@ -175,7 +175,7 @@ fn the_matrix_lists_every_format_with_a_reason() {
         "not implemented",
         "C-003",
         "D-009",
-        "D-004",
+        "D-024",
     ] {
         assert!(text.contains(expected), "missing {expected:?}\n{text}");
     }

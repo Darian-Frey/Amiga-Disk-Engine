@@ -200,7 +200,7 @@ Status vocabulary: **Not started** | **In progress** | **Partially delivered** (
 **Acceptance:**
 - Convert any supported input container to any supported output, refusing or warning honestly where lossy or impossible (e.g. no IPF write, DMS `errdms`).
 **Status:** Delivered 2026-08-25 — `ade convert` and `ade formats`
-**What exists:** every pair of formats has an explicit answer carrying its own reason. The conversions that run are the decompression direction (ADZ→ADF, HDZ→HDF), whose reader is proven byte-identical against `gzip`, copies between sector containers, and sector→raw-MFM via `--raw`.
+**What exists:** every pair of formats has an explicit answer carrying its own reason. The conversions that run are the decompression direction (ADZ→ADF, HDZ→HDF), whose reader is proven byte-identical against `gzip`, copies between sector containers, sector→raw-MFM via `--raw`, since 2026-11-24 compression (ADF→ADZ, HDF→HDZ), and a partition to a hardfile and back via `--partition` (F-038).
 **Lossy conversions are refused outright, not warned about.** A warning nobody reads is how the loss happens.
 **Refused and not-implemented are kept apart**, because they invite opposite follow-up: IPF is a decision that does not expire (C-003), DMS is a gap with a cause (D-009).
 **Notes:** Conversions are today scattered across single-purpose tools; lossiness rarely surfaced. Bounded by C-003, C-004.

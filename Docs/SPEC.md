@@ -902,6 +902,12 @@ A table is never regenerated: a real disk's RDB may carry a filesystem (`FSHD` a
 
 Every edit is kept only if the table still passes the checks an edit session opens with (D-024 part 3), and a partition it formatted examines clean.
 
+### A volume moved between a partition and a hardfile
+
+A standalone hardfile is a partition's blocks and nothing else, so a volume needs no change to go from one to the other *provided the block count is the same*: the rootblock's place is computed from it (C-007). A partition is a whole number of cylinders, and a hardfile need not be. Each `PART` block carries its own `Surfaces` and `BlocksPerTrack`, and AmigaDOS computes the partition's first block and length from those, not from the `RDSK` block's; so a volume that is not a whole number of the disk's cylinders is given one head and the greatest common divisor of the two as its sectors. *Verified in FS-UAE, Workbench 3.1, 2026-11-24:* volumes of 8192, 8200 and 8195 blocks beside one another on a disk of 32-block cylinders — the last with cylinders of one block — and one of 6001 alone on its disk, each read and written by AmigaDOS and sound afterwards.
+
+What a hardfile has nowhere to say: the reserved count and block size (read as 2 and 512), the drive name, the boot settings, and a filesystem stored in the table.
+
 ### Growing a volume (F-038, 2026-11-18)
 
 AmigaDOS keeps no pointer to a volume's rootblock: it computes it from the partition's size, as the middle block (C-007). A grown partition's rootblock is therefore somewhere else, and what names the old one must follow. On an AmigaDOS volume that is short:

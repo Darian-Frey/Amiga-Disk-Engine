@@ -403,7 +403,7 @@ fn dispatch(args: &Args) -> ExitCode {
             args.partition.as_deref(),
         ),
         ("extract", 2 | 3) => extract(args),
-        ("convert", 2) => convert(Path::new(p(0)), Path::new(p(1)), args.raw, args.format),
+        ("convert", 2) => convert(args),
         ("create", 1) => create(args),
         ("partition", _) => partition_command(args),
         (
@@ -517,8 +517,8 @@ fn refuse_partition(args: &Args) -> Option<ExitCode> {
     let why = match args.command.as_str() {
         "check" | "ls" | "extract" | "disasm" | "annotate" | "decode" | "find" | "scan"
         | "layout" | "carve" | "mkdir" | "put" | "rm" | "undelete" | "link" | "rename" | "mv"
-        | "repair" | "format" | "wipe" => return None,
-        "specs" | "surface" | "info" | "identify" | "diff" | "consolidate" | "convert" => {
+        | "repair" | "format" | "wipe" | "convert" => return None,
+        "specs" | "surface" | "info" | "identify" | "diff" | "consolidate" => {
             "it describes or works on the image as a whole"
         }
         _ => "it takes no partition",
@@ -540,6 +540,9 @@ fn usage() {
         "    ade extract <image> --all <dir>    extract every file into a folder (F-024)"
             .to_owned(),
         "    ade convert <in> <out>             convert between containers (F-016)".to_owned(),
+        "    ade convert <in> <out.hdf|.hdz> --partition=NAME  a partition out to a hardfile, or a \
+         volume into a new partitioned disk (F-038)"
+            .to_owned(),
         "    ade create <out.adf>               make a blank formatted disk (F-019)".to_owned(),
         "    ade create <out.hdf> --size=N --partition=NAME:SIZE[:TYPE[:VOLUME]]...  a partitioned \
          hard disk, one --partition each; SIZE in MB or rest (F-038)"
@@ -566,7 +569,7 @@ fn usage() {
         "    ade format <image> [--name=NAME] [--type=T] --output=<new>  quick-format it in place; \
          --type for another filesystem"
             .to_owned(),
-        "    ade partition add|delete|rename|boot|grow <image> ... --output=<new>  edit a hard disk's \
+        "    ade partition add|import|delete|rename|boot|grow <image> ... --output=<new>  edit a hard disk's \
          partition table (F-038)"
             .to_owned(),
         "    ade wipe <image> --slack|--free --output=<new>  zero file slack, or free blocks too"
@@ -726,7 +729,7 @@ fn open_for_editing(
 type TableChange =
     Box<dyn FnOnce(&mut ade_core::edit::Session) -> Result<String, ade_core::edit::EditError>>;
 
-/// `ade partition add|delete|rename|boot|grow <image> …`: edit a partitioned
+/// `ade partition add|import|delete|rename|boot|grow <image> …`: edit a partitioned
 /// disk's table (F-038, D-024 part 5), saved to `--output` as every edit is.
 fn partition_command(args: &Args) -> ExitCode {
     if args.format == Format::Json {
@@ -770,14 +773,31 @@ fn partition_command(args: &Args) -> ExitCode {
     ExitCode::from(EXIT_CLEAN)
 }
 
+/// `ade partition import`: a volume as a new partition, byte for byte.
+fn import_change(name: &str, volume: &str) -> TableChange {
+    let (name, volume) = (name.to_owned(), PathBuf::from(volume));
+    Box::new(move |s| {
+        let made = s.import_partition(&name, &volume)?;
+        let mut said = format!(
+            "added {name}, holding volume \"{}\" byte for byte; not bootable",
+            made.volume
+        );
+        if let Some(note) = made.note {
+            said.push_str("\n  ");
+            said.push_str(&note);
+        }
+        Ok(said)
+    })
+}
+
 /// The table edit `ade partition` was asked for, or why it cannot be.
 fn partition_change(args: &Args) -> Result<TableChange, ExitCode> {
     use ade_core::create::{self, PartitionSpec};
     let p = |n: usize| args.positional.get(n).map_or("", String::as_str);
     let usage_error = || {
         eprintln!(
-            "ade: partition add <image> NAME:SIZE[:TYPE[:VOLUME]] | delete <image> NAME | \
-             rename <image> NAME NEW | boot <image> NAME <PRIORITY|off> | grow <image> \
+            "ade: partition add <image> NAME:SIZE[:TYPE[:VOLUME]] | import <image> NAME \
+             <volume.hdf> | delete <image> NAME | rename <image> NAME NEW | boot <image> NAME <PRIORITY|off> | grow <image> \
              NAME <SIZE|rest>, with --output=<new>"
         );
         ExitCode::from(EXIT_USAGE)
@@ -810,6 +830,7 @@ fn partition_change(args: &Args) -> Result<TableChange, ExitCode> {
                 ))
             })
         }
+        ("import", 4) => import_change(p(2), p(3)),
         ("grow", 4) => {
             let name = p(2).to_owned();
             let size = if p(3).eq_ignore_ascii_case("rest") {
@@ -2528,9 +2549,73 @@ fn kind_from_extension(path: &Path) -> Option<ade_core::layers::container::Kind>
     }
 }
 
+/// `ade convert --partition=NAME`: a partition out to a hardfile, or a volume
+/// into a new partitioned disk, whichever the input is not (F-038).
+fn convert_partition(input: &Path, output: &Path, partition: &str, args: &Args) -> ExitCode {
+    use ade_core::layers::container::Kind;
+    use ade_core::reshape::ReshapeError;
+    if args.raw {
+        eprintln!("ade: --raw writes floppy tracks and --partition a hard disk; give one");
+        return ExitCode::from(EXIT_USAGE);
+    }
+    let compressed = match kind_from_extension(output) {
+        Some(Kind::Hardfile) => false,
+        Some(Kind::Gzip) => true,
+        _ => {
+            eprintln!(
+                "ade: {}: --partition writes a hard disk image — use .hdf or .hdz",
+                output.display()
+            );
+            return ExitCode::from(EXIT_USAGE);
+        }
+    };
+    let made = match ade_core::reshape::convert(input, partition, output, compressed) {
+        Ok(made) => made,
+        Err(e) => {
+            let (path, code) = match &e {
+                ReshapeError::Refused(_) => (input, EXIT_USAGE),
+                ReshapeError::Exists => (output, EXIT_USAGE),
+                ReshapeError::Io(_) => (input, EXIT_UNREADABLE),
+            };
+            eprintln!("ade: {}: {e}", path.display());
+            return ExitCode::from(code);
+        }
+    };
+    let mut stdout = std::io::stdout().lock();
+    if args.format == Format::Json {
+        emit_json(&mut stdout, made.to_json(output));
+        let _ = stdout.flush();
+        return ExitCode::from(EXIT_CLEAN);
+    }
+    let volume = made
+        .volume
+        .as_ref()
+        .map_or_else(|| "no volume".to_owned(), |v| format!("volume \"{v}\""));
+    let what = if made.from == Kind::RigidDisk {
+        format!("partition {} ({volume})  ->  hardfile", made.partition)
+    } else {
+        format!("{volume}  ->  partitioned disk with {}", made.partition)
+    };
+    let mut lines = vec![what];
+    lines.extend(made.notes.iter().map(|n| format!("  {n}")));
+    lines.push(format!(
+        "  wrote {} bytes to {}",
+        made.bytes,
+        output.display()
+    ));
+    emit_lines(&mut stdout, &lines);
+    ExitCode::from(EXIT_CLEAN)
+}
+
 /// Convert one container into another, refusing anything that would lose data
 /// silently (F-016).
-fn convert(input: &Path, output: &Path, raw: bool, format: Format) -> ExitCode {
+fn convert(args: &Args) -> ExitCode {
+    let p = |n: usize| args.positional.get(n).map_or("", String::as_str);
+    let (input, output) = (Path::new(p(0)), Path::new(p(1)));
+    let (raw, format) = (args.raw, args.format);
+    if let Some(partition) = args.partition.as_deref() {
+        return convert_partition(input, output, partition, args);
+    }
     let bytes = match std::fs::read(input) {
         Ok(b) => b,
         Err(e) => {

@@ -25,6 +25,7 @@ use super::{
 };
 use crate::create::PartitionSize;
 use crate::health::{self, Severity};
+use crate::reshape::Fit;
 
 /// The table as it stands: the RDB, its partitions in chain order, and every
 /// block its lists occupy.
@@ -38,6 +39,29 @@ struct Table {
 /// partition that is not there.
 fn refuse(why: impl Into<String>) -> EditError {
     EditError::NotEditable(why.into())
+}
+
+/// A partition made from a volume ([`Session::import_partition`]).
+#[derive(Debug, Clone)]
+pub struct Imported {
+    /// Its index in the table.
+    pub index: usize,
+    /// Its volume's name.
+    pub volume: String,
+    /// What to know of it, if its cylinders are not the disk's.
+    pub note: Option<String>,
+}
+
+/// Blocks in one of the disk's cylinders, if its table agrees with itself.
+fn cylinder_blocks(rdb: &RigidDiskBlock) -> Result<u32, EditError> {
+    let per = rdb.heads.saturating_mul(rdb.sectors);
+    if per == 0 || !rdb.geometry_consistent() {
+        return Err(refuse(
+            "the table's heads, sectors and blocks per cylinder disagree, so a new \
+             partition's cylinders cannot be placed",
+        ));
+    }
+    Ok(per)
 }
 
 impl Session {
@@ -79,27 +103,7 @@ impl Session {
     /// The partition `wanted` names — by drive name, ignoring case, or by
     /// index — as an index into the table.
     fn table_index(table: &Table, wanted: &str) -> Result<usize, EditError> {
-        table
-            .parts
-            .iter()
-            .position(|p| p.name_lossy().eq_ignore_ascii_case(wanted))
-            .or_else(|| {
-                wanted
-                    .parse::<usize>()
-                    .ok()
-                    .filter(|i| *i < table.parts.len())
-            })
-            .ok_or_else(|| {
-                let names: Vec<String> = table.parts.iter().map(Partition::name_lossy).collect();
-                refuse(format!(
-                    "no partition {wanted:?}; this device has {}",
-                    if names.is_empty() {
-                        "none".to_owned()
-                    } else {
-                        names.join(", ")
-                    }
-                ))
-            })
+        crate::find_partition(&table.parts, wanted).map_err(refuse)
     }
 
     /// A drive name ADE will write, and not one another partition has.
@@ -261,40 +265,12 @@ impl Session {
         let table = self.read_table()?;
         let drive = Self::new_drive_name(&table, name, None)?;
         let rdb = &table.rdb;
-        let per = rdb.heads.saturating_mul(rdb.sectors);
-        if per == 0 || !rdb.geometry_consistent() {
-            return Err(refuse(
-                "the table's heads, sectors and blocks per cylinder disagree, so a new \
-                 partition's cylinders cannot be placed",
-            ));
-        }
-
-        let runs = self.free_cylinders(&table, per);
-        let (first, count) = match size {
-            PartitionSize::Rest => runs.iter().copied().max_by_key(|r| r.1),
-            PartitionSize::Megabytes(m) => {
-                let wanted =
-                    u32::try_from(u64::from(m).saturating_mul(2048).div_ceil(u64::from(per)))
-                        .unwrap_or(u32::MAX);
-                runs.iter()
-                    .copied()
-                    .find(|r| r.1 >= wanted)
-                    .map(|r| (r.0, wanted))
-            }
-        }
-        .ok_or_else(|| {
-            let largest = runs.iter().map(|r| r.1).max().unwrap_or(0);
-            refuse(format!(
-                "no unused run of cylinders holds that; the largest is {} MB",
-                u64::from(largest)
-                    .saturating_mul(u64::from(per))
-                    .checked_div(2048)
-                    .unwrap_or(0)
-            ))
-        })?;
-
-        let part = Self::free_part_block(&table, per)?;
-        let mut writes = Writes::new();
+        let per = cylinder_blocks(rdb)?;
+        let blocks = match size {
+            PartitionSize::Rest => None,
+            PartitionSize::Megabytes(m) => Some(u64::from(m).saturating_mul(2048)),
+        };
+        let (first, count) = self.place(&table, per, blocks)?;
         let new = NewPartition {
             name: drive.clone(),
             low_cylinder: first,
@@ -303,24 +279,7 @@ impl Session {
             bootable: false,
             boot_priority: 0,
         };
-        writes.insert(
-            part,
-            rdb::part_block(rdb.heads, rdb.sectors, &new, END_OF_LIST).to_vec(),
-        );
-        // Chained at the end of the list, and the RDB's high-water mark moved.
-        let mut rdsk = self.device_block(rdb.block)?;
-        if let Some(tail) = table.parts.last() {
-            let mut link = self.device_block(tail.block)?;
-            let _ = ade_endian::put_u32(&mut link, 0x10, part);
-            rdb::reseal(&mut link);
-            writes.insert(tail.block, link);
-        } else {
-            let _ = ade_endian::put_u32(&mut rdsk, 0x1c, part);
-        }
-        let high = ade_endian::u32_at(&rdsk, 0x98).unwrap_or(0);
-        let _ = ade_endian::put_u32(&mut rdsk, 0x98, high.max(part));
-        rdb::reseal(&mut rdsk);
-        writes.insert(rdb.block, rdsk);
+        let mut writes = self.new_entry(&table, per, (rdb.heads, rdb.sectors), &new)?;
 
         // Its volume, formatted in place.
         let geometry = Geometry::new(count, rdb.heads, rdb.sectors, 512, 2)
@@ -473,6 +432,127 @@ impl Session {
         rdb::reseal(&mut entry);
         writes.insert(part.block, entry);
         self.commit_table(&writes, Some(name), prefer.as_deref())
+    }
+
+    /// The first unused cylinders that hold `blocks` — or, with `None`, the
+    /// largest run — as (first cylinder, count).
+    fn place(&self, table: &Table, per: u32, blocks: Option<u64>) -> Result<(u32, u32), EditError> {
+        let runs = self.free_cylinders(table, per);
+        match blocks {
+            None => runs.iter().copied().max_by_key(|r| r.1),
+            Some(blocks) => {
+                let wanted = u32::try_from(blocks.div_ceil(u64::from(per))).unwrap_or(u32::MAX);
+                runs.iter()
+                    .copied()
+                    .find(|r| r.1 >= wanted)
+                    .map(|r| (r.0, wanted))
+            }
+        }
+        .ok_or_else(|| {
+            let largest = runs.iter().map(|r| r.1).max().unwrap_or(0);
+            refuse(format!(
+                "no unused run of cylinders holds that; the largest is {} MB",
+                u64::from(largest)
+                    .saturating_mul(u64::from(per))
+                    .checked_div(2048)
+                    .unwrap_or(0)
+            ))
+        })
+    }
+
+    /// The writes that put `new` in the table, in a block no list uses,
+    /// chained at the end, with the RDB's high-water mark moved.
+    fn new_entry(
+        &self,
+        table: &Table,
+        per: u32,
+        (heads, sectors): (u32, u32),
+        new: &NewPartition,
+    ) -> Result<Writes, EditError> {
+        let part = Self::free_part_block(table, per)?;
+        let mut writes = Writes::new();
+        writes.insert(
+            part,
+            rdb::part_block(heads, sectors, new, END_OF_LIST).to_vec(),
+        );
+        let mut rdsk = self.device_block(table.rdb.block)?;
+        if let Some(tail) = table.parts.last() {
+            let mut link = self.device_block(tail.block)?;
+            let _ = ade_endian::put_u32(&mut link, 0x10, part);
+            rdb::reseal(&mut link);
+            writes.insert(tail.block, link);
+        } else {
+            let _ = ade_endian::put_u32(&mut rdsk, 0x1c, part);
+        }
+        let high = ade_endian::u32_at(&rdsk, 0x98).unwrap_or(0);
+        let _ = ade_endian::put_u32(&mut rdsk, 0x98, high.max(part));
+        rdb::reseal(&mut rdsk);
+        writes.insert(table.rdb.block, rdsk);
+        Ok(writes)
+    }
+
+    /// Add a partition called `name` holding the volume in the image at
+    /// `path` — a hardfile, an HDZ or a floppy image — byte for byte, in the
+    /// first unused cylinders it fits. Not bootable. One step of history.
+    ///
+    /// Where the volume is not a whole number of the disk's cylinders, its
+    /// partition has its own ([`crate::reshape`]).
+    ///
+    /// # Errors
+    /// As [`Self::add_partition`]; and [`EditError::NotEditable`] for an image
+    /// that is not one sound AmigaDOS volume, or [`EditError::Io`].
+    pub fn import_partition(
+        &mut self,
+        name: &str,
+        path: &std::path::Path,
+    ) -> Result<Imported, EditError> {
+        let table = self.read_table()?;
+        let drive = Self::new_drive_name(&table, name, None)?;
+        let rdb = &table.rdb;
+        let per = cylinder_blocks(rdb)?;
+        let volume = crate::reshape::incoming(path).map_err(|e| match e {
+            crate::reshape::ReshapeError::Io(e) => EditError::Io(e),
+            e => refuse(format!("{}: {e}", path.display())),
+        })?;
+        let (first, _) = self.place(&table, per, Some(u64::from(volume.blocks)))?;
+        let fit = Fit::of(volume.blocks, rdb.heads, rdb.sectors, first)
+            .ok_or_else(|| refuse("the volume cannot be placed in cylinders"))?;
+        let new = NewPartition {
+            name: drive,
+            low_cylinder: fit.low,
+            high_cylinder: fit.high,
+            dostype: volume.dostype.raw(),
+            bootable: false,
+            boot_priority: 0,
+        };
+        let mut writes = self.new_entry(&table, per, (fit.heads, fit.sectors), &new)?;
+        // Only the blocks that differ from what is there: a disk's unused
+        // space is usually zeros, and so is a volume's.
+        let start = first.saturating_mul(per);
+        let mut raw = vec![0u8; 512];
+        for b in 0..volume.blocks {
+            ade_block::read_at(
+                volume.image.source(),
+                ade_block::BlockIndex(u64::from(b)),
+                &mut raw,
+            )
+            .map_err(|e| EditError::Io(std::io::Error::other(e.to_string())))?;
+            let at = start.saturating_add(b);
+            let offset = (at as usize).saturating_mul(512);
+            if self.bytes.get(offset..offset.saturating_add(512)) != Some(raw.as_slice()) {
+                writes.insert(at, raw.clone());
+            }
+        }
+        let prefer = self
+            .partition()
+            .map_or_else(|| name.to_owned(), str::to_owned);
+        let note = fit.note(rdb.heads, rdb.sectors);
+        self.commit_table(&writes, Some(name), Some(&prefer))?;
+        Ok(Imported {
+            index: table.parts.len(),
+            volume: volume.volume,
+            note,
+        })
     }
 
     /// Unused runs of whole cylinders within the RDB's partition range and

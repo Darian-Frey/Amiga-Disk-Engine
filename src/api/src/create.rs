@@ -329,15 +329,15 @@ pub struct MadePartition {
 /// sectors, the shape of its unpartitioned hard disks, so a megabyte is
 /// exactly 64 cylinders and a partition's size in megabytes is whole
 /// cylinders.
-const HEADS: u32 = 1;
-const SECTORS: u32 = 32;
+pub(crate) const HEADS: u32 = 1;
+pub(crate) const SECTORS: u32 = 32;
 const CYLINDERS_PER_MB: u32 = 64;
 /// Cylinders kept for the RDB, as HDToolBox keeps two: 64 blocks, room for
 /// the `RDSK` block and 63 `PART` blocks.
-const TABLE_CYLINDERS: u32 = 2;
+pub(crate) const TABLE_CYLINDERS: u32 = 2;
 /// The largest disk ADE partitions: 4 GB, past which an image needs the
 /// 64-bit device commands C-002 has not settled.
-const MAX_PARTITIONED_MB: u32 = 4096;
+pub(crate) const MAX_PARTITIONED_MB: u32 = 4096;
 
 /// Write a partitioned hard disk of `megabytes` to `path`: an RDB with a
 /// partition per spec, in order, each formatted with its own filesystem and
@@ -386,7 +386,7 @@ pub fn partitioned(
                 boot_priority: 0,
             })
             .collect(),
-        drive: (b"ADE".to_vec(), b"HARDFILE".to_vec(), b"1.0".to_vec()),
+        drive: drive_strings(),
     };
     let blocks = ade_filesystem::rdb::table_blocks(&table).map_err(shape)?;
 
@@ -432,6 +432,11 @@ pub fn partitioned(
     }
     std::fs::write(path, &disk).map_err(CreateError::Io)?;
     Ok(made)
+}
+
+/// The vendor, product and revision of a drive ADE makes.
+pub(crate) fn drive_strings() -> (Vec<u8>, Vec<u8>, Vec<u8>) {
+    (b"ADE".to_vec(), b"HARDFILE".to_vec(), b"1.0".to_vec())
 }
 
 fn geometry_start(cylinder: u32) -> u64 {

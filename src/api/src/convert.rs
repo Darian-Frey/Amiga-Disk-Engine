@@ -13,7 +13,7 @@
 //!
 //! # What can actually be converted today
 //!
-//! Two directions, and both are proven byte-identically, which is what
+//! Three directions, and all are proven byte-identically, which is what
 //! D-004 asks for before a write path ships.
 //!
 //! **Decompression** — ADZ to ADF, HDZ to HDF. gunzip round-trips real corpus
@@ -22,6 +22,12 @@
 //! **Encoding to raw MFM** — a sector image to an extended ADF. Every track is
 //! MFM-encoded, and reading the result back reassembles the original exactly:
 //! 1760 of 1760 sectors, byte-identical, mounting under its own name.
+//!
+//! **Compression** — ADF to ADZ, HDF to HDZ. Both ADE's own inflater and
+//! `gzip` give the bytes back.
+//!
+//! A partition to a standalone hardfile and back is [`crate::reshape`], since
+//! it takes a partition's name as well as a format.
 //!
 //! Nothing else qualifies yet: DMS has no reader (D-009), flux cannot be
 //! reconstructed from a sector image at all, and IPF may never be written
@@ -174,9 +180,13 @@ pub fn conversion(from: Kind, to: Kind) -> Conversion {
             },
         };
     }
-    if matches!(to, Gzip) {
+    // A compressed image is the image: writing one loses nothing.
+    if matches!(to, Gzip) && matches!(from, Adf { .. } | Hardfile | RigidDisk) {
+        return Conversion::Lossless;
+    }
+    if matches!(to, Gzip) && matches!(from, Gzip) {
         return Conversion::NotImplemented {
-            why: "ADE inflates but does not deflate; writing compressed images is not needed to read a corpus",
+            why: "it is already compressed",
         };
     }
     if matches!(to, Dms) {
@@ -185,8 +195,12 @@ pub fn conversion(from: Kind, to: Kind) -> Conversion {
         };
     }
     if matches!(to, RigidDisk) {
-        return Conversion::NotImplemented {
-            why: "building a partition table is a write path, deferred to Phase 4 (D-004)",
+        // A volume, byte for byte, as the one partition of a new disk.
+        return match from {
+            Adf { .. } | Hardfile | Gzip => Conversion::Lossless,
+            _ => Conversion::NotImplemented {
+                why: "only a volume can be put in a partition (F-038, D-024)",
+            },
         };
     }
 
@@ -336,6 +350,26 @@ pub fn convert_bytes(bytes: Vec<u8>, to: Kind) -> Result<Vec<u8>, ConvertError> 
         bytes
     };
 
+    // A partition needs a name, which a kind does not carry.
+    if matches!(to, Kind::RigidDisk) {
+        return Err(ConvertError::Failed {
+            reason: "a partitioned disk is made by naming its partition (`--partition=DH0`)"
+                .to_owned(),
+        });
+    }
+    if matches!(to, Kind::Gzip) {
+        if sectors.len() > crate::MAX_DECOMPRESSED {
+            return Err(ConvertError::Failed {
+                reason: format!(
+                    "a compressed image ADE could read back holds at most {} MB",
+                    crate::MAX_DECOMPRESSED / (1024 * 1024)
+                ),
+            });
+        }
+        return ade_container::deflate::gzip(&sectors).ok_or_else(|| ConvertError::Failed {
+            reason: "too large to compress".to_owned(),
+        });
+    }
     if matches!(to, Kind::ExtendedAdf { .. }) {
         return encode_raw_mfm(&sectors).map_err(|reason| ConvertError::Failed { reason });
     }
