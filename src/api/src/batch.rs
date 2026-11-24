@@ -25,7 +25,7 @@ use std::path::{Path, PathBuf};
 use ade_catalogue::Catalogue;
 use ade_container::Kind;
 
-use crate::{Severity, examine, json::Value};
+use crate::{Severity, json::Value};
 
 /// What happened to one image.
 #[derive(Debug, Clone)]
@@ -451,6 +451,26 @@ pub fn examine_hashed(path: &Path, catalogue: Option<&Catalogue>) -> Record {
     examine_inner(path, catalogue, true, None)
 }
 
+/// The record of an image that could not be read.
+fn unreadable(path: &Path, e: &std::io::Error) -> Record {
+    Record {
+        path: path.to_path_buf(),
+        size: 0,
+        container: "unreadable".to_owned(),
+        container_code: "unreadable",
+        conversion: None,
+        sha1: None,
+        volume: None,
+        files: 0,
+        directories: 0,
+        bytes_recovered: 0,
+        findings: Vec::new(),
+        worst: None,
+        unreadable: Some(e.to_string()),
+        identified: Vec::new(),
+    }
+}
+
 /// The shared body: the file is read **once** and both the health examination
 /// and the content hash work from those bytes. Reading twice doubled the cost
 /// of a corpus run for no benefit.
@@ -460,42 +480,32 @@ fn examine_inner(
     hash: bool,
     convert: Option<&ConvertRequest>,
 ) -> Record {
-    let bytes = match std::fs::read(path) {
-        Ok(b) => b,
+    // A large image is left in its file unless something below needs every
+    // byte of it at once (IMP-029).
+    let opened = crate::Input::open(path).and_then(|input| {
+        let identified = catalogue.map_or(Ok(Vec::new()), |c| input.names(c))?;
+        Ok((input, identified))
+    });
+    let (input, identified) = match opened {
+        Ok(opened) => opened,
         Err(e) => {
-            return Record {
-                path: path.to_path_buf(),
-                size: 0,
-                container: "unreadable".to_owned(),
-                container_code: "unreadable",
-                conversion: None,
-                sha1: None,
-                volume: None,
-                files: 0,
-                directories: 0,
-                bytes_recovered: 0,
-                findings: Vec::new(),
-                worst: None,
-                unreadable: Some(e.to_string()),
-                identified: Vec::new(),
-            };
+            return unreadable(path, &e);
         }
     };
-    let size = bytes.len() as u64;
-    // Both of these read the original bytes, so they happen before `examine`
-    // consumes them.
-    let identified = catalogue.map_or_else(Vec::new, |c| {
-        c.identify(&bytes)
-            .into_iter()
-            .map(|e| e.name.clone())
-            .collect()
-    });
-    let sha1 = hash.then(|| ade_catalogue::sha1::hex(&ade_catalogue::sha1::sha1(&bytes)));
-    // Converting needs the original bytes too, and clones them: the health
-    // examination consumes what it is given, and reading the file twice to
-    // avoid one copy would cost more than the copy.
-    let conversion = convert.map(|request| convert_one(path, bytes.clone(), request));
-    let health = examine(bytes);
+    let size = input.size();
+    let health = input.examine(None);
+    // Hashing and converting read the original bytes, all of them.
+    let (sha1, conversion) = if hash || convert.is_some() {
+        match input.into_bytes() {
+            Ok(bytes) => (
+                hash.then(|| ade_catalogue::sha1::hex(&ade_catalogue::sha1::sha1(&bytes))),
+                convert.map(|request| convert_one(path, bytes, request)),
+            ),
+            Err(e) => return unreadable(path, &e),
+        }
+    } else {
+        (None, None)
+    };
 
     Record {
         path: path.to_path_buf(),

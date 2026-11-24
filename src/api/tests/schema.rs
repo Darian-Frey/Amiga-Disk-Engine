@@ -801,7 +801,7 @@ fn a_specs_report_emits_exactly_these_fields() {
     v.add_file("prog", b"\0\0opens asl.library here\0");
     let bytes = v.build();
     let image = ade_core::Image::from_bytes(bytes.clone()).unwrap();
-    let specs = ade_core::specs::Specs::of(&image, &bytes);
+    let specs = ade_core::specs::Specs::of(&image, &bytes.as_slice());
     assert!(!specs.libraries.is_empty(), "{specs:?}");
     compare(
         "specs",

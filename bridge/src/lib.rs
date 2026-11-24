@@ -38,7 +38,7 @@ use std::path::PathBuf;
 
 use ade_core::layers::filesystem::entry::EntryKind;
 use ade_core::layers::filesystem::volume::Volume;
-use ade_core::{Image, Inspection, examine, inspect_bytes};
+use ade_core::{Image, Inspection};
 
 /// How a call turned out.
 ///
@@ -394,23 +394,25 @@ pub unsafe extern "C" fn ade_image_open(
     let path = PathBuf::from(text);
 
     guard(std::ptr::null_mut(), || {
-        // Read once. `inspect_path` would read the file a second time.
-        let Ok(bytes) = std::fs::read(&path) else {
+        // Held if it is small; a large one is left in its file and only the
+        // parts looked at are read (IMP-029).
+        let Ok(input) = ade_core::Input::open(&path) else {
             set(AdeResult::Io);
             return std::ptr::null_mut();
         };
-        // Identification on open (F-013), from the bytes already read. Null
-        // is the ordinary case: most callers have no dataset, and it costs
-        // them nothing.
+        // Identification on open (F-013). Null is the ordinary case: most
+        // callers have no dataset, and it costs them nothing.
         // SAFETY: the caller's contract; null is checked by `as_ref`.
-        let identified = unsafe { catalogue.as_ref() }.and_then(|c| {
-            c.inner
-                .identify(&bytes)
-                .first()
-                .map(|entry| entry.name.clone())
-        });
-        let inspection = inspect_bytes(bytes.clone());
-        let report = examine(bytes.clone());
+        let identified = match unsafe { catalogue.as_ref() }.map(|c| input.names(&c.inner)) {
+            Some(Err(_)) => {
+                set(AdeResult::Io);
+                return std::ptr::null_mut();
+            }
+            Some(Ok(names)) => names.into_iter().next(),
+            None => None,
+        };
+        let inspection = input.inspect();
+        let report = input.examine(None);
         let findings = report.findings.len();
         let free_holding_data = report.bitmap.as_ref().map_or(0, |b| b.free_holding_data);
         let kind = report.kind;
@@ -421,7 +423,7 @@ pub unsafe extern "C" fn ade_image_open(
         // and holding the bytes is the whole cost — 400 floppies is 400 MB.
         // Blocks come from the file instead, and a container whose blocks are
         // not its file falls back to reading whole on its own.
-        drop(bytes);
+        drop(input);
         let handle = Image::open_lazy(&path).ok();
         let container = CString::new(inspection.detection.kind.to_string()).unwrap_or_default();
         let absent = inspection
@@ -1329,8 +1331,7 @@ pub unsafe extern "C" fn ade_specs_open(image: *const AdeImage) -> *mut AdeSpecs
         let Some(handle) = image.image.as_ref() else {
             return std::ptr::null_mut();
         };
-        let bytes = handle.read_range(0, handle.geometry().total_bytes());
-        let specs = ade_core::specs::Specs::of(handle, &bytes);
+        let specs = ade_core::specs::Specs::of_image(handle);
         Box::into_raw(Box::new(AdeSpecs {
             facts: specs
                 .facts
@@ -2055,7 +2056,7 @@ pub unsafe extern "C" fn ade_image_damage(
         let Some(handle) = image.image.as_ref() else {
             return std::ptr::null_mut();
         };
-        let blocks = ade_core::image_damage(&handle.read_range(0, image.inspection.size))
+        let blocks = ade_core::image_damage(handle)
             .into_iter()
             .map(|(block, damage)| AdeDamagedBlock {
                 block,
@@ -2069,8 +2070,7 @@ pub unsafe extern "C" fn ade_image_damage(
                 },
             })
             .collect();
-        let bytes = handle.read_range(0, image.inspection.size);
-        let counts = ade_core::image_block_counts(&bytes).map_or_else(
+        let counts = ade_core::image_block_counts(handle).map_or_else(
             AdeBlockCounts::default,
             |(covered, used)| {
                 let (files, in_pieces) = ade_core::layout::Layout::of(handle).files();

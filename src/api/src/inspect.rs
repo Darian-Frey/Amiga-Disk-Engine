@@ -15,10 +15,10 @@
 
 use std::{fs, io, path::Path};
 
-use ade_block::{BlockError, BlockSource as _};
+use ade_block::{BlockError, BlockSource};
 use ade_block::{Geometry, GeometryError, read_at};
-use ade_catalogue::Catalogue;
-use ade_container::file::FileSource;
+use ade_container::bytes::{Blocks, ByteSource};
+use ade_container::file::{FileBytes, FileSource};
 use ade_container::{Detection, Kind, RawImage, Window, extended, inflate, sniff};
 use ade_filesystem::{
     bootblock::{BootText, Bootblock},
@@ -689,11 +689,7 @@ impl From<io::Error> for InspectionError {
 /// reported in the [`Inspection`], because those are findings about the image
 /// rather than failures of the tool.
 pub fn inspect_path(path: &Path) -> Result<Inspection, InspectionError> {
-    // Reads whole, which is right for a command that opens one image and
-    // exits: simplest, fastest, and the file is irrelevant afterwards. A
-    // caller holding many images at once wants [`Image::open_lazy`] instead,
-    // which reads blocks from the file (IMP-005).
-    Ok(inspect_bytes(fs::read(path)?))
+    Ok(crate::input::Input::open(path)?.inspect())
 }
 
 /// An image whose bytes do not reach the geometry its size implied.
@@ -726,26 +722,6 @@ fn too_short(
     }
 }
 
-/// Inspect an image and name it from a dataset, in one read (F-013).
-///
-/// This is identification **on open**: the same bytes serve the inspection and
-/// the content hash, so naming a disk costs a CRC32 over bytes already in
-/// memory rather than a second pass. What it does not do is load the dataset —
-/// that is the caller's, once, because loading it per image is the thirteen
-/// minutes [`crate::datfiles_location`] warns about.
-#[must_use]
-pub fn inspect_bytes_named(bytes: Vec<u8>, catalogue: Option<&Catalogue>) -> Inspection {
-    let identified = catalogue.map_or_else(Vec::new, |c| {
-        c.identify(&bytes)
-            .into_iter()
-            .map(|e| e.name.clone())
-            .collect()
-    });
-    let mut inspection = inspect_bytes(bytes);
-    inspection.identified = identified;
-    inspection
-}
-
 /// Inspect an image already in memory.
 #[must_use]
 pub fn inspect_bytes(bytes: Vec<u8>) -> Inspection {
@@ -761,26 +737,9 @@ pub fn inspect_returning(bytes: Vec<u8>) -> (Inspection, Vec<u8>) {
     // ADZ and HDZ are gzip-wrapped ADF and HDF; everything below this line
     // sees the image itself, and the wrapper is reported separately.
     let (bytes, compression) = unwrap_container(bytes);
+    let head = head_of(&bytes.as_slice());
     let size = bytes.len() as u64;
-    let head = bytes.get(..HEAD_BYTES.min(bytes.len())).unwrap_or(&[]);
-    let detection = sniff(head, size);
-
-    // Only a raw block image has a bootblock at offset 0. An extended ADF
-    // opens with `UAE-1ADF` and a device with `RDSK`; reading either as a
-    // bootblock reports a checksum that was never a checksum.
-    let bootblock = if detection.kind.has_bootblock() {
-        Bootblock::parse(&bytes).ok()
-    } else {
-        None
-    };
-    // Text is extracted from the bytes rather than the parse, because a
-    // bootblock too damaged to parse can still carry a legible banner.
-    let boot_text = if detection.kind.has_bootblock() {
-        Bootblock::text(&bytes)
-    } else {
-        Vec::new()
-    };
-
+    let detection = sniff(&head, size);
     let tracks = read_track_table(&bytes, detection.kind);
     // How the capture was made, where it is one. Read from the original bytes:
     // by the time a flux image has been assembled into a volume, its timings
@@ -797,25 +756,101 @@ pub fn inspect_returning(bytes: Vec<u8>) -> (Inspection, Vec<u8>) {
         Some((assembled, info)) => (assembled, Some(info)),
         None => (bytes, None),
     };
+    let container = Container {
+        head,
+        size,
+        detection,
+        tracks,
+        flux,
+        assembly,
+        compression,
+    };
+    let inspection = inspect_body(container, &bytes.as_slice());
+    (inspection, bytes)
+}
+
+/// The first [`HEAD_BYTES`] of `bytes`, or as many as there are.
+pub(crate) fn head_of(bytes: &dyn ByteSource) -> Vec<u8> {
+    bytes.range(0, HEAD_BYTES)
+}
+
+/// Whether a container's blocks sit at their own offsets in its file, so that
+/// it can be read from there. Any other is decompressed or reconstructed
+/// first, and what it holds is bytes ADE made, not bytes on disk.
+pub(crate) const fn reads_in_place(kind: Kind) -> bool {
+    matches!(
+        kind,
+        Kind::Adf { .. } | Kind::Hardfile | Kind::RigidDisk | Kind::Unknown
+    )
+}
+
+/// Inspect an image whose bytes are its blocks ([`reads_in_place`]), reading
+/// only the parts an inspection looks at (IMP-029).
+pub(crate) fn inspect_in_place(bytes: &dyn ByteSource) -> Inspection {
+    let head = head_of(bytes);
+    let size = bytes.size();
+    let detection = sniff(&head, size);
+    let container = Container {
+        head,
+        size,
+        detection,
+        tracks: None,
+        flux: None,
+        assembly: None,
+        compression: None,
+    };
+    inspect_body(container, bytes)
+}
+
+/// What an inspection learns from the container, before the blocks in it.
+struct Container {
+    head: Vec<u8>,
+    size: u64,
+    detection: Detection,
+    tracks: Option<TrackTable>,
+    flux: Option<FluxCapture>,
+    assembly: Option<AssemblyInfo>,
+    compression: Option<Compression>,
+}
+
+/// Inspect the blocks `bytes` hold: the image, or what was reconstructed of it.
+fn inspect_body(container: Container, bytes: &dyn ByteSource) -> Inspection {
+    let Container {
+        head,
+        size,
+        detection,
+        tracks,
+        flux,
+        assembly,
+        compression,
+    } = container;
+    // Only a raw block image has a bootblock at offset 0. An extended ADF
+    // opens with `UAE-1ADF` and a device with `RDSK`; reading either as a
+    // bootblock reports a checksum that was never a checksum.
+    let bootblock = if detection.kind.has_bootblock() {
+        Bootblock::parse(&head).ok()
+    } else {
+        None
+    };
+    // Text is extracted from the bytes rather than the parse, because a
+    // bootblock too damaged to parse can still carry a legible banner.
+    let boot_text = if detection.kind.has_bootblock() {
+        Bootblock::text(&head)
+    } else {
+        Vec::new()
+    };
     let geometry_kind = if assembly.is_some() {
-        sniff(
-            bytes.get(..HEAD_BYTES.min(bytes.len())).unwrap_or(&[]),
-            bytes.len() as u64,
-        )
-        .kind
+        sniff(&head_of(bytes), bytes.size()).kind
     } else {
         detection.kind
     };
-    let Some(geometry) = geometry_for(geometry_kind, bytes.len() as u64) else {
-        return (
-            unreadable_container(detection, size, bootblock, tracks, flux, compression),
-            bytes,
-        );
+    let Some(geometry) = geometry_for(geometry_kind, bytes.size()) else {
+        return unreadable_container(detection, size, bootblock, tracks, flux, compression);
     };
     let geometry = match geometry {
         Ok(g) => g,
         Err(e) => {
-            let inspection = Inspection {
+            return Inspection {
                 detection,
                 size,
                 geometry: None,
@@ -827,41 +862,28 @@ pub fn inspect_returning(bytes: Vec<u8>) -> (Inspection, Vec<u8>) {
                 assembly: None,
                 description: None,
                 boot_text: Vec::new(),
-                compression: compression.clone(),
+                compression,
                 rdb: None,
                 partitions: Vec::new(),
                 partition_faults: Vec::new(),
                 identified: Vec::new(),
             };
-            return (inspection, bytes);
         }
     };
 
     // The volume may be smaller than the file it sits in (BUG-009).
-    let geometry = volume_geometry(&bytes, geometry);
-    // Checked before the bytes go into an image, so a short one is still
-    // handed back.
-    if (bytes.len() as u64) < geometry.total_bytes() {
-        return (
-            too_short(detection, size, geometry, bootblock, compression),
-            bytes,
-        );
-    }
-    let Ok(image) = RawImage::new(bytes, geometry) else {
-        return (
-            too_short(detection, size, geometry, bootblock, compression),
-            Vec::new(),
-        );
+    let geometry = volume_geometry(bytes, geometry);
+    let Ok(image) = Blocks::new(bytes, geometry) else {
+        return too_short(detection, size, geometry, bootblock, compression);
     };
     let (volume, volume_absent) = read_volume(&image, geometry);
     // Needs a real mount rather than the rootblock parse above, because it is
-    // a file. Cheap: one hash lookup and a short read, on a volume that is
-    // already in memory.
+    // a file. Cheap: one hash lookup and a short read.
     let description = Volume::mount(&image)
         .ok()
         .and_then(|v| read_description(&v));
     let (rdb, partitions, partition_faults) = read_partition_table(&image);
-    let inspection = Inspection {
+    Inspection {
         tracks,
         flux,
         assembly,
@@ -881,8 +903,7 @@ pub fn inspect_returning(bytes: Vec<u8>) -> (Inspection, Vec<u8>) {
         partitions,
         partition_faults,
         identified: Vec::new(),
-    };
-    (inspection, image.into_bytes())
+    }
 }
 
 /// Read the partition table, mounting each partition far enough to learn its
@@ -890,7 +911,9 @@ pub fn inspect_returning(bytes: Vec<u8>) -> (Inspection, Vec<u8>) {
 ///
 /// A device with no Rigid Disk Block yields no partitions and no faults: a
 /// floppy having no partition table is not a defect.
-fn read_partition_table(image: &RawImage) -> (Option<RdbInfo>, Vec<PartitionInfo>, Vec<String>) {
+fn read_partition_table(
+    image: &dyn BlockSource,
+) -> (Option<RdbInfo>, Vec<PartitionInfo>, Vec<String>) {
     let geometry = *image.geometry();
     let Ok(Some(rdb)) = RigidDiskBlock::find(image, &geometry) else {
         return (None, Vec::new(), Vec::new());
@@ -948,7 +971,10 @@ fn read_partition_table(image: &RawImage) -> (Option<RdbInfo>, Vec<PartitionInfo
     )
 }
 
-fn read_volume(image: &RawImage, geometry: Geometry) -> (Option<VolumeInfo>, Option<String>) {
+fn read_volume(
+    image: &dyn BlockSource,
+    geometry: Geometry,
+) -> (Option<VolumeInfo>, Option<String>) {
     // Computed, never read from the bootblock — that field says 880 even on HD
     // volumes whose rootblock is at 1760 (C-007).
     let at = geometry.root_block();
@@ -1258,7 +1284,7 @@ pub(crate) fn plain_volume_geometry(bytes: &[u8]) -> Option<(Kind, Geometry)> {
         return None;
     }
     let geometry = geometry_for(kind, size)?.ok()?;
-    Some((kind, volume_geometry(bytes, geometry)))
+    Some((kind, volume_geometry(&bytes, geometry)))
 }
 
 /// The geometry to mount a detected container with, if ADE can mount it.
@@ -1312,14 +1338,14 @@ fn geometry_for(kind: Kind, size: u64) -> Option<Result<Geometry, GeometryError>
 /// A file **shorter** than any standard geometry is not rescued: a truncated
 /// dump does not contain a whole volume, and saying so is the honest answer
 /// rather than mounting an extent the bytes cannot cover.
-fn volume_geometry(bytes: &[u8], file: Geometry) -> Geometry {
+fn volume_geometry(bytes: &dyn ByteSource, file: Geometry) -> Geometry {
     if has_rootblock(bytes, file) {
         return file;
     }
     // Largest first, so an oversized HD image is not read as a DD volume that
     // happens to have a rootblock where HD keeps its data.
     for candidate in [Geometry::HD_FLOPPY, Geometry::DD_FLOPPY] {
-        if candidate.total_bytes() > bytes.len() as u64 {
+        if candidate.total_bytes() > bytes.size() {
             continue;
         }
         if candidate.total_blocks() >= file.total_blocks() {
@@ -1333,18 +1359,14 @@ fn volume_geometry(bytes: &[u8], file: Geometry) -> Geometry {
 }
 
 /// Whether `geometry`'s rootblock position really holds a rootblock.
-fn has_rootblock(bytes: &[u8], geometry: Geometry) -> bool {
-    let block_size = geometry.block_size() as usize;
-    let at = usize::try_from(geometry.root_block().0)
-        .ok()
-        .and_then(|b| b.checked_mul(block_size));
-    let Some(at) = at else {
+fn has_rootblock(bytes: &dyn ByteSource, geometry: Geometry) -> bool {
+    let size = geometry.block_size();
+    let at = geometry.root_block().0.saturating_mul(u64::from(size));
+    let mut block = vec![0u8; size as usize];
+    if !bytes.read_at(at, &mut block) {
         return false;
-    };
-    let Some(block) = bytes.get(at..at.saturating_add(block_size)) else {
-        return false;
-    };
-    ade_filesystem::rootblock::Rootblock::parse(block).is_ok_and(|r| r.looks_like_a_rootblock())
+    }
+    ade_filesystem::rootblock::Rootblock::parse(&block).is_ok_and(|r| r.looks_like_a_rootblock())
 }
 
 /// An image opened for browsing.
@@ -1412,7 +1434,7 @@ impl Image {
             .ok_or(InspectionError::Geometry(GeometryError::ZeroDimension))?
             .map_err(InspectionError::Geometry)?;
         // The volume may be smaller than the file it sits in (BUG-009).
-        let geometry = volume_geometry(&bytes, geometry);
+        let geometry = volume_geometry(&bytes.as_slice(), geometry);
         let raw = RawImage::new(bytes, geometry)
             .map_err(|_| InspectionError::Geometry(GeometryError::ReservedExceedsVolume))?;
         Ok(Self {
@@ -1437,37 +1459,17 @@ impl Image {
     /// # Errors
     /// As [`Self::open`].
     pub fn open_lazy(path: &Path) -> Result<Self, InspectionError> {
-        // Only the head is read to decide the container — the point of this
-        // call is not to read the whole file.
-        let size = std::fs::metadata(path).map_err(InspectionError::Io)?.len();
-        let want = usize::try_from(size).unwrap_or(usize::MAX).min(HEAD_BYTES);
-        let mut head = vec![0u8; want];
-        {
-            use std::io::Read as _;
-            let mut file = std::fs::File::open(path).map_err(InspectionError::Io)?;
-            file.read_exact(&mut head).map_err(InspectionError::Io)?;
-        }
-        let kind = sniff(&head, size).kind;
-        // Only a container whose blocks sit at their own offsets in the file
-        // can be read this way; everything else is bytes ADE made, not bytes
-        // on disk.
-        if !matches!(
-            kind,
-            Kind::Adf { .. } | Kind::Hardfile | Kind::RigidDisk | Kind::Unknown
-        ) {
+        let bytes = FileBytes::new(fs::File::open(path)?)?;
+        let kind = sniff(&head_of(&bytes), bytes.size()).kind;
+        if !reads_in_place(kind) {
             return Self::open(path);
         }
-        let geometry = geometry_for(kind, size)
+        let geometry = geometry_for(kind, bytes.size())
             .ok_or(InspectionError::Geometry(GeometryError::ZeroDimension))?
             .map_err(InspectionError::Geometry)?;
         // The volume may be smaller than the file it sits in (BUG-009). Only
-        // the head was read above, so the candidate rootblocks are read here
-        // — a few hundred bytes on an image that is about to be opened anyway,
-        // and only when the file's own geometry does not already work.
-        let geometry = match std::fs::read(path) {
-            Ok(bytes) => volume_geometry(&bytes, geometry),
-            Err(_) => geometry,
-        };
+        // the rootblocks that decide it are read (BUG-030).
+        let geometry = volume_geometry(&bytes, geometry);
         let file = FileSource::open(path, geometry).map_err(InspectionError::Io)?;
         Ok(Self {
             backing: Backing::File(file),
@@ -1655,36 +1657,6 @@ impl Image {
             partition: Some(found.name_lossy()),
         })
     }
-}
-
-impl Image {
-    /// Every byte of the partition `wanted` names, and its block size — what
-    /// a scan of one partition reads (BUG-028).
-    ///
-    /// # Errors
-    /// No partition table, or no partition `wanted` names.
-    pub fn partition_bytes(&self, wanted: &str) -> Result<(Vec<u8>, u32), String> {
-        let area = self.area(wanted)?;
-        let size = area.source.get().geometry().block_size();
-        Ok((area_bytes(&area), size))
-    }
-}
-
-/// Every byte of an [`Area`], in its own order — what a search of one
-/// partition reads.
-pub(crate) fn area_bytes(area: &Area<'_>) -> Vec<u8> {
-    let source = area.source.get();
-    let size = source.geometry().block_size() as usize;
-    let total = source.geometry().total_blocks();
-    let mut out = Vec::with_capacity(size.saturating_mul(usize::try_from(total).unwrap_or(0)));
-    let mut block = vec![0u8; size];
-    for b in 0..total {
-        if ade_block::read_at(source, ade_block::BlockIndex(b), &mut block).is_err() {
-            break;
-        }
-        out.extend_from_slice(&block);
-    }
-    out
 }
 
 /// One place on an image that can hold a volume: see [`Image::areas`].

@@ -13,6 +13,36 @@ Effort vocabulary: trivial | small | medium | large.
 
 ## Applied
 
+### IMP-029 Reading a large image holds it whole, two or three times over
+**Status:** applied
+**Effort:** medium
+**Found:** 2026-11-24, taking up what IMP-005 left: that entry stopped the window *keeping* the bytes of every open image, but every command, and the opening itself, still read them.
+
+**Where:** [src/api/src/inspect.rs](../src/api/src/inspect.rs), [src/api/src/health.rs](../src/api/src/health.rs), the CLI's reading commands, the bridge's `ade_image_open`.
+
+**What it did.** Inspecting or examining an image looks at a few blocks, but took the image as a `Vec`. On 500 MB every reading command peaked at 515 MB — `ls`, `info`, `extract` of one file — and `scan`, `find`, `specs` and `diff` at 1.03 GB, as did the window's open.
+
+**Applied 2026-11-24.** Inspection and the health check borrow a `ByteSource` — bytes read by position — instead of owning a `Vec`, so the same code reads memory or a file. `Input` opens a file and chooses: up to 16 MB it is held, as before, and past that it is left in place if its blocks are its bytes; a compressed or flux container, or a pipe, is still held. `scan`, `find`, `specs` and `diff` read a megabyte at a time, overlapped so that nothing across a boundary is missed.
+
+| 500 MB hardfile | before | after |
+|---|---|---|
+| `info`, `ls`, `extract`, `layout`, `disasm` | 515–518 MB, 0.23 s | 3–6 MB, 0.00–0.01 s |
+| `check`, `batch` | 518 MB, 0.23 s | 7 MB, 0.01 s |
+| `carve` | 516 MB, 0.58 s | 4 MB, 0.58 s |
+| `scan` | 1,027 MB, 3.8 s | 4 MB, 3.2 s |
+| `find` | 1,028 MB, 1.5 s | 5 MB, 1.1 s |
+| `specs` | 1,027 MB, 6.9 s | 4 MB, 5.8 s |
+| `diff` of two | 1,027 MB, 0.57 s | 5 MB, 0.25 s |
+| `ade_image_open` | 1,039 MB | 15 MB, 11 of it the process measuring |
+
+A 4,000 MB hardfile opens, lists, checks and scans in 3–4 MB. Checking an *empty* volume reads every free block to say whether it is a blank or a loader's, and block by block from the file that is a little slower than from memory: 0.57 s against 0.51 on 500 MB, 4.5 s on 4,000.
+
+**Trade-offs.** A large image is a window, not a snapshot: changed while it is read, it is read as it changes, which is what IMP-005 accepted for the window. `scan`, `find`, `specs`' mount and `diff` fail rather than answer for part of a file. Small files keep the snapshot.
+
+**Not part of it.** An edit still holds one copy of the disk — it checks its result before it is kept, and a saved image is written whole — and so do `convert`, `consolidate` and hashing, which need every byte. `image_damage` and `image_block_counts` now take an `Image`.
+
+**How it is checked.** `src/api/tests/in_place.rs` asks everything of the same file held and in place — plain, partitioned, oversized, and every tenth corpus image with the three hardfiles — and at every alignment across a boundary. It was also run against the previous build's output, text and JSON, on three 500 MB hardfiles and the three Workbench ones: identical.
+
 ### IMP-028 The AmigaDOS harness locks hardfiles by unit number, which a script can repeat and a partitioned disk need not have
 **Status:** applied
 **Effort:** small

@@ -14,6 +14,16 @@ _None._
 
 ## Fixed
 
+### BUG-030 Opening an image lazily read the whole file anyway
+**Severity:** low
+**Status:** fixed
+**Found:** 2026-11-24, measuring what still held a large image whole. **Fixed** the same day, as part of IMP-029.
+**Where:** [src/api/src/inspect.rs](../src/api/src/inspect.rs) `Image::open_lazy`.
+
+**What is wrong.** To decide whether a volume is smaller than its file (BUG-009), `open_lazy` read the file into memory, all of it, and dropped it. Its comment said a few hundred bytes, *only when the file's own geometry does not already work*; neither was true. What stayed resident was still a file handle, so IMP-005's measurement did not see it — but the peak was the file, on every open.
+
+**The fix.** The candidate rootblocks are read by position.
+
 ### BUG-029 An edit that left the volume unmountable would have been kept
 **Severity:** medium
 **Status:** fixed

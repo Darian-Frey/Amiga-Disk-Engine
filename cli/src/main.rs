@@ -43,7 +43,7 @@ use std::{
 };
 
 use ade_core::{
-    Health, Image, Inspection, Severity, conversion, examine_partition,
+    Health, Image, Input, Inspection, Severity, conversion,
     layers::{
         container::Window,
         filesystem::{rdb::Partition, volume::Volume},
@@ -1296,7 +1296,7 @@ fn disasm(args: &Args) -> ExitCode {
         eprintln!("ade: --raw lists bytes as a guess; the other views need a program or boot code");
         return ExitCode::from(EXIT_USAGE);
     }
-    let image = match Image::open(path) {
+    let image = match open_image(path) {
         Ok(i) => i,
         Err(e) => {
             eprintln!("ade: {}: {e}", path.display());
@@ -1389,7 +1389,7 @@ fn annotate(args: &Args) -> ExitCode {
             return ExitCode::from(EXIT_USAGE);
         }
     };
-    let image = match Image::open(path) {
+    let image = match open_image(path) {
         Ok(i) => i,
         Err(e) => {
             eprintln!("ade: {}: {e}", path.display());
@@ -1465,7 +1465,7 @@ fn decode(args: &Args) -> ExitCode {
         eprintln!("ade: decode has no JSON output; it reports in text only");
         return ExitCode::from(EXIT_USAGE);
     }
-    let image = match Image::open(path) {
+    let image = match open_image(path) {
         Ok(i) => i,
         Err(e) => {
             eprintln!("ade: {}: {e}", path.display());
@@ -1531,8 +1531,15 @@ fn info(path: &Path, format: Format, datfiles: Option<&Path>) -> ExitCode {
     // Identification on open: the dataset is consulted when one is configured
     // and costs nothing when it is not (F-013).
     let catalogue = configured_catalogue(datfiles);
-    let inspection = match std::fs::read(path) {
-        Ok(bytes) => ade_core::inspect_bytes_named(bytes, catalogue.as_ref()),
+    let opened = Input::open(path).and_then(|input| {
+        let mut inspection = input.inspect();
+        if let Some(catalogue) = &catalogue {
+            inspection.identified = input.names(catalogue)?;
+        }
+        Ok(inspection)
+    });
+    let inspection = match opened {
+        Ok(inspection) => inspection,
         Err(e) => {
             eprintln!("ade: {}: {e}", path.display());
             return ExitCode::from(EXIT_UNREADABLE);
@@ -1991,12 +1998,27 @@ fn list_text(
     true
 }
 
+/// Open an image to be read, leaving a large one in its file (IMP-029).
+fn open_image(path: &Path) -> Result<Image, ade_core::InspectionError> {
+    Input::open(path)?.into_image()
+}
+
+/// [`open_image`] for one partition of it to be searched, with the exit code
+/// a failure earns.
+fn open_for_search(path: &Path) -> Result<Image, (String, u8)> {
+    open_image(path).map_err(|e| {
+        let code = match &e {
+            ade_core::InspectionError::Io(_) => EXIT_UNREADABLE,
+            ade_core::InspectionError::Geometry(_) => EXIT_USAGE,
+        };
+        (e.to_string(), code)
+    })
+}
+
 /// What the disk at `path` is, from its health report: asked only when a
 /// listing has nothing to show, since the report walks the whole disk.
 fn kind_of(path: &Path) -> Option<ade_core::DiskKind> {
-    std::fs::read(path)
-        .ok()
-        .map(|bytes| ade_core::health::examine(bytes).kind)
+    Input::open(path).ok().map(|input| input.examine(None).kind)
 }
 
 fn list(
@@ -2006,7 +2028,7 @@ fn list(
     partition: Option<&str>,
     hash: bool,
 ) -> ExitCode {
-    let image = match Image::open(path) {
+    let image = match open_image(path) {
         Ok(i) => i,
         Err(e) => {
             eprintln!("ade: {}: {e}", path.display());
@@ -2183,7 +2205,7 @@ fn extract(args: &Args) -> ExitCode {
         );
         return ExitCode::from(EXIT_USAGE);
     }
-    let image = match Image::open(path) {
+    let image = match open_image(path) {
         Ok(i) => i,
         Err(e) => {
             eprintln!("ade: {}: {e}", path.display());
@@ -2273,21 +2295,21 @@ fn check(
     partition: Option<&str>,
     datfiles: Option<&Path>,
 ) -> ExitCode {
-    let bytes = match std::fs::read(path) {
-        Ok(b) => b,
+    let catalogue = configured_catalogue(datfiles);
+    let opened = Input::open(path).and_then(|input| {
+        let identified = catalogue
+            .as_ref()
+            .map_or(Ok(Vec::new()), |c| input.names(c))?;
+        Ok((input, identified))
+    });
+    let (input, identified) = match opened {
+        Ok(opened) => opened,
         Err(e) => {
             eprintln!("ade: {}: {e}", path.display());
             return ExitCode::from(EXIT_UNREADABLE);
         }
     };
-    // Identified from the same bytes, before the examination consumes them.
-    let identified = configured_catalogue(datfiles).map_or_else(Vec::new, |c| {
-        c.identify(&bytes)
-            .into_iter()
-            .map(|e| e.name.clone())
-            .collect()
-    });
-    let mut health = examine_partition(bytes, partition);
+    let mut health = input.examine(partition);
     health.inspection.identified = identified;
     let mut out = std::io::stdout().lock();
     match format {
@@ -2754,36 +2776,23 @@ fn create_partitioned(
 /// and what the bytes are do not always agree, and on a damaged disk the
 /// interesting content is frequently in space nothing points at any more.
 fn scan(path: &Path, format: Format, partition: Option<&str>) -> ExitCode {
-    let bytes = match std::fs::read(path) {
-        Ok(b) => b,
-        Err(e) => {
-            eprintln!("ade: {}: {e}", path.display());
-            return ExitCode::from(EXIT_UNREADABLE);
-        }
-    };
     // One partition's bytes alone, offsets from its start, when one is named
     // (BUG-028).
-    let (bytes, chosen) = match partition {
-        None => (bytes, None),
-        Some(wanted) => match Image::from_bytes(bytes)
-            .map_err(|e| e.to_string())
-            .and_then(|image| image.partition_bytes(wanted))
-        {
-            Ok((bytes, size)) => (bytes, Some(size)),
-            Err(e) => {
-                eprintln!("ade: {}: {e}", path.display());
-                return ExitCode::from(EXIT_USAGE);
-            }
-        },
+    let found = match partition {
+        None => Input::open(path)
+            .and_then(|input| input.scan())
+            .map_err(|e| (e.to_string(), EXIT_UNREADABLE)),
+        Some(wanted) => open_for_search(path).and_then(|image| {
+            ade_core::scan::Scan::of_partition(&image, wanted).map_err(|e| (e, EXIT_USAGE))
+        }),
     };
-    // The volume's own block size where there is one, so an offset can be
-    // named as the block everything else in ADE speaks in.
-    let block_size = chosen.unwrap_or_else(|| {
-        ade_core::inspect_bytes(bytes.clone())
-            .geometry
-            .map_or(512, |g| g.block_size())
-    });
-    let found = ade_core::scan::Scan::of(&bytes, block_size);
+    let found = match found {
+        Ok(found) => found,
+        Err((e, code)) => {
+            eprintln!("ade: {}: {e}", path.display());
+            return ExitCode::from(code);
+        }
+    };
 
     let mut out = std::io::stdout().lock();
     if format == Format::Json {
@@ -2820,7 +2829,7 @@ const SHOWN: usize = 20;
 
 /// Write every file on an image into a folder (F-024).
 fn unpack(path: &Path, dest: &Path, format: Format, partition: Option<&str>) -> ExitCode {
-    let image = match Image::open(path) {
+    let image = match open_image(path) {
         Ok(i) => i,
         Err(e) => {
             eprintln!("ade: {}: {e}", path.display());
@@ -2884,7 +2893,7 @@ fn unpack(path: &Path, dest: &Path, format: Format, partition: Option<&str>) -> 
 
 /// Recover files nothing in the directory tree points at (F-030).
 fn carve(path: &Path, format: Format, dest: Option<&Path>, partition: Option<&str>) -> ExitCode {
-    let image = match Image::open(path) {
+    let image = match open_image(path) {
         Ok(i) => i,
         Err(e) => {
             eprintln!("ade: {}: {e}", path.display());
@@ -3096,21 +3105,16 @@ fn surface(path: &Path, format: Format) -> ExitCode {
 
 /// What a disk says it needs, with the evidence (F-028).
 fn specs(path: &Path, format: Format) -> ExitCode {
-    let bytes = match std::fs::read(path) {
-        Ok(b) => b,
+    let opened = Input::open(path)
+        .map_err(ade_core::InspectionError::from)
+        .and_then(Input::specs);
+    let specs = match opened {
+        Ok(specs) => specs,
         Err(e) => {
             eprintln!("ade: {}: {e}", path.display());
             return ExitCode::from(EXIT_UNREADABLE);
         }
     };
-    let image = match Image::open(path) {
-        Ok(i) => i,
-        Err(e) => {
-            eprintln!("ade: {}: {e}", path.display());
-            return ExitCode::from(EXIT_UNREADABLE);
-        }
-    };
-    let specs = ade_core::specs::Specs::of(&image, &bytes);
 
     let mut out = std::io::stdout().lock();
     if format == Format::Json {
@@ -3137,7 +3141,7 @@ fn specs(path: &Path, format: Format) -> ExitCode {
 
 /// Map what occupies each block of an image (F-022).
 fn layout(path: &Path, format: Format, partition: Option<&str>) -> ExitCode {
-    let image = match ade_core::Image::open(path) {
+    let image = match open_image(path) {
         Ok(i) => i,
         Err(e) => {
             eprintln!("ade: {}: {e}", path.display());
@@ -3220,28 +3224,22 @@ fn find(
             return ExitCode::from(EXIT_USAGE);
         }
     };
-    let bytes = match std::fs::read(path) {
-        Ok(b) => b,
-        Err(e) => {
-            eprintln!("ade: {}: {e}", path.display());
-            return ExitCode::from(EXIT_UNREADABLE);
-        }
-    };
     // One partition alone, in its own numbering, when one is named
     // (BUG-028); otherwise the whole image, every partition of a device.
     let found = match partition {
-        None => ade_core::find::Search::run(&bytes, &pattern),
-        Some(wanted) => {
-            let searched = Image::from_bytes(bytes)
-                .map_err(|e| e.to_string())
-                .and_then(|image| ade_core::find::Search::of_partition(&image, wanted, &pattern));
-            match searched {
-                Ok(found) => found,
-                Err(e) => {
-                    eprintln!("ade: {}: {e}", path.display());
-                    return ExitCode::from(EXIT_USAGE);
-                }
-            }
+        None => Input::open(path)
+            .and_then(|input| input.search(&pattern))
+            .map_err(|e| (e.to_string(), EXIT_UNREADABLE)),
+        Some(wanted) => open_for_search(path).and_then(|image| {
+            ade_core::find::Search::of_partition(&image, wanted, &pattern)
+                .map_err(|e| (e, EXIT_USAGE))
+        }),
+    };
+    let found = match found {
+        Ok(found) => found,
+        Err((e, code)) => {
+            eprintln!("ade: {}: {e}", path.display());
+            return ExitCode::from(code);
         }
     };
 
@@ -3347,14 +3345,20 @@ fn read_all(paths: &[String]) -> Result<Vec<Vec<u8>>, ExitCode> {
 
 /// Report where two dumps of a disk differ (F-009).
 fn diff_images(a: &Path, b: &Path, format: Format) -> ExitCode {
-    let images = match read_all(&[a.display().to_string(), b.display().to_string()]) {
-        Ok(i) => i,
-        Err(code) => return code,
-    };
-    let (Some(left), Some(right)) = (images.first(), images.get(1)) else {
+    let mut opened = Vec::with_capacity(2);
+    for path in [a, b] {
+        match Input::open(path) {
+            Ok(input) => opened.push(input),
+            Err(e) => {
+                eprintln!("ade: {}: {e}", path.display());
+                return ExitCode::from(EXIT_UNREADABLE);
+            }
+        }
+    }
+    let [left, right] = opened.as_slice() else {
         return ExitCode::from(EXIT_UNREADABLE);
     };
-    let report = match ade_core::diff(left, right) {
+    let report = match ade_core::consolidate::diff_in_place(&*left.bytes(), &*right.bytes()) {
         Ok(d) => d,
         Err(e) => {
             eprintln!("ade: {e}");
@@ -3752,15 +3756,15 @@ fn identify(paths: &[String], datfiles: Option<&Path>, format: Format) -> ExitCo
     let mut out = std::io::stdout().lock();
 
     for path in paths {
-        let bytes = match std::fs::read(path) {
-            Ok(b) => b,
+        let identified = Input::open(Path::new(path)).and_then(|i| i.identify(&catalogue));
+        let found = match identified {
+            Ok(found) => found,
             Err(e) => {
                 eprintln!("ade: {path}: {e}");
                 unknown = unknown.saturating_add(1);
                 continue;
             }
         };
-        let found = catalogue.identify_detailed(&bytes);
         let matches = found.entries;
         if found.kind.is_named() {
             named = named.saturating_add(1);

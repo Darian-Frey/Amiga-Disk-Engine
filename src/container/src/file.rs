@@ -40,6 +40,7 @@ use std::fs::File;
 use std::io;
 use std::path::Path;
 
+use crate::bytes::ByteSource;
 use ade_block::{BlockError, BlockIndex, BlockSource, Geometry, ValidBlock};
 
 /// An image read from its file, one block at a time.
@@ -68,43 +69,72 @@ impl FileSource {
         }
         Ok(Self { file, geometry })
     }
+}
 
-    /// Read exactly `out.len()` bytes from `offset`.
-    ///
-    /// Positional rather than seek-then-read, so the source needs no interior
-    /// mutability and two threads cannot move each other's cursor.
-    fn read_exact_at(&self, offset: u64, out: &mut [u8]) -> io::Result<()> {
-        #[cfg(unix)]
-        {
-            std::os::unix::fs::FileExt::read_exact_at(&self.file, out, offset)
-        }
-        #[cfg(windows)]
-        {
-            let mut done = 0usize;
-            while done < out.len() {
-                let Some(slice) = out.get_mut(done..) else {
-                    break;
-                };
-                let read = std::os::windows::fs::FileExt::seek_read(
-                    &self.file,
-                    slice,
-                    offset.saturating_add(done as u64),
-                )?;
-                if read == 0 {
-                    return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "short read"));
-                }
-                done = done.saturating_add(read);
+/// Read exactly `out.len()` bytes from `offset`.
+///
+/// Positional rather than seek-then-read, so the source needs no interior
+/// mutability and two threads cannot move each other's cursor.
+fn read_exact_at(file: &File, offset: u64, out: &mut [u8]) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::FileExt::read_exact_at(file, out, offset)
+    }
+    #[cfg(windows)]
+    {
+        let mut done = 0usize;
+        while done < out.len() {
+            let Some(slice) = out.get_mut(done..) else {
+                break;
+            };
+            let read = std::os::windows::fs::FileExt::seek_read(
+                file,
+                slice,
+                offset.saturating_add(done as u64),
+            )?;
+            if read == 0 {
+                return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "short read"));
             }
-            Ok(())
+            done = done.saturating_add(read);
         }
-        #[cfg(not(any(unix, windows)))]
-        {
-            let _ = (offset, out);
-            Err(io::Error::new(
-                io::ErrorKind::Unsupported,
-                "positional reads are not available on this platform",
-            ))
-        }
+        Ok(())
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = (offset, out);
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "positional reads are not available on this platform",
+        ))
+    }
+}
+
+/// A file's bytes, read by position: the whole file, where [`FileSource`] is
+/// the blocks of one geometry over it.
+#[derive(Debug)]
+pub struct FileBytes {
+    file: File,
+    size: u64,
+}
+
+impl FileBytes {
+    /// Take an open file, at the length it has now.
+    ///
+    /// # Errors
+    /// [`io::Error`] if its length cannot be read.
+    pub fn new(file: File) -> io::Result<Self> {
+        let size = file.metadata()?.len();
+        Ok(Self { file, size })
+    }
+}
+
+impl ByteSource for FileBytes {
+    fn size(&self) -> u64 {
+        self.size
+    }
+
+    fn read_at(&self, offset: u64, out: &mut [u8]) -> bool {
+        read_exact_at(&self.file, offset, out).is_ok()
     }
 }
 
@@ -127,9 +157,8 @@ impl BlockSource for FileSource {
         // A read that fails is reported as a truncation of that block. The
         // caller cannot do anything more specific with an errno, and every
         // reader above already handles a block that would not read.
-        self.read_exact_at(offset, out)
-            .map_err(|_| BlockError::Truncated {
-                index: BlockIndex(block.index()),
-            })
+        read_exact_at(&self.file, offset, out).map_err(|_| BlockError::Truncated {
+            index: BlockIndex(block.index()),
+        })
     }
 }

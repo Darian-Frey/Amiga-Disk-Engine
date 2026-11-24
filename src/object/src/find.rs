@@ -162,8 +162,17 @@ pub struct Match {
 /// matches, because the second one is genuinely there and a caller counting
 /// occurrences of a repeating byte sequence would otherwise be told a number
 /// that is quietly wrong.
+///
+/// For bytes arriving in pieces, see [`search_at`].
 #[must_use]
 pub fn search(bytes: &[u8], pattern: &Pattern, block_size: u32) -> Vec<Match> {
+    search_at(bytes, pattern, block_size, 0)
+}
+
+/// [`search`] over `bytes` that begin at `base` of something larger: every
+/// match wholly inside them, at its offset in the whole.
+#[must_use]
+pub fn search_at(bytes: &[u8], pattern: &Pattern, block_size: u32, base: u64) -> Vec<Match> {
     let needle = &pattern.bytes;
     if needle.is_empty() || needle.len() > bytes.len() {
         return Vec::new();
@@ -185,7 +194,7 @@ pub fn search(bytes: &[u8], pattern: &Pattern, block_size: u32) -> Vec<Match> {
             window == needle.as_slice()
         };
         if hit {
-            let offset = at as u64;
+            let offset = base.saturating_add(at as u64);
             out.push(Match {
                 offset,
                 block: offset.checked_div(block_size).unwrap_or(0),

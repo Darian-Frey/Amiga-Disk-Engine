@@ -17,7 +17,7 @@ use ade_fixtures::Volume as Fixture;
 
 fn read(bytes: &[u8]) -> Specs {
     let image = Image::from_bytes(bytes.to_vec()).expect("opens");
-    Specs::of(&image, bytes)
+    Specs::of(&image, &bytes)
 }
 
 fn says(specs: &Specs, fragment: &str) -> bool {

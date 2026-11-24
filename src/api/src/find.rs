@@ -5,12 +5,27 @@
 //! nothing does. "Found at offset 322,205" sends someone to a hex view;
 //! "found in `s/startup-sequence`" ends the question, and "found in a block no
 //! directory entry points at" is frequently the more interesting of the two.
+use crate::input::pieces;
 use crate::json::Value;
 /// Where a hit landed. Defined by [`crate::layout`], because it is a property
 /// of the disk rather than of the search — the whole-disk map (F-022) and a
 /// single hit's attribution must never disagree about what a block is.
 pub use crate::layout::Region;
-use ade_object::find::{Match, Pattern, search};
+use ade_container::bytes::{ByteSource, Flat};
+use ade_object::find::{Match, Pattern, search_at};
+
+/// Every match in `bytes`, read a piece at a time, and how many were read.
+fn search_all(bytes: &dyn ByteSource, pattern: &Pattern, block_size: u32) -> (Vec<Match>, u64) {
+    let overlap = pattern.bytes.len().saturating_sub(1);
+    let mut out = Vec::new();
+    // A match needs the overlap whole, so one that starts in the overlap does
+    // not fit in this piece and is the next one's alone.
+    let scanned = pieces(bytes, block_size, overlap, |piece, at, _| {
+        out.extend(search_at(piece, pattern, block_size, at));
+        true
+    });
+    (out, scanned)
+}
 
 /// One match, with the file it belongs to where there is one.
 #[derive(Debug, Clone)]
@@ -44,8 +59,8 @@ impl Search {
         // same image, and each `from_bytes` copies the whole disk — twice over
         // a 100 MB hardfile is the kind of quiet cost IMP-006 was about.
         match crate::Image::from_bytes(bytes.to_vec()) {
-            Ok(image) => Self::over(&image, bytes, pattern),
-            Err(_) => Self::over_unmountable(bytes, pattern),
+            Ok(image) => Self::over(&image, &bytes, pattern),
+            Err(_) => Self::over_unmountable(&bytes, pattern),
         }
     }
 
@@ -58,8 +73,7 @@ impl Search {
     /// cost IMP-006 was about.
     #[must_use]
     pub fn of_image(image: &crate::Image, pattern: &Pattern) -> Self {
-        let bytes = image.read_range(0, image.geometry().total_bytes());
-        Self::over(image, &bytes, pattern)
+        Self::over(image, &Flat(image.source()), pattern)
     }
 
     /// Search one partition of a device alone: its own bytes, its offsets
@@ -74,13 +88,30 @@ impl Search {
         pattern: &Pattern,
     ) -> Result<Self, String> {
         let (map, _, area) = crate::layout::attribute_partition(image, wanted)?;
-        let bytes = crate::inspect::area_bytes(&area);
-        let block_size = area.source.get().geometry().block_size();
-        Ok(Self::attributed(&bytes, pattern, block_size, &map))
+        let source = area.source.get();
+        let block_size = source.geometry().block_size();
+        Ok(Self::attributed(&Flat(source), pattern, block_size, &map))
+    }
+
+    /// Search a file's bytes where they are, naming hits from `image`, its
+    /// mount, if it has one.
+    pub(crate) fn in_place(
+        image: Option<&crate::Image>,
+        bytes: &dyn ByteSource,
+        pattern: &Pattern,
+    ) -> std::io::Result<Self> {
+        let found = match image {
+            Some(image) => Self::over(image, bytes, pattern),
+            None => Self::over_unmountable(bytes, pattern),
+        };
+        if found.scanned < bytes.size() {
+            return Err(std::io::ErrorKind::UnexpectedEof.into());
+        }
+        Ok(found)
     }
 
     /// The shared body: search `bytes`, attribute through `image`.
-    fn over(image: &crate::Image, bytes: &[u8], pattern: &Pattern) -> Self {
+    fn over(image: &crate::Image, bytes: &dyn ByteSource, pattern: &Pattern) -> Self {
         let block_size = image.geometry().block_size();
         let map = crate::layout::attribute(image).0;
         Self::attributed(bytes, pattern, block_size, &map)
@@ -88,12 +119,13 @@ impl Search {
 
     /// Search `bytes` and name each hit from `map`.
     fn attributed(
-        bytes: &[u8],
+        bytes: &dyn ByteSource,
         pattern: &Pattern,
         block_size: u32,
         map: &std::collections::BTreeMap<u64, crate::layout::Owned>,
     ) -> Self {
-        let matches = search(bytes, pattern, block_size)
+        let (found, scanned) = search_all(bytes, pattern, block_size);
+        let matches = found
             .into_iter()
             .map(|at| {
                 let (region, owner, owner_block) = map
@@ -111,16 +143,17 @@ impl Search {
             .collect();
         Self {
             matches,
-            scanned: bytes.len() as u64,
+            scanned,
             was_hex: pattern.is_hex,
         }
     }
 
     /// A container that will not mount is still searchable — a quarter of real
     /// images are exactly that, and they are the ones worth searching.
-    fn over_unmountable(bytes: &[u8], pattern: &Pattern) -> Self {
+    fn over_unmountable(bytes: &dyn ByteSource, pattern: &Pattern) -> Self {
+        let (found, scanned) = search_all(bytes, pattern, 512);
         Self {
-            matches: search(bytes, pattern, 512)
+            matches: found
                 .into_iter()
                 .map(|at| Found {
                     at,
@@ -129,7 +162,7 @@ impl Search {
                     region: Region::Unclaimed,
                 })
                 .collect(),
-            scanned: bytes.len() as u64,
+            scanned,
             was_hex: pattern.is_hex,
         }
     }

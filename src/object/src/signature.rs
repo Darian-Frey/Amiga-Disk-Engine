@@ -306,6 +306,52 @@ pub fn scan(bytes: &[u8], block_size: u32) -> Vec<Hit> {
 /// small enough to reason about.
 #[must_use]
 pub fn scan_with(bytes: &[u8], block_size: u32, table: &[Signature]) -> Vec<Hit> {
+    settle(raw_hits(bytes, block_size, table, 0), block_size)
+}
+
+/// The longest magic looked for: how far pieces must overlap for [`Pieces`].
+#[must_use]
+pub fn longest_magic() -> usize {
+    SIGNATURES.iter().map(|s| s.magic.len()).max().unwrap_or(0)
+}
+
+/// A scan of bytes arriving in pieces, which finds what [`scan`] finds in
+/// them all at once (IMP-029).
+#[derive(Debug)]
+pub struct Pieces {
+    hits: Vec<Hit>,
+    block_size: u32,
+}
+
+impl Pieces {
+    /// Begin, in blocks of `block_size`.
+    #[must_use]
+    pub const fn new(block_size: u32) -> Self {
+        Self {
+            hits: Vec::new(),
+            block_size,
+        }
+    }
+
+    /// Scan `bytes`, which begin at `base` — a whole number of blocks — and
+    /// keep what starts in the first `own` of them. The rest are the next
+    /// piece's, given so that a magic crossing the boundary is seen whole.
+    pub fn add(&mut self, bytes: &[u8], base: u64, own: usize) {
+        let end = base.saturating_add(own as u64);
+        let found = raw_hits(bytes, self.block_size, SIGNATURES, base);
+        self.hits
+            .extend(found.into_iter().filter(|h| h.offset < end));
+    }
+
+    /// Everything found.
+    #[must_use]
+    pub fn finish(self) -> Vec<Hit> {
+        settle(self.hits, self.block_size)
+    }
+}
+
+/// Every match of `table` in `bytes`, at its offset from `base`.
+fn raw_hits(bytes: &[u8], block_size: u32, table: &[Signature], base: u64) -> Vec<Hit> {
     let block_size = u64::from(block_size.max(1));
     let mut hits = Vec::new();
 
@@ -323,7 +369,7 @@ pub fn scan_with(bytes: &[u8], block_size: u32, table: &[Signature]) -> Vec<Hit>
                 let mut at = 0usize;
                 while at < bytes.len() {
                     if bytes.get(at..at.saturating_add(magic.len())) == Some(magic) {
-                        hits.push(hit(at as u64, block_size, signature));
+                        hits.push(hit(base.saturating_add(at as u64), block_size, signature));
                     }
                     at = at.saturating_add(step);
                 }
@@ -331,13 +377,19 @@ pub fn scan_with(bytes: &[u8], block_size: u32, table: &[Signature]) -> Vec<Hit>
             Anchor::Anywhere => {
                 for at in 0..bytes.len().saturating_sub(magic.len()).saturating_add(1) {
                     if bytes.get(at..at.saturating_add(magic.len())) == Some(magic) {
-                        hits.push(hit(at as u64, block_size, signature));
+                        hits.push(hit(base.saturating_add(at as u64), block_size, signature));
                     }
                 }
             }
         }
     }
 
+    hits
+}
+
+/// Put hits in order, one per offset, runs folded.
+fn settle(mut hits: Vec<Hit>, block_size: u32) -> Vec<Hit> {
+    let block_size = u64::from(block_size.max(1));
     // The most specific match at an offset wins. `DMS!!ERR` and `DMS!` both
     // match the same bytes, and reporting an ADF full of xDMS failure filler
     // as containing eleven DMS archives is worse than saying nothing: it is a

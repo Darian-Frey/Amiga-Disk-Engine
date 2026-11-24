@@ -161,7 +161,7 @@ fn damage_in_a_partition_is_drawn_where_it_is_on_the_device() {
         .iter()
         .find(|p| p.name == "DH1")
         .unwrap();
-    let damaged = ade_core::image_damage(&bytes);
+    let damaged = ade_core::image_damage(&Image::from_bytes(bytes.clone()).unwrap());
     assert_ne!(damaged.len(), 0);
     for (block, _) in &damaged {
         let block = u64::from(*block);

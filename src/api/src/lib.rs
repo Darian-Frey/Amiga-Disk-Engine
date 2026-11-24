@@ -18,6 +18,7 @@ pub mod disasm;
 pub mod edit;
 pub mod find;
 pub mod health;
+pub mod input;
 pub mod inspect;
 pub mod json;
 pub mod layout;
@@ -34,10 +35,11 @@ pub use health::{
     BitmapHealth, Damage, DirCacheHealth, DiskKind, Examined, Finding, Health, Severity,
     damaged_blocks, examine, examine_partition, image_block_counts, image_damage,
 };
+pub use input::Input;
 pub use inspect::{
     Compression, Description, Fault, Image, Inspection, InspectionError, MAX_DECOMPRESSED,
     MAX_DESCRIPTION, PartitionInfo, RdbInfo, TrackTable, VolumeInfo, entry_to_json,
-    entry_to_json_hashed, inspect_bytes, inspect_bytes_named, inspect_path, inspect_returning,
+    entry_to_json_hashed, inspect_bytes, inspect_path, inspect_returning,
 };
 
 /// The layer crates, re-exported so that front-ends depend on this crate alone.

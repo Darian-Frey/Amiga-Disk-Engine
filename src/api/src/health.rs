@@ -28,6 +28,7 @@ use std::collections::{HashMap, HashSet};
 /// How many cache disagreements to report before saying so in one line.
 const MAX_DIRCACHE_FINDINGS: usize = 20;
 
+use ade_container::bytes::{Blocks, ByteSource, Flat};
 use ade_filesystem::{
     bitmap::Bitmap,
     dircache::{self, T_DIRCACHE},
@@ -36,10 +37,7 @@ use ade_filesystem::{
     volume::Volume,
 };
 
-use crate::{
-    inspect::{Inspection, inspect_bytes},
-    json::Value,
-};
+use crate::{inspect::Inspection, json::Value};
 
 /// How much a finding matters.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -437,20 +435,12 @@ impl Damage {
 /// report numbers blocks from its own start, and drawn as they stood they
 /// landed on the wrong blocks.
 #[must_use]
-pub fn image_damage(bytes: &[u8]) -> Vec<(u32, Damage)> {
-    let inspection = inspect_bytes(bytes.to_vec());
-    if inspection.partitions.is_empty() {
-        return damaged_blocks(&examine(bytes.to_vec()));
-    }
+pub fn image_damage(image: &crate::Image) -> Vec<(u32, Damage)> {
+    let reports = whole_image(image);
     let mut all: Vec<(u32, Damage)> = Vec::new();
-    for (index, part) in inspection.partitions.iter().enumerate() {
-        let report = examine_partition(bytes.to_vec(), Some(&index.to_string()));
-        if report.examined.is_none() {
-            continue;
-        }
-        for (block, damage) in damaged_blocks(&report) {
-            if let Ok(on_device) = u32::try_from(part.first_block.saturating_add(u64::from(block)))
-            {
+    for (first_block, report) in &reports {
+        for (block, damage) in damaged_blocks(report) {
+            if let Ok(on_device) = u32::try_from(first_block.saturating_add(u64::from(block))) {
                 all.push((on_device, damage));
             }
         }
@@ -459,22 +449,32 @@ pub fn image_damage(bytes: &[u8]) -> Vec<(u32, Damage)> {
     all
 }
 
+/// The report on each volume of an open image, and the block it starts at:
+/// the image's own, or every partition's that could be examined.
+fn whole_image(image: &crate::Image) -> Vec<(u64, Health)> {
+    let bytes = Flat(image.source());
+    let inspection = crate::inspect::inspect_in_place(&bytes);
+    let report =
+        |name: Option<&str>| examine_body(inspection.clone(), &bytes, name, &mut HashSet::new());
+    if inspection.partitions.is_empty() {
+        return vec![(0, report(None))];
+    }
+    inspection
+        .partitions
+        .iter()
+        .enumerate()
+        .map(|(i, part)| (part.first_block, report(Some(&i.to_string()))))
+        .filter(|(_, r)| r.examined.is_some())
+        .collect()
+}
+
 /// Blocks the volumes of a whole image map, and how many of them are marked
 /// used: the image's own volume, or every partition of a device added
 /// together. `None` when no volume has a bitmap to count.
 #[must_use]
-pub fn image_block_counts(bytes: &[u8]) -> Option<(u64, u64)> {
-    let inspection = inspect_bytes(bytes.to_vec());
-    let reports: Vec<Health> = if inspection.partitions.is_empty() {
-        vec![examine(bytes.to_vec())]
-    } else {
-        (0..inspection.partitions.len())
-            .map(|i| examine_partition(bytes.to_vec(), Some(&i.to_string())))
-            .filter(|r| r.examined.is_some())
-            .collect()
-    };
+pub fn image_block_counts(image: &crate::Image) -> Option<(u64, u64)> {
     let mut counted: Option<(u64, u64)> = None;
-    for report in &reports {
+    for (_, report) in whole_image(image) {
         if let Some(b) = &report.bitmap {
             let (covered, used) = counted.unwrap_or((0, 0));
             counted = Some((
@@ -616,6 +616,43 @@ fn examine_core(
     // protected disk's container as a plain ADF (F-007). The inspection hands
     // back exactly that reconstruction, so it is not made twice.
     let (inspection, bytes) = crate::inspect::inspect_returning(bytes);
+    let health = examine_body(inspection, &bytes.as_slice(), partition, in_use);
+    (health, bytes)
+}
+
+/// Examine an image whose bytes are its blocks, reading them where they are
+/// rather than holding them (IMP-029).
+pub(crate) fn examine_in_place(bytes: &dyn ByteSource, partition: Option<&str>) -> Health {
+    let inspection = crate::inspect::inspect_in_place(bytes);
+    examine_body(inspection, bytes, partition, &mut HashSet::new())
+}
+
+/// Whether every byte is zero. Stops at the first that is not, which on a
+/// real disk is in the first few.
+fn all_zero(bytes: &dyn ByteSource) -> bool {
+    let mut buffer = vec![0u8; 64 * 1024];
+    let mut at = 0u64;
+    while at < bytes.size() {
+        let left = usize::try_from(bytes.size().saturating_sub(at)).unwrap_or(usize::MAX);
+        let n = left.min(buffer.len());
+        let Some(piece) = buffer.get_mut(..n) else {
+            return false;
+        };
+        if !bytes.read_at(at, piece) || piece.iter().any(|&b| b != 0) {
+            return false;
+        }
+        at = at.saturating_add(n as u64);
+    }
+    true
+}
+
+/// The examination itself, of the blocks `bytes` hold.
+fn examine_body(
+    inspection: Inspection,
+    bytes: &dyn ByteSource,
+    partition: Option<&str>,
+    in_use: &mut HashSet<u32>,
+) -> Health {
     let mut findings: Vec<Finding> = inspection
         .faults()
         .into_iter()
@@ -631,25 +668,20 @@ fn examine_core(
                 .clone()
                 .unwrap_or_else(|| "no geometry could be established".to_owned()),
         ));
-        return (barren(inspection, findings), bytes);
+        return barren(inspection, findings);
     };
 
     // Asked here, while the bytes are at hand, for the one kind a disk with
     // no volume cannot be told apart from without them. Stops at the first
     // non-zero byte, which on a real disk is in the first few.
-    let unformatted = bytes.iter().all(|&b| b == 0);
-    // Checked before the bytes go into an image, so a short one is handed
-    // back with the finding.
-    if (bytes.len() as u64) < geometry.total_bytes() {
+    let unformatted = all_zero(bytes);
+    let Ok(image) = Blocks::new(bytes, geometry) else {
         findings.push(Finding::new(
             "image-truncated",
             Severity::Error,
             "the image is shorter than the geometry it claims",
         ));
-        return (barren(inspection, findings), bytes);
-    }
-    let Ok(image) = ade_container::RawImage::new(bytes, geometry) else {
-        return (barren(inspection, findings), Vec::new());
+        return barren(inspection, findings);
     };
     // A partitioned device has no volume at its own rootblock; the volume to
     // examine is inside a partition.
@@ -662,7 +694,7 @@ fn examine_core(
             .map(|p| p.name.clone())
     });
     if window.is_err() {
-        return (barren(inspection, findings), image.into_bytes());
+        return barren(inspection, findings);
     }
     let mounted = match &window {
         Ok(Some(w)) => Volume::mount(w),
@@ -682,7 +714,7 @@ fn examine_core(
         if unformatted {
             health.kind = DiskKind::Unformatted;
         }
-        return (health, image.into_bytes());
+        return health;
     };
 
     volume_prelude(&inspection, &volume, &mut findings);
@@ -706,7 +738,7 @@ fn examine_core(
 
     // Worst first, so the first line a reader sees is the one that matters.
     findings.sort_by_key(|f| core::cmp::Reverse(f.severity));
-    let health = Health {
+    Health {
         dircache: scan.dircache.clone(),
         bitmap,
         kind,
@@ -724,8 +756,7 @@ fn examine_core(
                 .and_then(|_| chosen_name.clone()),
         }),
         inspection,
-    };
-    (health, image.into_bytes())
+    }
 }
 
 struct TreeScan {
@@ -1919,7 +1950,7 @@ fn volume_prelude(inspection: &Inspection, volume: &Volume<'_>, findings: &mut V
 /// examining anything at all would answer a question nobody asked — a finding
 /// is pushed and the report stops.
 fn select_window<'a>(
-    image: &'a ade_container::RawImage,
+    image: &'a dyn ade_block::BlockSource,
     inspection: &Inspection,
     wanted: Option<&str>,
     findings: &mut Vec<Finding>,

@@ -7,6 +7,9 @@
 
 use ade_object::signature::{self, Hit};
 
+use ade_container::bytes::{ByteSource, Flat};
+
+use crate::input::pieces;
 use crate::json::Value;
 
 /// What a scan found.
@@ -25,6 +28,45 @@ impl Scan {
         Self {
             hits: signature::scan(bytes, block_size),
             scanned: bytes.len() as u64,
+        }
+    }
+
+    /// Scan bytes too many to hold, a piece at a time.
+    ///
+    /// # Errors
+    /// They could not all be read: part of a scan reads as a scan of the whole.
+    pub fn over(bytes: &dyn ByteSource, block_size: u32) -> std::io::Result<Self> {
+        let scan = Self::readable(bytes, block_size);
+        if scan.scanned < bytes.size() {
+            return Err(std::io::ErrorKind::UnexpectedEof.into());
+        }
+        Ok(scan)
+    }
+
+    /// Scan one partition of a device: its own bytes, offsets from its start
+    /// (BUG-028), as far as it can be read.
+    ///
+    /// # Errors
+    /// No partition table, or no partition `wanted` names.
+    pub fn of_partition(image: &crate::Image, wanted: &str) -> Result<Self, String> {
+        let area = image.area(wanted)?;
+        let source = area.source.get();
+        Ok(Self::readable(
+            &Flat(source),
+            source.geometry().block_size(),
+        ))
+    }
+
+    fn readable(bytes: &dyn ByteSource, block_size: u32) -> Self {
+        let mut found = signature::Pieces::new(block_size);
+        let overlap = signature::longest_magic().saturating_sub(1);
+        let scanned = pieces(bytes, block_size, overlap, |piece, at, own| {
+            found.add(piece, at, own);
+            true
+        });
+        Self {
+            hits: found.finish(),
+            scanned,
         }
     }
 

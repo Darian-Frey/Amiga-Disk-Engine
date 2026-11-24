@@ -33,6 +33,9 @@
 
 use std::collections::BTreeMap;
 
+use ade_container::bytes::ByteSource;
+
+use crate::input::pieces;
 use crate::json::Value;
 
 /// Bytes in one sector.
@@ -207,6 +210,8 @@ pub enum ConsolidateError {
         /// The length that was not a multiple of 512.
         length: usize,
     },
+    /// A dump could not be read to its end.
+    Unreadable,
 }
 
 impl core::fmt::Display for ConsolidateError {
@@ -217,6 +222,7 @@ impl core::fmt::Display for ConsolidateError {
                 f,
                 "dumps are different sizes ({expected} and {found}) — not dumps of one disk"
             ),
+            Self::Unreadable => f.write_str("a dump could not be read to its end"),
             Self::NotWholeSectors { length } => {
                 write!(
                     f,
@@ -383,41 +389,56 @@ impl Diff {
 /// # Errors
 /// [`ConsolidateError::SizeMismatch`] if they are different lengths.
 pub fn diff(a: &[u8], b: &[u8]) -> Result<Diff, ConsolidateError> {
-    if a.len() != b.len() {
+    diff_in_place(&a, &b)
+}
+
+/// [`diff`], reading both dumps where they are (IMP-029).
+///
+/// # Errors
+/// As [`diff`], and [`ConsolidateError::Unreadable`].
+pub fn diff_in_place(a: &dyn ByteSource, b: &dyn ByteSource) -> Result<Diff, ConsolidateError> {
+    let length = |bytes: &dyn ByteSource| usize::try_from(bytes.size()).unwrap_or(usize::MAX);
+    if a.size() != b.size() {
         return Err(ConsolidateError::SizeMismatch {
-            expected: a.len(),
-            found: b.len(),
+            expected: length(a),
+            found: length(b),
         });
     }
-    if a.len() % SECTOR != 0 {
-        return Err(ConsolidateError::NotWholeSectors { length: a.len() });
+    if length(a) % SECTOR != 0 {
+        return Err(ConsolidateError::NotWholeSectors { length: length(a) });
     }
 
-    let sectors_total = a.len() / SECTOR;
+    let sectors_total = length(a) / SECTOR;
     let mut sectors = Vec::new();
     let mut tracks = Vec::new();
     let mut bytes_differing = 0usize;
 
-    for index in 0..sectors_total {
-        let at = index.saturating_mul(SECTOR);
-        let end = at.saturating_add(SECTOR);
-        let (Some(left), Some(right)) = (a.get(at..end), b.get(at..end)) else {
-            continue;
-        };
-        if left == right {
-            continue;
+    let mut index = 0usize;
+    let read = pieces(a, 512, 0, |left, at, _| {
+        let right = b.range(at, left.len());
+        if right.len() != left.len() {
+            return false;
         }
-        sectors.push(index);
-        bytes_differing = bytes_differing.saturating_add(
-            left.iter()
-                .zip(right.iter())
-                .filter(|(x, y)| x != y)
-                .count(),
-        );
-        let track = index / SECTORS_PER_TRACK;
-        if tracks.last() != Some(&track) {
-            tracks.push(track);
+        for (left, right) in left.chunks(SECTOR).zip(right.chunks(SECTOR)) {
+            if left != right {
+                sectors.push(index);
+                bytes_differing = bytes_differing.saturating_add(
+                    left.iter()
+                        .zip(right.iter())
+                        .filter(|(x, y)| x != y)
+                        .count(),
+                );
+                let track = index / SECTORS_PER_TRACK;
+                if tracks.last() != Some(&track) {
+                    tracks.push(track);
+                }
+            }
+            index = index.saturating_add(1);
         }
+        true
+    });
+    if read < a.size() || index < sectors_total {
+        return Err(ConsolidateError::Unreadable);
     }
 
     Ok(Diff {

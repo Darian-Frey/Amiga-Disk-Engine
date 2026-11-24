@@ -17,6 +17,7 @@
 //! never rejects an image for failing a test that real disks routinely fail.
 //! The caller reports both.
 
+pub mod bytes;
 pub mod file;
 
 pub mod extended;

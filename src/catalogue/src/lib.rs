@@ -155,6 +155,17 @@ impl Catalogue {
         }
     }
 
+    /// Whether anything in the dataset is `len` bytes long. Nothing else can
+    /// match an image of that size, so one it answers no for need not be read
+    /// to be identified (IMP-029).
+    #[must_use]
+    pub fn has_size(&self, len: u64) -> bool {
+        self.by_crc
+            .values()
+            .flatten()
+            .any(|entry| entry.size_matches(len))
+    }
+
     /// Everything in the dataset whose content hash matches these bytes.
     ///
     /// The entries only. [`Self::identify_detailed`] says what several matches
@@ -283,7 +294,8 @@ pub struct Identification<'a> {
 impl Identification<'_> {
     /// Nothing matched.
     #[must_use]
-    fn unknown() -> Self {
+    /// Nothing in the dataset matches.
+    pub fn unknown() -> Self {
         Self {
             entries: Vec::new(),
             kind: Match::Unknown,

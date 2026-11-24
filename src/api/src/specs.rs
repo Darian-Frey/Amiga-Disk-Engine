@@ -20,6 +20,9 @@
 //! run on 1.3; it may need far more than 2.0, and nothing here would know.
 
 use ade_block::Geometry;
+use ade_container::bytes::ByteSource;
+
+use crate::input::pieces;
 
 /// One thing that can be said about the disk, and why.
 #[derive(Debug, Clone)]
@@ -129,9 +132,15 @@ impl Specs {
         ])
     }
 
+    /// [`Self::of`] an image already open.
+    #[must_use]
+    pub fn of_image(image: &crate::Image) -> Self {
+        Self::of(image, &ade_container::bytes::Flat(image.source()))
+    }
+
     /// Read what `bytes` will admit to, using `image` for its structure.
     #[must_use]
-    pub fn of(image: &crate::Image, bytes: &[u8]) -> Self {
+    pub fn of(image: &crate::Image, bytes: &dyn ByteSource) -> Self {
         let mut specs = Self::default();
         specs.media(image.geometry());
         specs.storage(image);
@@ -186,8 +195,11 @@ impl Specs {
     }
 
     /// How it starts, which decides whether an OS disk is needed at all.
-    fn boot(&mut self, bytes: &[u8]) {
-        let Some(head) = bytes.get(..4) else { return };
+    fn boot(&mut self, bytes: &dyn ByteSource) {
+        let mut head = [0u8; 4];
+        if !bytes.read_at(0, &mut head) {
+            return;
+        }
         let (what, because) = if head.starts_with(b"DOS") {
             (
                 "Starts through AmigaDOS, so it needs a Kickstart that mounts the \
@@ -249,13 +261,25 @@ impl Specs {
     }
 
     /// Libraries that place a floor under the Kickstart version.
-    fn libraries(&mut self, bytes: &[u8]) {
-        let mut found: Vec<String> = Vec::new();
-        for name in RELEASE_2_LIBRARIES {
-            if contains_name(bytes, name.as_bytes()) {
-                found.push(name.to_owned());
+    fn libraries(&mut self, bytes: &dyn ByteSource) {
+        let longest = RELEASE_2_LIBRARIES.iter().map(|n| n.len()).max();
+        let mut seen = [false; RELEASE_2_LIBRARIES.len()];
+        // The byte before a piece, which decides whether a name at its very
+        // start is one.
+        let mut before: Option<u8> = None;
+        pieces(bytes, 512, longest.unwrap_or(0), |piece, _, own| {
+            for (name, seen) in RELEASE_2_LIBRARIES.iter().zip(seen.iter_mut()) {
+                *seen = *seen || contains_name(piece, name.as_bytes(), before);
             }
-        }
+            before = own.checked_sub(1).and_then(|i| piece.get(i)).copied();
+            !seen.iter().all(|s| *s)
+        });
+        let found: Vec<String> = RELEASE_2_LIBRARIES
+            .iter()
+            .zip(seen)
+            .filter(|(_, seen)| *seen)
+            .map(|(name, _)| (*name).to_owned())
+            .collect();
         if found.is_empty() {
             return;
         }
@@ -273,7 +297,7 @@ impl Specs {
 /// another string. Measured: without this, a scan of 400 corpus images reported
 /// `udos.library`, `ugraphics.library` and `uintuition.library` — none of which
 /// exists. They were the real names with whatever byte preceded them.
-fn contains_name(haystack: &[u8], needle: &[u8]) -> bool {
+fn contains_name(haystack: &[u8], needle: &[u8], before: Option<u8>) -> bool {
     let Some(last) = haystack.len().checked_sub(needle.len()) else {
         return false;
     };
@@ -281,9 +305,10 @@ fn contains_name(haystack: &[u8], needle: &[u8]) -> bool {
         if haystack.get(at..at.saturating_add(needle.len())) != Some(needle) {
             return false;
         }
-        at == 0
-            || !haystack
-                .get(at.saturating_sub(1))
-                .is_some_and(|b| b.is_ascii_alphanumeric() || *b == b'_' || *b == b'.')
+        let previous = match at.checked_sub(1) {
+            Some(at) => haystack.get(at).copied(),
+            None => before,
+        };
+        !previous.is_some_and(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'.')
     })
 }
